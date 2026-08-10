@@ -35,7 +35,7 @@ description: config.toml を介した Media Sort の詳細な手動構成手順�
 - **`last_selected_media`** (文字列/null): 再開するメディアファイルの絶対パス。自動的に記録されます。
 - **`animate_gifs`** (真偽値): プレビューとグリッドサムネイルの両方でGIF画像をアニメーション表示するか制御します。（デフォルト: `true`）
 - **`video_hardware_decoding`** (真偽値): ハードウェア動画デコード（`hwdec=auto-copy`）を有効にします。（デフォルト: `true`）
-- **`video_zero_copy`** (真偽値): WindowsおよびLinuxにおいて、`libmpv` (OpenGL) と `wgpu` (Vulkan/DX12) 間の直接ゼロコピーGPUメモリ共有を有効にします。（デフォルト: `true`）
+- **`video_zero_copy`** (真偽値): WindowsおよびLinuxにおいて、`libmpv` (OpenGL) と `wgpu` (Vulkan/DX12) 間の直接ゼロコピーGPUメモリ共有を有効にします。（デフォルト: Windows/Linuxでは`true`、macOSでは常に`false` — そこにはまだインターオペ実装がありません）
 - **`folder_tree_width`** (数値): 左側のナビゲーションパネルの幅（ピクセル単位）。（デフォルト: `240`）
 - **`check_for_updates_on_startup`** (真偽値、Windows/macOSパッケージ版のみ): 起動時に自動的にアップデートを確認するかどうか。(デフォルト: `true`)
 - **`install_prerelease_builds`** (真偽値、Windows/macOSパッケージ版のみ): アップデート確認の際に開発版（アルファ/ベータ版など）を含めるかどうか。(デフォルト: `false`)

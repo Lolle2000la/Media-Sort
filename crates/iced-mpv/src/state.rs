@@ -1,7 +1,19 @@
+use mpv_utils::gl_interop::SharedGpuFrameHandle;
 use mpv_utils::{Rotation, VideoCommand, VideoEvent as WorkerEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// A zero-copy GPU frame referenced by [`VideoEvent::FrameReady`]-equivalent
+/// worker event `GpuFrameReady`: the pixel data lives in a GPU buffer (DMA-BUF)
+/// that `handle` references, rendered into worker ring `slot`. The consumer
+/// must send `VideoCommand::ReleaseSlot(slot)` once it has finished sampling
+/// so the worker can reuse the buffer.
+#[derive(Debug, Clone)]
+pub struct ZeroCopyFrame {
+    pub slot: u32,
+    pub handle: SharedGpuFrameHandle,
+}
 
 /// An opaque handle to the video worker's command channel.
 ///
@@ -79,9 +91,14 @@ pub enum VideoEvent {
 pub struct VideoState {
     sender: Option<PlayerHandle>,
     rgba: Option<Arc<Vec<u8>>>,
+    /// The most recent zero-copy GPU frame (Linux), when the worker uses the
+    /// GPU render path.
+    gpu_frame: Option<ZeroCopyFrame>,
     width: u32,
     height: u32,
     rotation: Rotation,
+    /// Whether the worker confirmed the zero-copy GPU path is active (Linux).
+    gpu_active: bool,
     position: f64,
     duration: f64,
     volume: f64,
@@ -98,6 +115,8 @@ impl Default for VideoState {
         Self {
             sender: None,
             rgba: None,
+            gpu_frame: None,
+            gpu_active: false,
             width: 0,
             height: 0,
             rotation: Rotation::R0,
@@ -130,6 +149,19 @@ impl VideoState {
     /// The last rendered frame as raw RGBA, if any.
     pub fn rgba(&self) -> Option<&Arc<Vec<u8>>> {
         self.rgba.as_ref()
+    }
+
+    /// The most recent zero-copy GPU frame, when the worker uses the GPU
+    /// render path (Linux). The shader imports the referenced DMA-BUF and
+    /// must release its slot via [`VideoCommand::ReleaseSlot`] when done.
+    pub fn gpu_frame(&self) -> Option<&ZeroCopyFrame> {
+        self.gpu_frame.as_ref()
+    }
+
+    /// Whether the worker reported the zero-copy GPU path is active. Only
+    /// then is it safe to uncap the render size (see `app::video_subscription`).
+    pub fn gpu_active(&self) -> bool {
+        self.gpu_active
     }
 
     /// The width of the last rendered frame (unrotated).
@@ -215,7 +247,15 @@ impl VideoState {
             PlayerMessage::Ready(handle) => {
                 self.sender = Some(handle);
                 if let Some(path) = &self.selected_path {
+                    // A worker restart (e.g. a settings toggle changing the
+                    // subscription identity) starts playback at 0:00; resume
+                    // from the last reported position.
+                    let resume = self.position;
                     self.load(path.clone());
+                    if resume > 0.0 {
+                        self.seek_position = Some(resume);
+                        self.send(VideoCommand::SeekAbsolute(resume));
+                    }
                 }
                 None
             }
@@ -298,6 +338,45 @@ impl VideoState {
                     None
                 }
             }
+            WorkerEvent::GpuFrameReady {
+                path,
+                slot,
+                width,
+                height,
+                rotation,
+                handle,
+            } => {
+                // Only commit frames that belong to the currently selected
+                // video, and only after the worker confirmed readiness (same
+                // guard as the software FrameReady above).
+                if self.selected_path.as_deref() == Some(path.as_path()) && self.ready {
+                    // The previous GPU slot is no longer displayed: release it
+                    // so the worker can reuse the buffer. The worker only
+                    // renders into released slots and `glFinish`es before
+                    // handing each frame out, so re-rendering a released slot
+                    // can never corrupt a frame the GUI is still sampling.
+                    let first_frame = self.gpu_frame.is_none() && self.rgba.is_none();
+                    if let Some(prev) = self.gpu_frame.take() {
+                        self.send(VideoCommand::ReleaseSlot(prev.slot));
+                    }
+                    self.gpu_frame = Some(ZeroCopyFrame {
+                        slot: *slot,
+                        handle: handle.clone(),
+                    });
+                    self.width = *width;
+                    self.height = *height;
+                    self.rotation = *rotation;
+                    // The GPU frame replaces any software frame.
+                    self.rgba = None;
+                    if first_frame {
+                        Some(VideoEvent::FrameReady { path: path.clone() })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
             WorkerEvent::PlaybackProgress { position, duration } => {
                 self.position = *position;
                 self.duration = *duration;
@@ -310,6 +389,10 @@ impl VideoState {
                 {
                     self.seek_position = None;
                 }
+                None
+            }
+            WorkerEvent::GpuReady(active) => {
+                self.gpu_active = *active;
                 None
             }
             WorkerEvent::Muted(muted) => {
@@ -352,6 +435,9 @@ impl VideoState {
     /// previous video's time or pause state until the first
     /// [`WorkerEvent::PlaybackProgress`] arrives.
     pub fn load(&mut self, path: PathBuf) {
+        if let Some(prev) = self.gpu_frame.take() {
+            self.send(VideoCommand::ReleaseSlot(prev.slot));
+        }
         self.selected_path = Some(path.clone());
         self.rgba = None;
         self.ready = false;
@@ -423,6 +509,9 @@ impl VideoState {
     /// the frame. Prefer [`VideoState::select`] over calling this directly.
     pub fn reset(&mut self) {
         self.deactivate();
+        if let Some(prev) = self.gpu_frame.take() {
+            self.send(VideoCommand::ReleaseSlot(prev.slot));
+        }
         self.rgba = None;
         self.width = 0;
         self.height = 0;
@@ -467,6 +556,75 @@ mod tests {
             rotation,
             rgba: Arc::new(vec![0u8; 640 * 360 * 4]),
         }
+    }
+
+    fn gpu_frame_event(path: &str, slot: u32) -> WorkerEvent {
+        WorkerEvent::GpuFrameReady {
+            path: PathBuf::from(path),
+            slot,
+            width: 640,
+            height: 360,
+            rotation: Rotation::R0,
+            handle: SharedGpuFrameHandle::SoftwareFallback,
+        }
+    }
+
+    #[test]
+    fn test_gpu_frame_commits_and_releases_previous_slot() {
+        let (msg, mut rx) = testing::ready(16);
+        let mut state = VideoState::new();
+        let _ = state.update(msg);
+        state.load(PathBuf::from("/videos/one.mp4"));
+        let _ = state.update(PlayerMessage::Event(progress_event(0.0, 10.0)));
+
+        // First GPU frame commits and does not release anything yet.
+        let ev = state.update(PlayerMessage::Event(gpu_frame_event("/videos/one.mp4", 0)));
+        assert!(matches!(ev, Some(VideoEvent::FrameReady { .. })));
+        assert!(state.gpu_frame().is_some());
+        assert_eq!(state.gpu_frame().map(|f| f.slot), Some(0));
+        assert_eq!(state.width(), 640);
+
+        // Second GPU frame on a new slot releases slot 0.
+        let ev = state.update(PlayerMessage::Event(gpu_frame_event("/videos/one.mp4", 1)));
+        assert_eq!(ev, None);
+        assert_eq!(state.gpu_frame().map(|f| f.slot), Some(1));
+        // The ReleaseSlot(0) command must have been sent (ahead of any
+        // earlier queued commands).
+        let drained: Vec<VideoCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            drained
+                .iter()
+                .any(|c| matches!(c, VideoCommand::ReleaseSlot(s) if *s == 0)),
+            "expected ReleaseSlot(0) among {drained:?}"
+        );
+    }
+
+    #[test]
+    fn test_reset_releases_gpu_slot() {
+        let (msg, mut rx) = testing::ready(16);
+        let mut state = VideoState::new();
+        let _ = state.update(msg);
+        state.load(PathBuf::from("/videos/one.mp4"));
+        let _ = state.update(PlayerMessage::Event(progress_event(0.0, 10.0)));
+        let _ = state.update(PlayerMessage::Event(gpu_frame_event("/videos/one.mp4", 2)));
+
+        state.reset();
+        assert!(state.gpu_frame().is_none());
+        let drained: Vec<VideoCommand> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            drained
+                .iter()
+                .any(|c| matches!(c, VideoCommand::ReleaseSlot(s) if *s == 2)),
+            "expected ReleaseSlot(2) among {drained:?}"
+        );
+    }
+
+    #[test]
+    fn test_gpu_ready_sets_gpu_active() {
+        let mut state = VideoState::new();
+        assert!(!state.gpu_active());
+        let _ = state.update(PlayerMessage::Event(WorkerEvent::GpuReady(true)));
+        assert!(state.gpu_active());
     }
 
     #[test]

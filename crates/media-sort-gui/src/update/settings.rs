@@ -144,6 +144,18 @@ pub fn handle_settings_loaded(
     match *result {
         Ok(settings) => {
             state.settings = settings;
+            #[cfg(target_os = "macos")]
+            {
+                // Zero-copy GPU interop is not implemented on macOS. Force it
+                // off at the data layer (see settings/general.rs and
+                // app::video_subscription) so a config written on another
+                // platform cannot enable a path that would silently fall
+                // back to software rendering.
+                if state.settings.general.video_zero_copy {
+                    state.settings.general.video_zero_copy = false;
+                    state.settings.mark_dirty();
+                }
+            }
             #[cfg(target_os = "windows")]
             {
                 if state.settings.general.integration_with_windows

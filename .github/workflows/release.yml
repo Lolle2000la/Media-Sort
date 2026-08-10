@@ -76,7 +76,7 @@ jobs:
           retry_wait_seconds: 10
           command: |
             sudo apt-get update
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev squashfs-tools
+            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev libgbm-dev squashfs-tools
             if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
               sudo apt-get install -y nasm
             fi
@@ -128,6 +128,9 @@ jobs:
       - name: Build Standalone Binary
         env:
           LIBRARY_PATH: ${{ startsWith(matrix.os, 'macos') && format('{0}/lib', matrix.brew_prefix) || '' }}
+          # The mpv-utils build script reads this to authenticate its
+          # mpv-winbuild release API query (unauthenticated rate limit is 60/h).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           rustup target add ${{ matrix.target }}
           FEATURES="velopack"

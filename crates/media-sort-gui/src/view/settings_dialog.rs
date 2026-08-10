@@ -423,7 +423,7 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
 
             #[cfg(target_os = "macos")]
             let video_zero_copy_element: Element<'_, Message> = column![
-                checkbox(false)
+                checkbox(state.settings.general.video_zero_copy)
                     .label(state.l10n.tr("settings-video-zero-copy"))
                     .size(16),
                 text(state.l10n.tr("settings-video-zero-copy-macos-notice"))

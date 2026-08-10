@@ -30,7 +30,7 @@ settings-language = 言語
 settings-video-playback = 動画再生
 settings-video-hwdec = ハードウェア動画デコードを有効にする
 settings-video-zero-copy = ゼロコピーGPUパイプラインを有効にする
-settings-video-zero-copy-macos-notice = macOSではゼロコピーGPUパイプラインを利用できません（libmpvはOpenGLを必要とし、macOSはMetalを使用します）。ソフトウェアRGBAパイプラインが有効です。
+settings-video-zero-copy-macos-notice = macOSではゼロコピーGPUパイプラインを利用できません（macOS向けのwgpuインターオペ実装はまだありません）。ソフトウェアRGBAパイプラインが有効です。
 
 # Key bindings
 keybindings-restore-defaults = デフォルトのキーバインドを復元

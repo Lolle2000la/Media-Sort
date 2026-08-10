@@ -61,10 +61,20 @@ fn base_subscription() -> Subscription<Message> {
 
 fn video_subscription(state: &AppState) -> Subscription<Message> {
     let hwdec = state.settings.general.video_hardware_decoding;
+    // Zero-copy GPU interop is not implemented on macOS: force it off at the
+    // data layer so the worker never requests it (see also
+    // settings/general.rs and update::settings::handle_settings_loaded).
+    #[cfg(not(target_os = "macos"))]
     let zero_copy = state.settings.general.video_zero_copy;
-    // When both zero-copy and hwdec are active, frames stay on the GPU and
-    // never touch the CPU, so there is no benefit in capping the render size.
-    let (max_w, max_h) = if hwdec && zero_copy {
+    #[cfg(target_os = "macos")]
+    let zero_copy = false;
+    // The worker reports whether the zero-copy GPU path is actually active
+    // (`VideoState::gpu_active`, set by WorkerEvent::GpuReady). Only then is
+    // uncapping safe — rendering uncapped natively via the software path
+    // would be needlessly expensive. The cap is part of the subscription
+    // identity, so a capability change restarts the worker at the new cap.
+    let gpu_active = state.video.gpu_active();
+    let (max_w, max_h) = if hwdec && zero_copy && gpu_active {
         (None, None)
     } else {
         (Some(960), Some(540))

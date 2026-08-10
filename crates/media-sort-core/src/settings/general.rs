@@ -35,11 +35,18 @@ pub struct GeneralSettings {
     #[serde(default = "default_folder_tree_width")]
     pub folder_tree_width: u16,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_video_zero_copy")]
     pub video_zero_copy: bool,
 
     #[serde(default = "default_true")]
     pub video_hardware_decoding: bool,
+}
+
+/// Zero-copy GPU interop is only implemented on Windows and Linux; on macOS
+/// the setting is always forced to `false` (see also `app::video_subscription`
+/// and `update::settings::handle_settings_loaded`).
+fn default_video_zero_copy() -> bool {
+    !cfg!(target_os = "macos")
 }
 
 impl Default for GeneralSettings {
@@ -56,7 +63,7 @@ impl Default for GeneralSettings {
             last_selected_media: None,
             locale: None,
             folder_tree_width: default_folder_tree_width(),
-            video_zero_copy: true,
+            video_zero_copy: default_video_zero_copy(),
             video_hardware_decoding: true,
         }
     }

@@ -16,6 +16,7 @@
 //! this crate; `mpv-utils` is also usable directly from non-GUI code (tests,
 //! benchmarks) without pulling in a UI framework.
 
+pub mod gl_context;
 pub mod gl_interop;
 pub mod mpv_context;
 pub mod rotation;

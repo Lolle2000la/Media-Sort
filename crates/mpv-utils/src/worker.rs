@@ -52,6 +52,9 @@ pub enum VideoCommand {
     /// Pause and release the current file handle so OS-level operations
     /// (rename/move/delete) are not blocked.
     Deactivate,
+    /// The GUI is done sampling the zero-copy GPU frame rendered into the
+    /// given ring slot; the worker may render the next frame into it.
+    ReleaseSlot(u32),
 }
 
 /// Events emitted by the background video worker.
@@ -71,10 +74,26 @@ pub enum VideoEvent {
         rotation: Rotation,
         rgba: std::sync::Arc<Vec<u8>>,
     },
+    /// A zero-copy GPU frame: the pixels live in a GPU buffer (DMA-BUF on
+    /// Linux) that `handle` references. The GUI imports it into wgpu and must
+    /// send [`VideoCommand::ReleaseSlot`] for `slot` once it has finished
+    /// sampling it, so the worker can reuse the buffer.
+    GpuFrameReady {
+        path: PathBuf,
+        slot: u32,
+        width: u32,
+        height: u32,
+        rotation: Rotation,
+        handle: crate::gl_interop::SharedGpuFrameHandle,
+    },
     PlaybackProgress {
         position: f64,
         duration: f64,
     },
+    /// Emitted once at worker start: `true` when the zero-copy GPU render path
+    /// is active (Linux), `false` when falling back to software rendering. The
+    /// GUI uses it to decide whether it is safe to uncap the render size.
+    GpuReady(bool),
     Muted(bool),
     Volume(f64),
     Paused(bool),
@@ -253,6 +272,28 @@ async fn run_video_worker(
         }
     };
 
+    // Zero-copy GPU rendering (Linux): the worker swaps the software context
+    // for an offscreen EGL context and keeps a GBM device + a small ring of
+    // DMA-BUF-backed FBOs. When the environment lacks EGL/GBM (or mpv rejects
+    // the GL render API), we keep the software path — video playback must
+    // never be hard-required on a GPU.
+    #[cfg(target_os = "linux")]
+    let mut gpu: Option<GpuGl> = if config.enable_zero_copy {
+        match GpuGl::try_create(&mut player, config.enable_hwdec) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                tracing::warn!("zero-copy GPU path unavailable ({e}); using software rendering");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let gpu: Option<GpuGlDummy> = None;
+
+    let _ = event_tx.try_send(VideoEvent::GpuReady(gpu.is_some())).ok();
+
     let (wakeup_tx, mut wakeup_rx) = tokio::sync::mpsc::channel(64);
     // SAFETY: player is a newly created, valid MpvContext instance, and the
     // callback context is dropped when player is dropped at the end of this loop/worker.
@@ -390,6 +431,15 @@ async fn run_video_worker(
                         }
                         is_active = false;
                     }
+                    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+                    VideoCommand::ReleaseSlot(slot) => {
+                        #[cfg(target_os = "linux")]
+                        if let Some(gpu) = &mut gpu
+                            && let Some(slot) = gpu.slots.get_mut(slot as usize)
+                        {
+                            slot.in_flight = false;
+                        }
+                    }
                 }
             }
 
@@ -482,6 +532,27 @@ async fn run_video_worker(
                                 );
                                 break;
                             };
+
+                            // Zero-copy GPU path: render into a DMA-BUF-backed
+                            // FBO and hand the exported fd to the GUI. Skips
+                            // the frame (software path below) when no ring
+                            // slot is free — the GUI is still sampling — or
+                            // when the GPU render fails.
+                            #[cfg(target_os = "linux")]
+                            if let Some(gpu) = &mut gpu
+                                && gpu
+                                    .render_frame(
+                                        &mut player,
+                                        render_unrot_w as u32,
+                                        render_unrot_h as u32,
+                                        rotation,
+                                        &current_video_path,
+                                        &event_tx,
+                                    )
+                                    .is_ok()
+                            {
+                                continue;
+                            }
 
                             // Find a free buffer in the pool (where we are the sole owner)
                             let free_buffer = pool
@@ -597,10 +668,123 @@ async fn run_video_worker(
     }
 }
 
+/// One DMA-BUF-backed FBO in the zero-copy GPU ring. The `bo` keeps the
+/// buffer alive while the GL texture/FBO reference it.
+#[cfg(target_os = "linux")]
+struct GpuSlot {
+    bo: crate::gl_context::GbmBo,
+    fbo: u32,
+    /// `true` while the GUI holds a reference to the frame rendered here;
+    /// the worker must not render into the slot until released.
+    in_flight: bool,
+}
+
+/// The worker-side zero-copy GPU state: a GBM device plus a ring of 3
+/// DMA-BUF-backed FBOs that mpv renders into. The exported fd of the just-
+/// rendered frame is handed to the GUI via [`VideoEvent::GpuFrameReady`];
+/// the slot is reusable only after [`VideoCommand::ReleaseSlot`].
+#[cfg(target_os = "linux")]
+struct GpuGl {
+    gbm: crate::gl_context::GbmDevice,
+    slots: Vec<GpuSlot>,
+    render_w: u32,
+    render_h: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl GpuGl {
+    /// Switches `player` to the GL render path and sets up the GBM device.
+    /// On failure `player` is left untouched (software path).
+    fn try_create(player: &mut MpvContext, hwdec: bool) -> Result<Self, String> {
+        let gl = crate::gl_context::GlContext::new()?;
+        let gbm = crate::gl_context::GbmDevice::new()?;
+        let gl_player = MpvContext::new_gl(gl, hwdec)
+            .map_err(|e| format!("mpv GL render context creation failed: {e}"))?;
+        *player = gl_player;
+        Ok(Self {
+            gbm,
+            slots: Vec::new(),
+            render_w: 0,
+            render_h: 0,
+        })
+    }
+
+    /// Renders the current mpv frame into a free ring slot and emits a
+    /// [`VideoEvent::GpuFrameReady`]. Returns `Err` (caller falls back to
+    /// software) when the size changes require re-allocation that fails, no
+    /// slot is free, or mpv rejects the render.
+    fn render_frame(
+        &mut self,
+        player: &mut MpvContext,
+        w: u32,
+        h: u32,
+        rotation: Rotation,
+        path: &std::path::Path,
+        event_tx: &tokio::sync::mpsc::Sender<VideoEvent>,
+    ) -> Result<(), String> {
+        if w != self.render_w || h != self.render_h {
+            self.ensure_slots(player, w, h)?;
+            self.render_w = w;
+            self.render_h = h;
+        }
+        let Some(free_idx) = self.slots.iter().position(|s| !s.in_flight) else {
+            return Err("no free GPU slot (GUI is behind)".to_string());
+        };
+        let slot = &mut self.slots[free_idx];
+        player
+            .render_gl_frame(slot.fbo, w as i32, h as i32)
+            .map_err(|e| e.to_string())?;
+        // A fresh fd per frame: ownership transfers to the GUI's import.
+        let fd = slot.bo.fd()?;
+        let stride = slot.bo.stride();
+        slot.in_flight = true;
+        let handle = crate::gl_interop::SharedGpuFrameHandle::DmaBuf(
+            crate::gl_interop::DmaBufHandle::new(fd, w, h, stride, 0),
+        );
+        let _ = event_tx.try_send(VideoEvent::GpuFrameReady {
+            path: path.to_path_buf(),
+            slot: free_idx as u32,
+            width: w,
+            height: h,
+            rotation,
+            handle,
+        });
+        Ok(())
+    }
+
+    /// (Re)creates the ring of 3 FBO-backed buffers at the given size.
+    fn ensure_slots(&mut self, player: &mut MpvContext, w: u32, h: u32) -> Result<(), String> {
+        let gl = player
+            .gl_mut()
+            .ok_or_else(|| "no GL context on player".to_string())?;
+        self.slots.clear();
+        for _ in 0..3 {
+            let bo = self.gbm.allocate(w, h)?;
+            let fd = bo.fd()?;
+            let (_tex, fbo) = gl.texture_from_dmabuf(
+                fd,
+                w,
+                h,
+                bo.stride(),
+                crate::gl_context::DRM_FORMAT_ABGR8888,
+            )?;
+            self.slots.push(GpuSlot {
+                bo,
+                fbo,
+                in_flight: false,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Placeholder for non-Linux builds (zero-copy is Linux-only for now).
+#[cfg(not(target_os = "linux"))]
+struct GpuGlDummy;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_rotate_rgba_0() {
         let src = vec![255, 0, 0, 255, 0, 255, 0, 255]; // 2x1: Red, Green

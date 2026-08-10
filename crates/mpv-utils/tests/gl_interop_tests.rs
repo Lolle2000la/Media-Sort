@@ -29,33 +29,27 @@ fn test_shared_gpu_frame_handle_software_fallback() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_shared_gpu_frame_handle_dmabuf_variant() {
-    let handle = SharedGpuFrameHandle::DmaBuf {
-        fd: 42,
-        width: 1280,
-        height: 720,
-        drm_format: 0x34325241,
-        stride: 5120,
-        offset: 0,
-    };
+    use mpv_utils::gl_interop::DmaBufHandle;
 
-    if let SharedGpuFrameHandle::DmaBuf {
-        fd,
-        width,
-        height,
-        drm_format,
-        stride,
-        offset,
-    } = handle
-    {
-        assert_eq!(fd, 42);
-        assert_eq!(width, 1280);
-        assert_eq!(height, 720);
-        assert_eq!(drm_format, 0x34325241);
-        assert_eq!(stride, 5120);
-        assert_eq!(offset, 0);
-    } else {
+    // A real fd (memfd) so dropping the handle actually closes it.
+    let fd = unsafe { libc::memfd_create(c"test-frame".as_ptr(), 0) };
+    assert!(fd >= 0, "memfd_create failed");
+    let handle = SharedGpuFrameHandle::DmaBuf(DmaBufHandle::new(fd, 1280, 720, 5120, 0));
+
+    let SharedGpuFrameHandle::DmaBuf(h) = &handle else {
         panic!("expected DmaBuf handle");
-    }
+    };
+    assert_eq!(h.width(), 1280);
+    assert_eq!(h.height(), 720);
+    assert_eq!(h.stride(), 5120);
+    assert_eq!(h.offset(), 0);
+    assert!(handle.as_fd().is_some());
+
+    // Consuming the handle transfers the fd without closing it.
+    let consumed = handle.into_fd().expect("fd present");
+    assert!(consumed >= 0);
+    // SAFETY: close the transferred fd.
+    unsafe { libc::close(consumed) };
 }
 
 #[test]

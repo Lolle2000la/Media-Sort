@@ -72,6 +72,10 @@ pub struct VideoPipeline {
     bind_group: Option<wgpu::BindGroup>,
     width: u32,
     height: u32,
+    /// The imported zero-copy texture + the worker slot it came from; cached
+    /// across frames so each slot is imported once (until it changes).
+    zero_copy_texture: Option<std::sync::Arc<wgpu::Texture>>,
+    zero_copy_slot: Option<u32>,
 }
 
 impl Pipeline for VideoPipeline {
@@ -177,6 +181,8 @@ impl Pipeline for VideoPipeline {
             bind_group: None,
             width: 0,
             height: 0,
+            zero_copy_texture: None,
+            zero_copy_slot: None,
         }
     }
 }
@@ -220,6 +226,10 @@ pub struct VideoPrimitive {
     pub rotation: Rotation,
     pub rgba: Option<std::sync::Arc<Vec<u8>>>,
     pub zero_copy_texture: Option<std::sync::Arc<wgpu::Texture>>,
+    /// A zero-copy GPU frame referenced by a DMA-BUF handle; imported into a
+    /// wgpu texture during `prepare` (which has the device). Mutually
+    /// exclusive with `rgba`.
+    pub zero_copy: Option<crate::state::ZeroCopyFrame>,
 }
 
 impl Primitive for VideoPrimitive {
@@ -258,12 +268,20 @@ impl Primitive for VideoPrimitive {
             }
         }
 
-        let (t_bl, t_br, t_tl, t_tr) = match self.rotation {
+        let (mut t_bl, mut t_br, mut t_tl, mut t_tr) = match self.rotation {
             Rotation::R90 => ([1.0, 1.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]),
             Rotation::R180 => ([1.0, 0.0], [0.0, 0.0], [1.0, 1.0], [0.0, 1.0]),
             Rotation::R270 => ([0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]),
             Rotation::R0 => ([0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]),
         };
+        // GL FBOs are bottom-up (row 0 is the image's bottom), while the
+        // software path uploads top-down data. Flip V so the zero-copy texture
+        // samples right-side up. Composing the flip with the rotation above.
+        if self.zero_copy.is_some() || self.zero_copy_texture.is_some() {
+            for tc in [&mut t_bl, &mut t_br, &mut t_tl, &mut t_tr] {
+                tc[1] = 1.0 - tc[1];
+            }
+        }
 
         let vertices = [
             Vertex {
@@ -285,6 +303,74 @@ impl Primitive for VideoPrimitive {
         ];
 
         queue.write_buffer(&pipeline.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+
+        // Zero-copy GPU path: import (once per slot) and bind the DMA-BUF
+        // texture. The import needs the device, so it happens here in prepare.
+        if let Some(zc) = &self.zero_copy {
+            if pipeline.zero_copy_slot != Some(zc.slot) {
+                // New slot: release the previous imported texture and import
+                // the new DMA-BUF. The fd ownership transfers to the import.
+                pipeline.zero_copy_texture = None;
+                #[cfg(target_os = "linux")]
+                {
+                    let fd = match zc.handle.clone().into_fd() {
+                        Some(fd) => fd,
+                        None => return,
+                    };
+                    let (stride, drm_format) = match &zc.handle {
+                        mpv_utils::gl_interop::SharedGpuFrameHandle::DmaBuf(h) => {
+                            (h.stride(), mpv_utils::gl_context::DRM_FORMAT_ABGR8888)
+                        }
+                        _ => return,
+                    };
+                    // SAFETY: fd is a valid dma-buf produced by the worker.
+                    let imported = unsafe {
+                        crate::gl_import::import_dmabuf_to_wgpu(
+                            device,
+                            fd,
+                            self.width,
+                            self.height,
+                            drm_format,
+                            stride,
+                        )
+                    };
+                    match imported {
+                        Ok(texture) => {
+                            pipeline.zero_copy_texture = Some(std::sync::Arc::new(texture));
+                            pipeline.zero_copy_slot = Some(zc.slot);
+                        }
+                        Err(e) => {
+                            tracing::error!("zero-copy dma-buf import failed: {e}");
+                            return;
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                return;
+            }
+
+            if let Some(texture) = &pipeline.zero_copy_texture {
+                let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mpv_zero_copy_bind_group"),
+                    layout: &pipeline.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                        },
+                    ],
+                });
+                pipeline.bind_group = Some(bind_group);
+                pipeline.width = self.width;
+                pipeline.height = self.height;
+            }
+            return;
+        }
 
         if let Some(zero_copy_tex) = &self.zero_copy_texture {
             let texture_view = zero_copy_tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -458,6 +544,7 @@ where
         rotation,
         rgba,
         zero_copy_texture: None,
+        zero_copy: None,
     }))
     .width(Length::Fill)
     .height(Length::Fill)
@@ -465,11 +552,16 @@ where
 }
 
 /// A zero-copy video frame element using imported GPU texture memory directly.
+///
+/// `frame` carries the DMA-BUF handle plus the worker slot it came from; the
+/// texture is imported during `prepare` (which has the wgpu device). Prefer
+/// [`video_player_view`](crate::video_player_view) which picks the path based
+/// on the state.
 pub fn video_zero_copy_shader_view<'a, Message: 'a, Theme: 'a, Renderer>(
     width: u32,
     height: u32,
     rotation: Rotation,
-    texture: Option<std::sync::Arc<wgpu::Texture>>,
+    frame: Option<crate::state::ZeroCopyFrame>,
 ) -> Element<'a, Message, Theme, Renderer>
 where
     Renderer: iced_wgpu::primitive::Renderer + 'a,
@@ -479,7 +571,8 @@ where
         height,
         rotation,
         rgba: None,
-        zero_copy_texture: texture,
+        zero_copy_texture: None,
+        zero_copy: frame,
     }))
     .width(Length::Fill)
     .height(Length::Fill)

@@ -2805,6 +2805,7 @@ dependencies = [
  "bytemuck",
  "iced",
  "iced_wgpu",
+ "libc",
  "lucide-icons",
  "mpv-utils",
  "tokio",
@@ -3942,10 +3943,13 @@ dependencies = [
 name = "mpv-utils"
 version = "3.0.0-alpha.13"
 dependencies = [
+ "ash",
  "kamadak-exif",
+ "libc",
  "libmpv-sys",
  "mp4ameta",
  "rayon",
+ "serde_json",
  "tokio",
  "tracing",
 ]

@@ -63,7 +63,7 @@ jobs:
           retry_wait_seconds: 10
           command: |
             sudo apt-get update
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
+            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev libgbm-dev nasm
 
       - name: Install System Dependencies (macOS)
         if: matrix.os == 'macos-latest'
@@ -100,6 +100,9 @@ jobs:
       - name: Run Clippy Lints
         env:
           LIBRARY_PATH: ${{ matrix.os == 'macos-latest' && '/opt/homebrew/lib' || '' }}
+          # The mpv-utils build script reads this to authenticate its
+          # mpv-winbuild release API query (unauthenticated rate limit is 60/h).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo clippy --workspace --all-targets ${{ matrix.os == 'windows-latest' && '--features vendor-windows' || '' }} -- -D warnings
 
       - name: Run Workspace Tests
@@ -112,6 +115,8 @@ jobs:
 
       - name: Run Workspace Tests (Windows, excluding GUI)
         if: matrix.os == 'windows-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # NOTE: keep the default shell here. Under git-bash, /usr/bin precedes
         # the MSVC dirs in PATH and rustc invokes GNU coreutils' `link`
         # instead of MSVC link.exe.
@@ -119,6 +124,8 @@ jobs:
 
       - name: Run GUI Tests (Windows, serial)
         if: matrix.os == 'windows-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Serial + nocapture: native libs the GUI tests touch (trash-crate
         # COM, rodio/WASAPI) are suspects in a parallel access-violation
         # crash on headless runners; if it still crashes, nocapture names

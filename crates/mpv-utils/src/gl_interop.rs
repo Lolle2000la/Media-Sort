@@ -1,35 +1,128 @@
 //! OpenGL-to-`wgpu` zero-copy interop context setup and GPU handle export for `libmpv`.
 //!
-//! Provides [`create_gl_render_context`], offscreen OpenGL context management,
-//! and OS-level memory handle export ([`SharedGpuFrameHandle`]) for zero-copy
-//! video frame sharing with `wgpu`.
+//! Provides [`create_gl_render_context`] (the mpv OpenGL render-context
+//! creation used by the zero-copy worker path), [`render_gl_fbo`] and
+//! [`SharedGpuFrameHandle`] — the OS-level memory handle handed to the wgpu
+//! side.
+//!
+//! The Linux producer path lives in [`gl_context`](crate::gl_context) (EGL +
+//! GBM); this module only bridges mpv's render API to those resources.
 
 use libmpv_sys::*;
 use std::ffi::{CString, c_char, c_void};
 
 /// An OS-level GPU memory handle backing an OpenGL Framebuffer Object (FBO)
 /// rendered by `libmpv`.
-#[derive(Debug)]
+///
+/// The handle owns its resources (the DMA-BUF fd on Linux) and closes them on
+/// drop; the consumer transfers ownership via [`SharedGpuFrameHandle::into_fd`]
+/// when importing into wgpu.
+#[derive(Debug, Clone)]
 pub enum SharedGpuFrameHandle {
     /// Linux DMA-BUF exported file descriptor (`VK_EXT_external_memory_dma_buf`).
+    /// The buffer is `width×height` RGBA8 (`DRM_FORMAT_ABGR8888`).
     #[cfg(target_os = "linux")]
-    DmaBuf {
+    DmaBuf(DmaBufHandle),
+    /// Fallback indicator when hardware zero-copy interop is unavailable.
+    SoftwareFallback,
+}
+
+#[cfg(target_os = "linux")]
+impl SharedGpuFrameHandle {
+    /// The DMA-BUF file descriptor for the [`SharedGpuFrameHandle::DmaBuf`]
+    /// variant.
+    pub fn as_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        match self {
+            Self::DmaBuf(h) => Some(h.fd),
+            Self::SoftwareFallback => None,
+        }
+    }
+
+    /// Consumes the handle and returns its raw DMA-BUF fd. The caller owns
+    /// the fd afterwards (it is not closed by the handle).
+    pub fn into_fd(self) -> Option<std::os::unix::io::RawFd> {
+        match self {
+            Self::DmaBuf(h) => Some(h.into_fd()),
+            Self::SoftwareFallback => None,
+        }
+    }
+}
+
+/// A Linux DMA-BUF frame handle that closes its fd on drop.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct DmaBufHandle {
+    fd: std::os::unix::io::RawFd,
+    width: u32,
+    height: u32,
+    stride: u32,
+    offset: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl Clone for DmaBufHandle {
+    /// Duplicates the fd so every clone owns its own descriptor.
+    fn clone(&self) -> Self {
+        // SAFETY: fd is a valid descriptor; dup() is thread-safe.
+        let dup = unsafe { libc::dup(self.fd) };
+        assert!(dup >= 0, "dup() failed while cloning a dma-buf handle");
+        Self {
+            fd: dup,
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            offset: self.offset,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl DmaBufHandle {
+    pub fn new(
         fd: std::os::unix::io::RawFd,
         width: u32,
         height: u32,
-        drm_format: u32,
         stride: u32,
         offset: u32,
-    },
-    /// Windows Direct3D11 shared handle exported via `WGL_NV_DX_interop`.
-    #[cfg(windows)]
-    D3D11 {
-        handle: *mut c_void,
-        width: u32,
-        height: u32,
-    },
-    /// Fallback indicator when hardware zero-copy interop is unavailable.
-    SoftwareFallback,
+    ) -> Self {
+        Self {
+            fd,
+            width,
+            height,
+            stride,
+            offset,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn stride(&self) -> u32 {
+        self.stride
+    }
+
+    pub fn offset(&self) -> u32 {
+        self.offset
+    }
+
+    pub fn into_fd(self) -> std::os::unix::io::RawFd {
+        let fd = self.fd;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DmaBufHandle {
+    fn drop(&mut self) {
+        // SAFETY: fd is a valid file descriptor owned by this handle.
+        unsafe { libc::close(self.fd) };
+    }
 }
 
 unsafe impl Send for SharedGpuFrameHandle {}
@@ -100,7 +193,7 @@ pub unsafe fn render_gl_fbo(
     target: GlFboTarget,
 ) -> Result<(), crate::MpvError> {
     if render_ctx.is_null() {
-        return Err(crate::MpvError::RenderContextCreate(-1));
+        return Err(crate::MpvError::NullRenderContext);
     }
     let mut fbo = mpv_opengl_fbo {
         fbo: target.fbo_id as i32,
@@ -126,116 +219,4 @@ pub unsafe fn render_gl_fbo(
     } else {
         Ok(())
     }
-}
-
-/// EGL FFI bindings and DMA-BUF export definitions for Linux platforms.
-#[cfg(target_os = "linux")]
-pub mod egl_export {
-    use super::*;
-
-    pub type EGLDisplay = *mut c_void;
-    pub type EGLContext = *mut c_void;
-    pub type EGLImageKHR = *mut c_void;
-    pub type EGLClientBuffer = *mut c_void;
-    pub type EGLenum = u32;
-    pub type EGLBoolean = u32;
-    pub type EGLint = i32;
-
-    pub const EGL_GL_TEXTURE_2D_KHR: EGLenum = 0x30B1;
-    pub const EGL_TRUE: EGLBoolean = 1;
-
-    pub type PfnEglCreateImageKHR = unsafe extern "C" fn(
-        dpy: EGLDisplay,
-        ctx: EGLContext,
-        target: EGLenum,
-        buffer: EGLClientBuffer,
-        attrib_list: *const EGLint,
-    ) -> EGLImageKHR;
-
-    pub type PfnEglExportDMABUFImageMESA = unsafe extern "C" fn(
-        dpy: EGLDisplay,
-        image: EGLImageKHR,
-        fds: *mut i32,
-        strides: *mut i32,
-        offsets: *mut i32,
-    ) -> EGLBoolean;
-
-    pub type PfnEglDestroyImageKHR =
-        unsafe extern "C" fn(dpy: EGLDisplay, image: EGLImageKHR) -> EGLBoolean;
-
-    /// Exports an OpenGL texture backed by EGL to a DMA-BUF file descriptor.
-    ///
-    /// # Safety
-    ///
-    /// Requires valid EGL display/context pointers and EGL_MESA_image_dma_buf_export extension support.
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn export_gl_texture_to_dmabuf(
-        create_image: PfnEglCreateImageKHR,
-        export_dmabuf: PfnEglExportDMABUFImageMESA,
-        destroy_image: PfnEglDestroyImageKHR,
-        display: EGLDisplay,
-        context: EGLContext,
-        gl_texture_id: u32,
-        width: u32,
-        height: u32,
-        drm_format: u32,
-    ) -> Result<SharedGpuFrameHandle, crate::MpvError> {
-        let egl_image = unsafe {
-            create_image(
-                display,
-                context,
-                EGL_GL_TEXTURE_2D_KHR,
-                gl_texture_id as usize as EGLClientBuffer,
-                std::ptr::null(),
-            )
-        };
-
-        if egl_image.is_null() {
-            return Err(crate::MpvError::Other("eglCreateImageKHR failed".into()));
-        }
-
-        let mut fd: i32 = -1;
-        let mut stride: i32 = 0;
-        let mut offset: i32 = 0;
-
-        let res = unsafe { export_dmabuf(display, egl_image, &mut fd, &mut stride, &mut offset) };
-        unsafe { destroy_image(display, egl_image) };
-
-        if res != EGL_TRUE || fd < 0 {
-            return Err(crate::MpvError::Other(
-                "eglExportDMABUFImageMESA failed".into(),
-            ));
-        }
-
-        Ok(SharedGpuFrameHandle::DmaBuf {
-            fd,
-            width,
-            height,
-            drm_format,
-            stride: stride as u32,
-            offset: offset as u32,
-        })
-    }
-}
-
-/// WGL & Direct3D11 interop definitions for Windows platforms.
-#[cfg(windows)]
-pub mod wgl_export {
-    use super::*;
-
-    pub const WGL_ACCESS_WRITE_DISCARD_NV: u32 = 0x0002;
-    pub const GL_RENDERBUFFER: u32 = 0x8D41;
-
-    /// Shared handle container for Direct3D11 interop texture.
-    #[derive(Debug)]
-    pub struct D3D11GlSharedResource {
-        pub d3d11_device: *mut c_void,
-        pub d3d11_texture: *mut c_void,
-        pub shared_handle: *mut c_void,
-        pub wgl_device: *mut c_void,
-        pub wgl_object: *mut c_void,
-    }
-
-    unsafe impl Send for D3D11GlSharedResource {}
-    unsafe impl Sync for D3D11GlSharedResource {}
 }

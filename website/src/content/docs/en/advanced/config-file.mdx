@@ -35,7 +35,7 @@ Exposes appearance, locale, automatic update properties, and startup folder conf
 - **`last_selected_media`** (string/null): Keeps track of the absolute path of the media item to select.
 - **`animate_gifs`** (boolean): Controls whether GIF images animate in both the preview and grid thumbnails. (Default: `true`)
 - **`video_hardware_decoding`** (boolean): Enables hardware-accelerated video decoding (`hwdec=auto-copy`). (Default: `true`)
-- **`video_zero_copy`** (boolean): Enables direct zero-copy GPU memory handle sharing between `libmpv` (OpenGL) and `wgpu` (Vulkan/DX12) on Windows and Linux. (Default: `true`)
+- **`video_zero_copy`** (boolean): Enables direct zero-copy GPU memory handle sharing between `libmpv` (OpenGL) and `wgpu` (Vulkan/DX12) on Windows and Linux. (Default: `true` on Windows/Linux, always `false` on macOS — no interop implementation there yet)
 - **`folder_tree_width`** (number): Width of the left navigation panel in pixels. (Default: `240`)
 - **`check_for_updates_on_startup`** (boolean, Windows/macOS bundles only): Toggles update checks at launch. (Default: `true`)
 - **`install_prerelease_builds`** (boolean, Windows/macOS bundles only): Includes alpha/beta builds in update checks. (Default: `false`)

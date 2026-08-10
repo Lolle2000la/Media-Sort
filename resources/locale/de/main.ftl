@@ -30,7 +30,7 @@ settings-language = Sprache
 settings-video-playback = Videowiedergabe
 settings-video-hwdec = Hardware-Videodekodierung aktivieren
 settings-video-zero-copy = Zero-Copy-GPU-Pipeline aktivieren
-settings-video-zero-copy-macos-notice = Die Zero-Copy-GPU-Pipeline ist auf macOS nicht verfügbar (libmpv erfordert OpenGL, während macOS Metal verwendet). Die Software-RGBA-Pipeline ist aktiv.
+settings-video-zero-copy-macos-notice = Die Zero-Copy-GPU-Pipeline ist auf macOS nicht verfügbar (noch keine wgpu-Interop-Implementierung für macOS). Die Software-RGBA-Pipeline ist aktiv.
 
 # Key bindings
 keybindings-restore-defaults = Standard-Tastenkürzel wiederherstellen

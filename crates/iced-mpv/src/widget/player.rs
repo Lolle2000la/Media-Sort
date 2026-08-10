@@ -1,7 +1,7 @@
 use crate::action::VideoAction;
 use crate::state::VideoState;
 use crate::widget::controls::{MediaControl, MediaControlsState, media_controls_view};
-use crate::widget::shader::video_shader_view;
+use crate::widget::shader::{video_shader_view, video_zero_copy_shader_view};
 use iced::widget::{column, container};
 use iced::{Element, Length};
 
@@ -26,7 +26,14 @@ pub fn video_player_view<'a, Message: 'a, F>(
 where
     F: Fn(VideoAction) -> Message + 'a + Clone,
 {
-    let video_content: Element<'_, Message> = if state.rgba().is_some() {
+    let video_content: Element<'_, Message> = if let Some(frame) = state.gpu_frame() {
+        video_zero_copy_shader_view(
+            state.width(),
+            state.height(),
+            state.rotation(),
+            Some(frame.clone()),
+        )
+    } else if state.rgba().is_some() {
         video_shader_view(
             state.width(),
             state.height(),

@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+use crate::gl_context::GlContext;
+#[cfg(target_os = "linux")]
+use crate::gl_interop::{GlFboTarget, create_gl_render_context, render_gl_fbo};
 use crate::rotation::{Rotation, detect_video_rotation};
 use libmpv_sys::*;
 use std::ffi::{CStr, CString};
@@ -21,6 +25,8 @@ pub enum MpvError {
     Initialize(i32),
     /// `mpv_render_context_create` failed with the given libmpv error code.
     RenderContextCreate(i32),
+    /// `mpv_render_context_render` was called with a null render context.
+    NullRenderContext,
     /// `mpv_render_context_render` failed with the given libmpv error code.
     RenderFrame(i32),
     /// `mpv_command` failed with the given libmpv error code.
@@ -47,6 +53,7 @@ impl fmt::Display for MpvError {
             Self::RenderContextCreate(code) => {
                 write!(f, "failed to create render context (code {code})")
             }
+            Self::NullRenderContext => write!(f, "render context is null"),
             Self::RenderFrame(code) => write!(f, "failed to render frame (code {code})"),
             Self::Command(code) => write!(f, "mpv command failed (code {code})"),
             Self::Property(code) => write!(f, "mpv property access failed (code {code})"),
@@ -67,12 +74,13 @@ impl fmt::Display for MpvError {
 
 impl std::error::Error for MpvError {}
 
-/// A software-rendered libmpv instance.
+/// A libmpv instance with a configurable render context.
 ///
-/// Wraps a raw `mpv_handle` plus a software (`sw`) render context that renders
-/// frames into caller-provided CPU memory via [`MpvContext::render_frame`].
-/// Use [`MpvContext::new`] for video playback and
-/// [`MpvContext::new_thumbnail_player`] for cheap thumbnail extraction.
+/// Wraps a raw `mpv_handle` plus either a software (`sw`) render context that
+/// renders frames into caller-provided CPU memory via [`MpvContext::render_frame`]
+/// (the default, see [`MpvContext::new`]), or an OpenGL render context created
+/// from an offscreen EGL context (see [`MpvContext::new_gl`]) that renders
+/// into host-provided FBOs via [`MpvContext::render_gl_frame`].
 ///
 /// The handle is Send and Sync; callers must serialize access (a single
 /// [`worker`](crate::worker) loop or one thread per context) because libmpv
@@ -81,6 +89,10 @@ pub struct MpvContext {
     pub(crate) handle: *mut mpv_handle,
     pub(crate) render_ctx: *mut mpv_render_context,
     callback_context_raw: *mut c_void,
+    /// Present only for GL contexts; keeps the EGL context alive and current
+    /// for `mpv_render_context_render` calls.
+    #[cfg(target_os = "linux")]
+    gl: Option<GlContext>,
 }
 
 impl MpvContext {
@@ -101,45 +113,46 @@ impl MpvContext {
         Self::create(true, true)
     }
 
+    /// Creates a playback context that renders into the given offscreen EGL
+    /// context (Linux zero-copy path). [`MpvContext::render_gl_frame`] renders
+    /// into a host-provided FBO; [`MpvContext::gl`] exposes the context for
+    /// DMA-BUF allocation and import.
+    #[cfg(target_os = "linux")]
+    pub fn new_gl(gl: GlContext, enable_hwdec: bool) -> Result<Self, MpvError> {
+        let handle = Self::create_handle(false, enable_hwdec)?;
+        let (ctx, proc) = {
+            // The trampoline + context pointer are stable for `gl`'s lifetime.
+            let ctx = gl.mpv_proc_addr_ctx();
+            (ctx, GlContext::mpv_get_proc_address)
+        };
+        // SAFETY: handle is a valid, initialized mpv handle and `gl` resolves
+        // GL functions from its current context.
+        let render_ctx = unsafe { create_gl_render_context(handle, proc, ctx)? };
+        Ok(Self {
+            handle,
+            render_ctx,
+            callback_context_raw: ptr::null_mut(),
+            gl: Some(gl),
+        })
+    }
+
+    /// The backing offscreen EGL context, when created via [`MpvContext::new_gl`].
+    #[cfg(target_os = "linux")]
+    pub fn gl(&self) -> Option<&GlContext> {
+        self.gl.as_ref()
+    }
+
+    /// Mutable access to the backing offscreen EGL context. Target FBOs must
+    /// be created in this context for [`MpvContext::render_gl_frame`] to see
+    /// them.
+    #[cfg(target_os = "linux")]
+    pub fn gl_mut(&mut self) -> Option<&mut GlContext> {
+        self.gl.as_mut()
+    }
+
     fn create(thumbnail_mode: bool, enable_hwdec: bool) -> Result<Self, MpvError> {
+        let handle = Self::create_handle(thumbnail_mode, enable_hwdec)?;
         unsafe {
-            let handle = mpv_create();
-            if handle.is_null() {
-                return Err(MpvError::CreateFailed);
-            }
-
-            // Common options for both modes.
-            Self::set_option(handle, c"vo", "libmpv");
-            Self::set_option(handle, c"keep-open", "yes");
-            let hwdec_str = if enable_hwdec { "auto-copy" } else { "no" };
-            Self::set_option(handle, c"hwdec", hwdec_str);
-            Self::set_option(handle, c"sub-auto", "no");
-            Self::set_option(handle, c"audio-file-auto", "no");
-            Self::set_option(handle, c"cache", "no");
-            // Rotation is applied manually via rotate_rgba after rendering so
-            // the raw unrotated frame can be uploaded to the GPU cheaply.
-            Self::set_option(handle, c"video-rotate", "no");
-            Self::set_option(handle, c"force-window", "no");
-            Self::set_option(handle, c"input-default-bindings", "no");
-
-            if thumbnail_mode {
-                Self::set_option(handle, c"aid", "no");
-                Self::set_option(handle, c"sid", "no");
-                Self::set_option(handle, c"hr-seek", "no");
-                Self::set_option(handle, c"video-sync", "desync");
-            } else {
-                Self::set_option(handle, c"loop-file", "inf");
-                Self::set_option(handle, c"framedrop", "vo");
-                Self::set_option(handle, c"video-sync", "audio");
-                Self::set_option(handle, c"video-timing-offset", "0");
-            }
-
-            let err = mpv_initialize(handle);
-            if err < 0 {
-                mpv_terminate_destroy(handle);
-                return Err(MpvError::Initialize(err));
-            }
-
             let api_type = CString::new("sw").map_err(|_| MpvError::InvalidCString)?;
             let mut params = [
                 mpv_render_param {
@@ -163,7 +176,56 @@ impl MpvContext {
                 handle,
                 render_ctx,
                 callback_context_raw: ptr::null_mut(),
+                #[cfg(target_os = "linux")]
+                gl: None,
             })
+        }
+    }
+
+    /// Creates the `mpv_handle`, applies the common options and initializes
+    /// it. Caller decides the render context (sw vs GL).
+    fn create_handle(
+        thumbnail_mode: bool,
+        enable_hwdec: bool,
+    ) -> Result<*mut mpv_handle, MpvError> {
+        unsafe {
+            let handle = mpv_create();
+            if handle.is_null() {
+                return Err(MpvError::CreateFailed);
+            }
+
+            // Common options for both modes.
+            Self::set_option(handle, c"vo", "libmpv");
+            Self::set_option(handle, c"keep-open", "yes");
+            let hwdec_str = if enable_hwdec { "auto-copy" } else { "no" };
+            Self::set_option(handle, c"hwdec", hwdec_str);
+            Self::set_option(handle, c"sub-auto", "no");
+            Self::set_option(handle, c"audio-file-auto", "no");
+            Self::set_option(handle, c"cache", "no");
+            // Rotation is applied manually after rendering so the raw
+            // unrotated frame can be displayed cheaply.
+            Self::set_option(handle, c"video-rotate", "no");
+            Self::set_option(handle, c"force-window", "no");
+            Self::set_option(handle, c"input-default-bindings", "no");
+
+            if thumbnail_mode {
+                Self::set_option(handle, c"aid", "no");
+                Self::set_option(handle, c"sid", "no");
+                Self::set_option(handle, c"hr-seek", "no");
+                Self::set_option(handle, c"video-sync", "desync");
+            } else {
+                Self::set_option(handle, c"loop-file", "inf");
+                Self::set_option(handle, c"framedrop", "vo");
+                Self::set_option(handle, c"video-sync", "audio");
+                Self::set_option(handle, c"video-timing-offset", "0");
+            }
+
+            let err = mpv_initialize(handle);
+            if err < 0 {
+                mpv_terminate_destroy(handle);
+                return Err(MpvError::Initialize(err));
+            }
+            Ok(handle)
         }
     }
 
@@ -491,6 +553,35 @@ impl MpvContext {
         }
     }
 
+    /// Renders the current video frame into the given OpenGL FBO, using the
+    /// zero-copy GL path (`internal_format = GL_RGBA8` so the DMA-BUF byte
+    /// order matches wgpu's `R8G8B8A8_UNORM`). Issues `glFinish` afterwards.
+    ///
+    /// Only valid for contexts created via [`MpvContext::new_gl`].
+    #[cfg(target_os = "linux")]
+    pub fn render_gl_frame(&mut self, fbo: u32, width: i32, height: i32) -> Result<(), MpvError> {
+        if width <= 0 || height <= 0 {
+            return Err(MpvError::Other(format!(
+                "invalid frame size {width}x{height}"
+            )));
+        }
+        let gl = self.gl.as_ref().ok_or_else(|| {
+            MpvError::Other("render_gl_frame requires a GL render context".into())
+        })?;
+        gl.make_current().map_err(MpvError::Other)?;
+        let target = GlFboTarget {
+            fbo_id: fbo,
+            width: width as u32,
+            height: height as u32,
+            internal_format: crate::gl_context::GL_RGBA8,
+        };
+        // SAFETY: self.render_ctx is a valid GL render context and the GL
+        // context is current on this thread.
+        unsafe { render_gl_fbo(self.render_ctx, target) }?;
+        gl.finish();
+        Ok(())
+    }
+
     /// Returns `true` when playback is currently unpaused.
     pub fn is_playing(&self) -> bool {
         unsafe {
@@ -715,6 +806,13 @@ impl MpvContext {
 impl Drop for MpvContext {
     fn drop(&mut self) {
         unsafe {
+            // For GL contexts, mpv_render_context_free frees GL resources, so
+            // the EGL context must be current on this thread first.
+            #[cfg(target_os = "linux")]
+            if let Some(gl) = &self.gl {
+                let _ = gl.make_current();
+            }
+
             let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
             mpv_command(self.handle, cmd.as_mut_ptr());
 

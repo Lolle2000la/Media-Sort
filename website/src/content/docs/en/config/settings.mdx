@@ -59,7 +59,7 @@ Media Sort includes pre-configured visual themes to customize the interface. Sel
 - **Behavior:** Keeps decoded video frames directly inside graphics card (GPU) memory as they pass from the video player engine (`libmpv`) to the display system (`wgpu`). Because frame data never needs to be copied back into system RAM, video playback is faster, uses less memory, and consumes less battery power. If you encounter GPU driver crashes or display flickering, disabling this option will fall back to software RAM buffers.
 
 :::note[macOS Availability]
-On macOS, zero-copy GPU rendering is automatically disabled. Media Sort uses software RAM buffers on macOS because `libmpv` requires OpenGL, while macOS uses Metal graphics drivers.
+On macOS, zero-copy GPU rendering is automatically disabled: there is no wgpu interop implementation for macOS yet, so Media Sort uses software RAM buffers there.
 :::
 
 ---

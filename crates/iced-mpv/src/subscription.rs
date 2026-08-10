@@ -20,6 +20,10 @@ impl<FReady: 'static, FEvent: 'static> std::hash::Hash for Handlers<FReady, FEve
         std::any::TypeId::of::<Self>().hash(state);
         self.config.max_frame_width.hash(state);
         self.config.max_frame_height.hash(state);
+        // hwdec and zero-copy change how the worker is created and how frames
+        // are rendered, so toggling them must restart the worker too.
+        self.config.enable_hwdec.hash(state);
+        self.config.enable_zero_copy.hash(state);
     }
 }
 

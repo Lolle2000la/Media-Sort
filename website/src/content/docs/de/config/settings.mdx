@@ -59,7 +59,7 @@ Media Sort enthält vorkonfigurierte visuelle Designs zur Anpassung der Benutzer
 - **Verhalten:** Belässt dekodierte Video-Frames direkt im Speicher der Grafikkarte (GPU), wenn sie vom Video-Player (`libmpv`) an das Anzeigesystem (`wgpu`) übergeben werden. Da Videodaten nicht mehr in den RAM-Arbeitsspeicher kopiert werden müssen, ist die Wiedergabe schneller, verbraucht weniger Speicher und schont den Akku. Falls Treiberabstürze oder Bildflackern auftreten, schaltet das Deaktivieren dieser Option auf RAM-Software-Puffer zurück.
 
 :::note[Verfügbarkeit auf macOS]
-Auf macOS ist das Zero-Copy-GPU-Rendering automatisch deaktiviert. Media Sort verwendet auf macOS Software-RAM-Puffer, da `libmpv` OpenGL erfordert, während macOS Metal-Grafiktreiber verwendet.
+Auf macOS ist das Zero-Copy-GPU-Rendering automatisch deaktiviert: Es gibt noch keine wgpu-Interop-Implementierung für macOS, daher verwendet Media Sort dort Software-RAM-Puffer.
 :::
 
 ---

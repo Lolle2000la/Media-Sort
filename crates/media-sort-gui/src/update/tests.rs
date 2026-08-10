@@ -1087,6 +1087,35 @@ fn test_settings_toggle_reopen_media() {
 }
 
 #[test]
+fn test_settings_toggle_video_hardware_decoding() {
+    let mut state = AppState::new(SettingsStore::default());
+    let was_enabled = state.settings.general.video_hardware_decoding;
+    let _task = update(
+        &mut state,
+        Message::Settings(SettingsMessage::ToggleVideoHardwareDecoding),
+    );
+    assert_eq!(state.settings.general.video_hardware_decoding, !was_enabled);
+}
+
+#[test]
+fn test_settings_toggle_video_zero_copy() {
+    let mut state = AppState::new(SettingsStore::default());
+    let was_enabled = state.settings.general.video_zero_copy;
+    let _task = update(
+        &mut state,
+        Message::Settings(SettingsMessage::ToggleVideoZeroCopy),
+    );
+    assert_eq!(state.settings.general.video_zero_copy, !was_enabled);
+}
+
+#[test]
+fn test_settings_open_advanced() {
+    let mut state = AppState::new(SettingsStore::default());
+    let _task = update(&mut state, Message::Settings(SettingsMessage::OpenAdvanced));
+    assert!(matches!(state.settings_ui, SettingsUiState::Advanced));
+}
+
+#[test]
 fn test_reopen_last_selected_media_behavior() {
     use std::sync::mpsc::channel;
 
