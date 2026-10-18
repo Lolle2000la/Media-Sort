@@ -29,3 +29,34 @@ winreg.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSFileManager", "NSURL", "NSString", "NSError"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Talking to org.freedesktop.portal.*: Trash (so a file reaches the host's
+# trash rather than the sandbox's private one) and OpenURI (handing a file to
+# the host file manager or default handler, see `src/platform/desktop_portal.rs`).
+# ashpd is async-only, so its synchronous callers drive it with pollster.
+ashpd = { version = "0.13", default-features = false, features = [
+    "async-io",
+    "open_uri",
+    "trash",
+] }
+pollster = "0.4"
+
+# PulseAudio output for the audio player, behind the `pulse` feature (the
+# Flatpak enables it). A sandbox exposes only the PulseAudio socket, and
+# cpal's ALSA stream cannot deliver through the ALSA pulse plugin there, while
+# every other client (ffmpeg, mpv) uses the same socket without trouble.
+# `libpulse-binding` is named for the types the simple API takes (`Spec`,
+# `Direction`); the simple binding only re-exports its own wrappers.
+libpulse-simple-binding = { version = "2.29", optional = true }
+libpulse-binding = { version = "2.29", optional = true, default-features = false }
+
+[features]
+# Write the audio player's output to PulseAudio instead of cpal's ALSA device,
+# driving rodio's mixer directly (see `media/audio_decoder/pulse.rs`).
+#
+# Linux only: the dependencies are declared for Linux above and the code is
+# compiled only there, so enabling this feature on Windows or macOS is a no-op
+# rather than an error — those targets keep cpal's WASAPI/CoreAudio output, and
+# resolving for them puts no pulse crate in the dependency graph at all.
+pulse = ["dep:libpulse-simple-binding", "dep:libpulse-binding"]

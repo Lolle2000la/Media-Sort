@@ -92,14 +92,30 @@ pub struct Cli {
     pub demo: bool,
 }
 
+/// The tracing filter.
+///
+/// When `RUST_LOG` is set it is the whole story: the previous setup appended an
+/// `info` directive *after* reading the environment, which silently overrode a
+/// bare `RUST_LOG=debug` and left no way to see debug output at all.
+///
+/// Without `RUST_LOG` the level is `info`, except for `iced_winit`: its
+/// info-level "Window attributes" line formats the whole window as a `Debug`
+/// value, including the icon as `RgbaIcon { rgba: [262144 numbers] }` — one
+/// line per byte, ~260k lines on every start, which buries every other message
+/// (and has to be scrolled past to read anything).
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    match std::env::var("RUST_LOG") {
+        Ok(value) if !value.trim().is_empty() => tracing_subscriber::EnvFilter::try_new(value)
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        _ => tracing_subscriber::EnvFilter::new("iced_winit=warn,info"),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     initialize_panic_hook();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse().expect("valid env filter level string")),
-        )
+        .with_env_filter(log_filter())
         .init();
 
     #[cfg(feature = "velopack")]

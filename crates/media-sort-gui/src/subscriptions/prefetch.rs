@@ -190,14 +190,18 @@ fn is_gif_path(path: &std::path::Path) -> bool {
 /// carries the animate_gifs-driven classification) but is threaded through
 /// so future callers can use it (e.g. a metadata-panel "Animated" field)
 /// without reopening `is_animated_gif`.
+/// The `Ok(None)` outcome means the file has no thumbnail image to show —
+/// currently only an audio file without embedded cover art. That is a normal,
+/// playable file, not a failure, so it is surfaced as a no-op
+/// (`MediaMessage::ThumbnailCancelled`) rather than `ThumbnailError::Decode`.
 pub fn generate_thumbnail(
     path: &std::path::Path,
     media_type: MediaType,
     _animated: Option<bool>,
-) -> ThumbnailResult {
+) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
     if media_type == MediaType::Audio {
         return media_sort_backend::media::thumbnail::generate_thumbnail(path, 128, 128)
-            .map(|d| d.into_parts())
+            .map(|opt| opt.map(|d| d.into_parts()))
             .map_err(|e| ThumbnailError::Decode(format!("Audio cover thumbnail error: {e}")));
     }
 
@@ -233,7 +237,7 @@ pub fn generate_thumbnail(
             ));
         }
         match response_rx.recv_timeout(FFMPEG_RESPONSE_TIMEOUT) {
-            Ok(Ok(parts)) => return Ok(parts),
+            Ok(Ok(parts)) => return Ok(Some(parts)),
             Ok(Err(_)) | Err(_) => {
                 // ffmpeg rejected the file, timed out on it, or its pool
                 // is gone (disconnected workers). The mpv pool may still
@@ -255,7 +259,7 @@ pub fn generate_thumbnail(
                     ));
                 }
                 match mpv_rx.recv_timeout(MPV_RESPONSE_TIMEOUT) {
-                    Ok(Ok(parts)) => return Ok(parts),
+                    Ok(Ok(parts)) => return Ok(Some(parts)),
                     Ok(Err(e)) => return Err(e),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         return Err(ThumbnailError::transient(format!(
@@ -275,11 +279,11 @@ pub fn generate_thumbnail(
     }
 
     if path.extension().and_then(|e| e.to_str()) == Some("ico") {
-        return generate_ico_thumbnail(path);
+        return generate_ico_thumbnail(path).map(Some);
     }
 
     media_sort_backend::media::thumbnail::generate_thumbnail(path, 128, 128)
-        .map(|d| d.into_parts())
+        .map(|opt| opt.map(|d| d.into_parts()))
         .map_err(|e| ThumbnailError::Decode(format!("Image decoding failed: {e}")))
 }
 
@@ -355,7 +359,7 @@ mod tests {
         // machine with neither ffmpeg nor libmpv available.
         let result = generate_thumbnail(&path, MediaType::Video, Some(true));
         assert!(result.is_ok());
-        let (w, h, rgba) = result.unwrap();
+        let (w, h, rgba) = result.unwrap().expect("expected a thumbnail");
         // 200x50 into the 128x128 box, aspect preserved: min-ratio scaling
         // (128/200) yields 128x32.
         assert_eq!((w, h), (128, 32));
@@ -377,7 +381,7 @@ mod tests {
 
         let result = generate_thumbnail(&path, MediaType::Image, None);
         assert!(result.is_ok());
-        let (w, h, rgba) = result.unwrap();
+        let (w, h, rgba) = result.unwrap().expect("expected a thumbnail");
         assert!(w > 0 && h > 0);
         assert!(!rgba.is_empty());
         assert_eq!(rgba.len(), (w * h * 4) as usize);
@@ -405,7 +409,7 @@ mod tests {
 
         let result = generate_thumbnail(&path, MediaType::Image, None);
         assert!(result.is_ok());
-        let (w, h, rgba) = result.unwrap();
+        let (w, h, rgba) = result.unwrap().expect("expected a thumbnail");
         assert_eq!((w, h), (32, 32));
         assert!(!rgba.is_empty());
         assert_eq!(rgba.len(), (32 * 32 * 4) as usize);
@@ -457,12 +461,63 @@ mod tests {
 
         let result = generate_thumbnail(&path, MediaType::Image, None);
         assert!(result.is_ok());
-        let (w, h, rgba) = result.unwrap();
+        let (w, h, rgba) = result.unwrap().expect("expected a thumbnail");
         assert!(
             h > w,
             "Expected thumbnail height {h} > width {w} due to EXIF orientation 6 (90 deg CW)"
         );
         assert_eq!(rgba.len(), (w * h * 4) as usize);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Write a minimal, tag-less PCM WAV file (canonical 44-byte RIFF header
+    /// plus silence) so the "audio without embedded cover art" path can be
+    /// exercised without a bundled fixture or an ffmpeg dependency.
+    fn write_silent_wav(path: &std::path::Path) {
+        let sample_rate: u32 = 8000;
+        let channels: u16 = 1;
+        let bits: u16 = 8;
+        let frames: u32 = 800; // 0.1 s
+        let data_len = frames * u32::from(bits / 8) * u32::from(channels);
+        let byte_rate = sample_rate * u32::from(channels) * u32::from(bits / 8);
+        let block_align = channels * (bits / 8);
+
+        let mut buf = Vec::with_capacity(44 + data_len as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_len).to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.resize(44 + data_len as usize, 128u8); // silence
+        std::fs::write(path, &buf).unwrap();
+    }
+
+    #[test]
+    fn test_generate_thumbnail_audio_without_cover_is_not_a_failure() {
+        // Regression: a tag-less audio file used to fail thumbnail generation
+        // with "the file extension `.wav` was not recognized as an image
+        // format", which recorded it in `media_errors` and rendered the
+        // preview pane's "file not supported" box. No cover art is not a
+        // decode failure: the entry must report "no thumbnail" and stay usable.
+        let dir = std::env::temp_dir().join("mediasort_test_audio_no_cover");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("silent.wav");
+        write_silent_wav(&path);
+
+        match generate_thumbnail(&path, MediaType::Audio, None) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("tag-less WAV has no cover art; expected no thumbnail"),
+            Err(e) => panic!("tag-less WAV must not be a thumbnail failure: {e:?}"),
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }

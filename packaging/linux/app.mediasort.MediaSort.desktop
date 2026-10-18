@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Media Sort
+GenericName=Media Sorter
+Comment=Sort and organize your photos, videos and audio collections
+Exec=media-sort-gui %U
+Icon=app.mediasort.MediaSort
+Terminal=false
+Categories=Graphics;Photography;
+MimeType=inode/directory;
+Keywords=media;photo;video;audio;image;sort;organize;exif;
+StartupNotify=true
+StartupWMClass=app.mediasort.MediaSort

@@ -15,7 +15,7 @@ version = "3.0.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Lolle2000la/Media-Sort"
-rust-version = "1.99"
+rust-version = "1.98"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata for Media Sort.
+
+  The <id> is the Flatpak application id (see flatpak/app.mediasort.MediaSort.yml)
+  and must match the installed desktop file ("app.mediasort.MediaSort.desktop")
+  and icon ("app.mediasort.MediaSort.svg"). Flathub reads this file for the store
+  listing, so keep <releases> in sync with the release tags: add a new <release>
+  at the top when a version is cut.
+-->
+<component type="desktop-application">
+  <id>app.mediasort.MediaSort</id>
+
+  <name>Media Sort</name>
+  <summary>Fast, keyboard-driven media sorter for photos, video and audio</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+
+  <developer id="app.mediasort">
+    <name>Lolle2000la</name>
+  </developer>
+
+  <description>
+    <p>
+      Media Sort is a fast, native desktop application for browsing, sorting and
+      organising large photo, video and audio collections.
+    </p>
+    <p>
+      It is keyboard-first, with full undo and redo, pinned destination folders,
+      an in-app image, video and audio preview (video and GIF playback via
+      libmpv, audio via symphonia and rodio) and an EXIF/ID3 metadata panel.
+    </p>
+    <p>
+      It runs entirely on your machine: no accounts, no analytics and no network
+      access.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">app.mediasort.MediaSort.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Sort media with the keyboard, with full undo and redo</caption>
+      <image>https://mediasort.app/screenshots/sorting.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Browse the folder tree with pinned destination folders</caption>
+      <image>https://mediasort.app/screenshots/pinned-folders.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Inspect EXIF and ID3 metadata for the selected file</caption>
+      <image>https://mediasort.app/screenshots/metadata.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Search and filter the media grid</caption>
+      <image>https://mediasort.app/screenshots/search.png</image>
+    </screenshot>
+  </screenshots>
+
+  <url type="homepage">https://mediasort.app/</url>
+  <url type="bugtracker">https://github.com/Lolle2000la/Media-Sort/issues</url>
+  <url type="vcs-browser">https://github.com/Lolle2000la/Media-Sort</url>
+
+  <categories>
+    <category>Graphics</category>
+    <category>Photography</category>
+  </categories>
+
+  <keywords>
+    <keyword>media</keyword>
+    <keyword>photo</keyword>
+    <keyword>video</keyword>
+    <keyword>audio</keyword>
+    <keyword>image</keyword>
+    <keyword>sort</keyword>
+    <keyword>organize</keyword>
+    <keyword>exif</keyword>
+  </keywords>
+
+  <provides>
+    <binary>media-sort-gui</binary>
+  </provides>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <!-- Add each new release at the top. -->
+    <release version="3.0.0" date="2026-10-13"/>
+  </releases>
+</component>

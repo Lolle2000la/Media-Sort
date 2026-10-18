@@ -4,6 +4,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rodio::{Decoder, DeviceSinkBuilder, Player, Source};
+
+/// PulseAudio output, behind the `pulse` feature. Sandboxes expose only the
+/// PulseAudio socket and cpal's ALSA stream cannot deliver through it; see the
+/// module for the evidence and why this drives rodio's mixer directly.
+#[cfg(all(target_os = "linux", feature = "pulse"))]
+mod pulse;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -43,9 +49,23 @@ impl From<rodio::source::SeekError> for AudioError {
 }
 
 pub struct AudioPlayer {
-    _sink: rodio::MixerDeviceSink,
+    /// Keeps the output alive for as long as the player exists.
+    _output: Output,
     player: Player,
     duration: Mutex<f64>,
+}
+
+/// Where the player's samples go.
+///
+/// The payloads are never inspected — they exist so that the running output
+/// (and, for cpal, the stream it owns) lives exactly as long as the player.
+#[allow(dead_code)]
+enum Output {
+    /// cpal's default device (ALSA on Linux) — the normal path.
+    Device(rodio::MixerDeviceSink),
+    /// PulseAudio, written directly: see [`pulse`].
+    #[cfg(all(target_os = "linux", feature = "pulse"))]
+    Pulse(pulse::PulseOutput),
 }
 
 fn probe_duration(path: &Path) -> Option<f64> {
@@ -79,10 +99,43 @@ fn probe_duration(path: &Path) -> Option<f64> {
 
 impl AudioPlayer {
     pub fn new() -> Result<Self, AudioError> {
+        // Prefer PulseAudio when the feature is built in: inside a sandbox it
+        // is the only output that works (see `pulse`), and elsewhere it is
+        // whatever the desktop routes to anyway. A machine with no server
+        // answers, and the default cpal device is used as before.
+        #[cfg(all(target_os = "linux", feature = "pulse"))]
+        if let Some(output) = Self::with_pulse() {
+            return Ok(output);
+        }
+
         let sink = DeviceSinkBuilder::open_default_sink()?;
         let player = Player::connect_new(sink.mixer());
         Ok(Self {
-            _sink: sink,
+            _output: Output::Device(sink),
+            player,
+            duration: Mutex::new(0.0),
+        })
+    }
+
+    /// Build a player whose output is PulseAudio, or `None` when no server
+    /// answered (the caller then uses the default cpal device).
+    #[cfg(all(target_os = "linux", feature = "pulse"))]
+    fn with_pulse() -> Option<Self> {
+        let (mixer, source) = rodio::mixer::mixer(pulse::CHANNELS, pulse::RATE);
+        // Connect the player to the mixer BEFORE starting the writer thread:
+        // `MixerSource::next()` returns `None` while the mixer has no input
+        // sources attached, which would cause the writer thread to see an
+        // empty source on its first read before `connect_new` runs.
+        let player = Player::connect_new(&mixer);
+        let output = match pulse::PulseOutput::start(source) {
+            Ok(output) => output,
+            Err(err) => {
+                tracing::warn!("PulseAudio output unavailable ({err}); using the default device");
+                return None;
+            }
+        };
+        Some(Self {
+            _output: Output::Pulse(output),
             player,
             duration: Mutex::new(0.0),
         })
@@ -96,6 +149,9 @@ impl AudioPlayer {
             .map(|d| d.as_secs_f64())
             .or_else(|| probe_duration(path))
             .unwrap_or(0.0);
+        if !self.player.empty() {
+            self.player.stop();
+        }
         self.player.append(decoder);
         if let Ok(mut d) = self.duration.lock() {
             *d = dur;
@@ -113,11 +169,17 @@ impl AudioPlayer {
     }
 
     pub fn stop(&self) {
-        self.player.stop();
+        if !self.player.empty() {
+            self.player.stop();
+        }
+        self.player.play();
+        if let Ok(mut d) = self.duration.lock() {
+            *d = 0.0;
+        }
     }
 
     pub fn is_paused(&self) -> bool {
-        self.player.is_paused()
+        self.player.is_paused() && !self.player.empty()
     }
 
     pub fn empty(&self) -> bool {

@@ -1,0 +1,243 @@
+# Flatpak manifest for Media Sort.
+#
+# This is the file that gets submitted to Flathub (a PR against
+# https://github.com/flathub/flathub, branch `app.mediasort.MediaSort`); see
+# flatpak/README.md for the full procedure. Keep it in sync with each release:
+#
+#   * bump `tag` (and add `commit`) on the `media-sort` source below, and
+#   * add a matching <release> entry to
+#     packaging/linux/app.mediasort.MediaSort.metainfo.xml.
+#
+# cargo-sources.json (the vendored crates, generated from Cargo.lock with
+# flatpak-cargo-generator) sits next to this file.
+#
+# The meson modules force `libdir=lib` in the long `--libdir` spelling. meson's
+# default libdir inside the SDK is `lib64`, which is neither where the later
+# modules' pkg-config search looks nor where the app links (`-L/app/lib`).
+# Newer flatpak-builder already passes `--libdir=lib` itself (the SDK's
+# /etc/flatpak-builder/defaults.json names a multiarch libdir), and meson
+# rejects `-Dlibdir=x` next to a `--libdir=y` ("Got argument libdir as both
+# -Dlibdir and --libdir"), so the long form is the one that works with both old
+# and new flatpak-builder.
+
+app-id: app.mediasort.MediaSort
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: media-sort-gui
+
+# Media Sort is a media *sorter*: it browses a folder the user opens and moves,
+# renames, copies and deletes files in it, including into pinned destination
+# folders elsewhere. That is file-management work, so it needs real access to
+# the user's files rather than a document-portal view of a single chosen
+# folder. `home` plus the removable-media mount points cover the app's use case.
+# There is deliberately no network access: the in-app self-updater is not built
+# here ("velopack" feature, see crates/media-sort-gui/Cargo.toml) because
+# Flatpak owns updates.
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  # wgpu (Vulkan) video rendering and VA-API hardware decoding.
+  - --device=dri
+  - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/mnt
+  - --filesystem=/run/media
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - '*.a'
+  - '*.la'
+
+modules:
+  # libass and libplacebo are unconditional build dependencies of mpv 0.41 and
+  # are not part of the freedesktop runtime/SDK. Their own dependencies do come
+  # from the SDK (freetype, fontconfig, harfbuzz, fribidi, vulkan, shaderc,
+  # lcms2), so only these two need building.
+  - name: libass
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --enable-fontconfig
+      - --enable-harfbuzz
+    sources:
+      - type: git
+        url: https://github.com/libass/libass.git
+        tag: 0.17.5
+        commit: 4a05d8127f525943ebf45fdc6497c9e665947f0d
+        x-checker-data:
+          type: git
+          tag-pattern: ^([\d.]+)$
+
+  - name: libplacebo
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+      - -Ddemos=false
+      - -Dtests=false
+      - -Dvulkan=enabled
+      - -Dshaderc=enabled
+      - -Dglslang=disabled
+      - -Dlcms=enabled
+      - -Dopengl=disabled
+      - -Dd3d11=disabled
+      - -Dxxhash=disabled
+    sources:
+      - type: git
+        url: https://github.com/haasn/libplacebo.git
+        tag: v7.360.1
+        commit: cee9b076f2c63104ccfd497fa79c39a867293ec4
+        x-checker-data:
+          type: git
+          tag-pattern: ^v([\d.]+)$
+
+  # Two small dependencies that mpv's VA-API hardware decoding needs. mpv gates
+  # VA-API behind one of its display back-ends, and both of those are missing a
+  # dependency in the runtime: mpv's Wayland backend wants wayland-protocols
+  # (the protocol data is present but the `.pc` is not), and its X11 backend
+  # wants libXpresent. Building both enables hardware decoding on Wayland and
+  # X11 sessions alike (the app asks for `hwdec=auto-copy` and falls back to
+  # software decoding when a GPU/driver cannot do it).
+  - name: wayland-protocols
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/wayland/wayland-protocols.git
+        tag: '1.49'
+        commit: ee78491a237eaff9389a0ccf8680521d074407d3
+        x-checker-data:
+          type: git
+          tag-pattern: ^([\d.]+)$
+
+  - name: libXpresent
+    buildsystem: autotools
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/xorg/lib/libxpresent.git
+        tag: libXpresent-1.0.2
+        commit: 4d92149372461bf575e8a09b1064a2884c38c3aa
+        x-checker-data:
+          type: git
+          tag-pattern: ^libXpresent-([\d.]+)$
+
+  # mpv renders frames through its software render API, which converts every
+  # frame with zimg when it is available and falls back to swscale without it.
+  # At 4K that is the difference between ~7 ms and ~66 ms per frame — 30 fps
+  # versus ~6.6 fps with hardware decoding — so phone/camera 4K footage is
+  # unwatchable without it. The runtime does not ship zimg.
+  - name: zimg
+    buildsystem: autotools
+    sources:
+      - type: git
+        url: https://github.com/sekrit-twc/zimg.git
+        tag: release-3.0.6
+        commit: f819b14e8f39d1282400b0d9543e8ef73c1b2bbd
+        x-checker-data:
+          type: git
+          tag-pattern: ^release-([\d.]+)$
+
+  # libmpv is not part of the freedesktop runtime, so mpv is built from source.
+  # It links against the runtime's ffmpeg libraries. Media Sort renders frames
+  # itself through libmpv's software render API (mpv_render_context,
+  # MPV_RENDER_API_TYPE_SW), so mpv needs no display or GPU output of its own
+  # (its X11/Wayland options are enabled for VA-API, see the config below).
+  - name: mpv
+    buildsystem: meson
+    config-opts:
+      - -Dlibmpv=true
+      - -Dcplayer=false
+      - -Dbuild-date=false
+      - -Dmanpage-build=disabled
+      - --libdir=lib
+      # No GL/Vulkan output of its own: the app drives the software render API.
+      # X11 and Wayland are enabled only so VA-API hardware decoding is
+      # available (see the wayland-protocols/libXpresent modules above);
+      # dmabuf-wayland is not needed.
+      - -Dx11=enabled
+      - -Dwayland=enabled
+      - -Dvaapi=enabled
+      - -Dvaapi-x11=enabled
+      - -Dvaapi-wayland=enabled
+      - -Ddmabuf-wayland=disabled
+      # The software render path that this app drives converts frames with
+      # zimg; without it mpv falls back to swscale and 4K playback collapses
+      # (see the zimg module above). It needs no display or GPU output.
+      - -Dzimg=enabled
+      - -Dgl=disabled
+      - -Degl=disabled
+      - -Dvulkan=disabled
+      - -Dshaderc=disabled
+      - -Dcaca=disabled
+      - -Dsdl2-video=disabled
+      # Optional features with no use in this app.
+      - -Dcdda=disabled
+      - -Ddvbin=disabled
+      - -Ddvdnav=disabled
+      - -Dlibbluray=disabled
+      - -Dlibarchive=disabled
+      - -Dlua=disabled
+      - -Djavascript=disabled
+      - -Dvapoursynth=disabled
+      - -Duchardet=disabled
+      # Audio output for video playback. (Standalone audio files are decoded
+      # and played by rodio, not mpv.)
+      - -Dalsa=enabled
+      - -Dpulse=enabled
+      - -Dpipewire=enabled
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /share/man
+    sources:
+      - type: git
+        url: https://github.com/mpv-player/mpv.git
+        tag: v0.41.0
+        commit: 41f6a645068483470267271e1d09966ca3b9f413
+        x-checker-data:
+          type: git
+          tag-pattern: ^v([\d.]+)$
+
+  - name: media-sort
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/media-sort/cargo
+        CARGO_NET_OFFLINE: 'true'
+        # libmpv-sys links `-lmpv` without a pkg-config lookup, so point the
+        # linker at mpv's /app/lib install. Flatpak puts /app/lib on the
+        # sandbox library path, so no rpath is needed at runtime.
+        RUSTFLAGS: -L/app/lib
+    build-commands:
+      # The "velopack" self-updater is left off on purpose: Flatpak owns updates.
+      # `pulse` routes the audio player's output straight to PulseAudio: the
+      # sandbox exposes only that socket, and cpal's ALSA stream cannot deliver
+      # through the ALSA pulse plugin there (see the crate's audio_decoder).
+      - cargo build --release --offline --locked -p media-sort-gui --features media-sort-backend/pulse
+      - install -Dm755 target/release/media-sort-gui -t /app/bin
+      - install -Dm644 packaging/linux/app.mediasort.MediaSort.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 packaging/linux/app.mediasort.MediaSort.desktop -t /app/share/applications
+      - install -Dm644 packaging/linux/icon.svg /app/share/icons/hicolor/scalable/apps/app.mediasort.MediaSort.svg
+      - install -Dm644 LICENSE -t /app/share/licenses/app.mediasort.MediaSort
+    sources:
+      - type: git
+        url: https://github.com/Lolle2000la/Media-Sort.git
+        # Must be the first stable release that contains the Flatpak metadata
+        # this module installs (packaging/linux/app.mediasort.MediaSort.*):
+        # v3.0.0 predates it. Cut that release (e.g. scripts/release.sh 3.0.1)
+        # and set the tag and its commit here before submitting to Flathub.
+        tag: v3.0.1
+        # TODO: add the released `commit:` (Flathub prefers tag *and* commit).
+        x-checker-data:
+          type: git
+          tag-pattern: ^v([\d.]+)$
+          is-main-source: true
+      - cargo-sources.json

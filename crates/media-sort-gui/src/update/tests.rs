@@ -823,6 +823,27 @@ fn test_thumbnail_ready_valid_data() {
 }
 
 #[test]
+fn test_thumbnail_cancelled_leaves_entry_usable() {
+    // An audio file without embedded cover art yields no thumbnail at all
+    // (`Ok(None)` at the prefetch boundary), which the app maps to
+    // `ThumbnailCancelled`. It must NOT be recorded in `media_errors`, or the
+    // preview pane would render the "file not supported" box and the audio
+    // could not be played.
+    let mut state = AppState::new(SettingsStore::default());
+    let path = std::path::PathBuf::from("/test/audio_without_cover.wav");
+
+    let _task = update(
+        &mut state,
+        Message::Media(MediaMessage::ThumbnailCancelled(path.clone())),
+    );
+
+    assert!(
+        state.cache.media_errors.get_error(&path).is_none(),
+        "a file with no thumbnail image must not be marked as failed/unsupported"
+    );
+}
+
+#[test]
 fn test_metadata_loaded_error_clears_metadata() {
     let mut state = AppState::new(SettingsStore::default());
     let mut existing = std::collections::BTreeMap::new();

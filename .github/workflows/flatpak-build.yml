@@ -1,0 +1,86 @@
+name: Flatpak Build
+
+# Verifies the app still builds as a Flatpak when its dependencies or the
+# Flatpak packaging change. A dependency edit can break the offline vendored
+# build (Flathub builds with no network) or the SDK's pinned Rust, and neither
+# is exercised by the normal test matrix -- it would otherwise only surface at
+# the Flathub build. This runs the same flatpak-builder build Flathub does, on
+# the same runtime.
+#
+# It is expensive (it builds libass, libplacebo, wayland-protocols, libXpresent,
+# mpv and the whole Rust workspace), so it runs only for changes that can affect
+# it, and it is deliberately not a required check.
+#
+# The real manifest's app source points at the released tag, so the manifest is
+# rewritten here to build the checked-out tree instead (`type: dir`), which is
+# the approach flatpak-github-actions documents for pull requests.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths: &paths
+      - Cargo.lock
+      - '**/Cargo.toml'
+      - flatpak/**
+      # The metainfo/desktop/icon the app module installs; a malformed one fails
+      # appstream compose in the build.
+      - packaging/linux/**
+      - .github/workflows/flatpak-build.yml
+  pull_request:
+    paths: *paths
+
+env:
+  RUNTIME_VERSION: '26.08'
+
+jobs:
+  build:
+    name: Build the Flatpak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install flatpak-builder and the runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y --noninteractive flathub \
+            org.freedesktop.Platform//"$RUNTIME_VERSION" \
+            org.freedesktop.Sdk//"$RUNTIME_VERSION" \
+            org.freedesktop.Sdk.Extension.rust-stable//"$RUNTIME_VERSION"
+
+      - name: Restore the flatpak-builder state
+        id: state
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.flatpak-builder-state
+          key: flatpak-builder-state-${{ hashFiles('flatpak/app.mediasort.MediaSort.yml') }}
+          restore-keys: |
+            flatpak-builder-state-
+
+      - name: Build this checkout with the manifest
+        run: |
+          python3 - <<'PY'
+          import pathlib
+
+          manifest = pathlib.Path('flatpak/app.mediasort.MediaSort.yml')
+          source = manifest.read_text()
+          start = source.index('      - type: git\n        url: https://github.com/Lolle2000la/Media-Sort.git')
+          end = source.index('      - cargo-sources.json')
+          # `path` is relative to the manifest, so `..` is the checkout root.
+          ci = source[:start] + '      - type: dir\n        path: ..\n' + source[end:]
+          pathlib.Path('flatpak/app.mediasort.MediaSort.ci.yml').write_text(ci)
+          PY
+          flatpak-builder --force-clean --disable-rofiles-fuse \
+            --state-dir "$GITHUB_WORKSPACE/.flatpak-builder-state" \
+            --repo flatpak-repo build-dir flatpak/app.mediasort.MediaSort.ci.yml
+
+      - name: Save the flatpak-builder state
+        # Trusted writers only, as in ci.yml: pull-request runs never write a
+        # cache entry.
+        if: ${{ github.event_name == 'push' && steps.state.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.flatpak-builder-state
+          key: ${{ steps.state.outputs.cache-primary-key }}

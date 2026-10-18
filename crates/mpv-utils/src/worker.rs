@@ -1,7 +1,6 @@
 use crate::mpv_context::MpvContext;
 use crate::rotation::Rotation;
 use libmpv_sys::*;
-use std::ffi::c_char;
 use std::os::raw::c_void;
 use std::path::PathBuf;
 
@@ -260,6 +259,41 @@ pub fn start_video_worker_with(
     tokio::spawn(run_video_worker(cmd_rx, event_tx, config));
 }
 
+/// Coalesce a batch of queued [`VideoCommand`]s without dropping a [`VideoCommand::Load`]
+/// when followed by playback or volume/mute commands.
+///
+/// - If the batch contains one or more lifecycle-reset commands (`Load` or `Deactivate`),
+///   any earlier file-specific commands (`Load`, `Deactivate`, `Stop`, `Play`, `Pause`,
+///   `TogglePause`, `Seek`, `SeekAbsolute`) are superseded by the last lifecycle reset,
+///   while player-wide `SetMute`/`SetVolume` updates before that reset are preserved.
+/// - Consecutive `SeekAbsolute`, `SetMute`, or `SetVolume` commands collapse to the
+///   latest value so slider drags do not flood mpv's command queue.
+fn coalesce_command_batch(batch: Vec<VideoCommand>) -> Vec<VideoCommand> {
+    let last_lifecycle_idx = batch
+        .iter()
+        .rposition(|cmd| matches!(cmd, VideoCommand::Load(_) | VideoCommand::Deactivate));
+
+    let mut out: Vec<VideoCommand> = Vec::with_capacity(batch.len());
+    for (idx, cmd) in batch.into_iter().enumerate() {
+        if let Some(reset_idx) = last_lifecycle_idx
+            && idx < reset_idx
+            && !matches!(cmd, VideoCommand::SetMute(_) | VideoCommand::SetVolume(_))
+        {
+            continue;
+        }
+
+        match (&mut out.last_mut(), &cmd) {
+            (Some(VideoCommand::SeekAbsolute(_)), VideoCommand::SeekAbsolute(_))
+            | (Some(VideoCommand::SetMute(_)), VideoCommand::SetMute(_))
+            | (Some(VideoCommand::SetVolume(_)), VideoCommand::SetVolume(_)) => {
+                *out.last_mut().unwrap() = cmd;
+            }
+            _ => out.push(cmd),
+        }
+    }
+    out
+}
+
 /// The worker loop. See [`start_video_worker`] for the public entry point.
 async fn run_video_worker(
     mut cmd_rx: tokio::sync::mpsc::Receiver<VideoCommand>,
@@ -329,89 +363,110 @@ async fn run_video_worker(
     let mut last_paused = false;
     let mut is_active = false;
 
+    // Diagnostics for "the video does not play": reported every 5 s from the
+    // progress tick, which runs whether or not a frame is ever produced.
+    let mut load_started: Option<std::time::Instant> = None;
+    let mut frames_rendered: u32 = 0;
+    let mut frames_delivered: u32 = 0;
+    let mut frames_dropped: u32 = 0;
+    let mut frames_starved: u32 = 0;
+    let mut render_micros: u128 = 0;
+    let mut render_micros_max: u128 = 0;
+    let mut report_at = std::time::Instant::now();
+
     let mut progress_interval = tokio::time::interval(std::time::Duration::from_millis(100));
 
     loop {
         if event_tx.is_closed() && is_active {
-            player.stop();
+            player.stop_async();
             is_active = false;
         }
 
         tokio::select! {
             cmd_opt = cmd_rx.recv() => {
-                let Some(mut cmd) = cmd_opt else {
+                let Some(first_cmd) = cmd_opt else {
                     player.stop();
                     break;
                 };
+                let mut raw_batch = vec![first_cmd];
                 while let Ok(newer_cmd) = cmd_rx.try_recv() {
-                    cmd = newer_cmd;
+                    raw_batch.push(newer_cmd);
                 }
-                match cmd {
-                    VideoCommand::Load(path) => {
-                        player.stop();
-                        match player.load_file(&path) {
-                            Ok(()) => {
-                                player.set_paused(false);
-                                player.drain_render_context();
-                                is_active = true;
-                                canonical_video_path = path.canonicalize().ok();
-                                current_video_path = path;
-                                cached_video_params = None;
-                                rotation_recheck_deadline = None;
-                                rotation_matched_path = None;
-                            }
-                            Err(err) => {
-                                let _ = event_tx
-                                    .send(VideoEvent::LoadFailed {
-                                        path: path.clone(),
-                                        error: err.to_string(),
-                                    })
-                                    .await;
+                for cmd in coalesce_command_batch(raw_batch) {
+                    match cmd {
+                        VideoCommand::Load(path) => {
+                            // `loadfile` replaces any currently loaded file directly.
+                            // Using `load_file_async` + `set_paused_async` avoids
+                            // blocking the render thread on synchronous `stop` +
+                            // `loadfile` calls while `vo_libmpv` is active.
+                            match player.load_file_async(&path) {
+                                Ok(()) => {
+                                    player.set_paused_async(false);
+                                    player.drain_render_context();
+                                    is_active = true;
+                                    load_started = Some(std::time::Instant::now());
+                                    frames_rendered = 0;
+                                    frames_delivered = 0;
+                                    frames_dropped = 0;
+                                    frames_starved = 0;
+                                    render_micros = 0;
+                                    render_micros_max = 0;
+                                    report_at = std::time::Instant::now();
+                                    canonical_video_path = path.canonicalize().ok();
+                                    current_video_path = path;
+                                    cached_video_params = None;
+                                    rotation_recheck_deadline = None;
+                                    rotation_matched_path = None;
+                                }
+                                Err(err) => {
+                                    let _ = event_tx
+                                        .send(VideoEvent::LoadFailed {
+                                            path: path.clone(),
+                                            error: err.to_string(),
+                                        })
+                                        .await;
+                                }
                             }
                         }
-                    }
-                    VideoCommand::Play => {
-                        player.set_paused(false);
-                    }
-                    VideoCommand::Pause => {
-                        player.set_paused(true);
-                    }
-                    VideoCommand::TogglePause => {
-                        player.toggle_pause();
-                    }
-                    VideoCommand::Seek(sec) => {
-                        player.seek(sec);
-                    }
-                    VideoCommand::SeekAbsolute(sec) => {
-                        player.seek_absolute(sec);
-                    }
-                    VideoCommand::SetMute(m) => {
-                        player.set_mute(m);
-                    }
-                    VideoCommand::SetVolume(v) => {
-                        player.set_volume(v);
-                    }
-                    VideoCommand::Stop => {
-                        player.set_paused(true);
-                        player.seek_absolute(0.0);
-                        cached_video_params = None;
-                        rotation_recheck_deadline = None;
-                        rotation_matched_path = None;
-                    }
-                    VideoCommand::Deactivate => {
-                        player.set_paused(true);
-                        cached_video_params = None;
-                        rotation_recheck_deadline = None;
-                        rotation_matched_path = None;
-                        // SAFETY: send "stop" command to release the current file handle and
-                        // flush internal mpv caches, preventing file locks that would block
-                        // rename/move/delete operations on the last-played video.
-                        unsafe {
-                            let mut cmd: [*const c_char; 2] =
-                                [c"stop".as_ptr(), std::ptr::null()];
-                            mpv_command(player.handle, cmd.as_mut_ptr());
+                        VideoCommand::Play => {
+                            player.set_paused_async(false);
                         }
-                        is_active = false;
+                        VideoCommand::Pause => {
+                            player.set_paused_async(true);
+                        }
+                        VideoCommand::TogglePause => {
+                            player.toggle_pause_async();
+                        }
+                        VideoCommand::Seek(sec) => {
+                            player.seek_async(sec);
+                        }
+                        VideoCommand::SeekAbsolute(sec) => {
+                            player.seek_absolute_async(sec);
+                        }
+                        VideoCommand::SetMute(m) => {
+                            player.set_mute_async(m);
+                        }
+                        VideoCommand::SetVolume(v) => {
+                            player.set_volume_async(v);
+                        }
+                        VideoCommand::Stop => {
+                            player.set_paused_async(true);
+                            player.seek_absolute_async(0.0);
+                            cached_video_params = None;
+                            rotation_recheck_deadline = None;
+                            rotation_matched_path = None;
+                        }
+                        VideoCommand::Deactivate => {
+                            player.set_paused_async(true);
+                            cached_video_params = None;
+                            rotation_recheck_deadline = None;
+                            rotation_matched_path = None;
+                            // Release the current file handle and flush internal mpv
+                            // caches so rename/move/delete operations on the
+                            // last-played video are not blocked.
+                            player.stop_async();
+                            is_active = false;
+                        }
                     }
                 }
             }
@@ -495,6 +550,7 @@ async fn run_video_worker(
                                 tracing::warn!(
                                     "render size {render_unrot_w}x{render_unrot_h} overflows usize; skipping frame"
                                 );
+                                player.skip_frame();
                                 break;
                             };
 
@@ -507,29 +563,86 @@ async fn run_video_worker(
                                 && let Some(target_vec) = std::sync::Arc::get_mut(arc_buf)
                             {
                                 target_vec.resize(unrot_size, 0);
-                                if player.render_frame(render_unrot_w, render_unrot_h, target_vec).is_ok() {
-                                    let _ = event_tx.try_send(VideoEvent::FrameReady {
-                                        path: current_video_path.clone(),
-                                        width: render_unrot_w as u32,
-                                        height: render_unrot_h as u32,
-                                        rotation,
-                                        rgba: arc_buf.clone(),
-                                    });
+                                let render_started = std::time::Instant::now();
+                                let rendered = player
+                                    .render_frame(render_unrot_w, render_unrot_h, target_vec)
+                                    .is_ok();
+                                let render_elapsed = render_started.elapsed().as_micros();
+                                render_micros += render_elapsed;
+                                render_micros_max = render_micros_max.max(render_elapsed);
+                                if rendered {
+                                    frames_rendered += 1;
+                                    if event_tx
+                                        .try_send(VideoEvent::FrameReady {
+                                            path: current_video_path.clone(),
+                                            width: render_unrot_w as u32,
+                                            height: render_unrot_h as u32,
+                                            rotation,
+                                            rgba: arc_buf.clone(),
+                                        })
+                                        .is_ok()
+                                    {
+                                        frames_delivered += 1;
+                                        if let Some(started) = load_started.take() {
+                                            tracing::debug!(
+                                                width = render_unrot_w,
+                                                height = render_unrot_h,
+                                                first_frame_ms =
+                                                    started.elapsed().as_millis() as u64,
+                                                "first video frame delivered"
+                                            );
+                                        }
+                                    } else {
+                                        // The GUI is not keeping up: mpv renders
+                                        // into our buffers, the queue is full,
+                                        // so the frame is dropped instead of
+                                        // stalling playback.
+                                        frames_dropped += 1;
+                                    }
                                 }
                             } else {
-                                // If buffer pool is currently fully occupied by iced view,
-                                // we render into a temporary scratch buffer to advance mpv's state machine.
-                                let mut dummy = vec![0u8; unrot_size];
-                                let _ = player.render_frame(render_unrot_w, render_unrot_h, &mut dummy);
+                                // Every pool buffer is still held downstream (by
+                                // the GUI, or by frames sitting in the event
+                                // queue), so there is nothing to deliver into.
+                                //
+                                // Skip the frame in `vo_libmpv` (`MPV_RENDER_PARAM_SKIP_RENDERING`)
+                                // so `draw_frame` wakes up immediately without
+                                // converting or copying pixels; delivery resumes
+                                // as soon as the consumer releases a buffer.
+                                player.skip_frame();
+                                frames_starved += 1;
+                                break;
                             }
                         } else {
+                            // `vo_libmpv` is waiting in `draw_frame` for this
+                            // frame to be consumed even though `video-out-params`
+                            // is not ready yet; skip it so the VO thread can
+                            // advance instead of timing out.
+                            player.skip_frame();
                             break;
                         }
                     }
+                } else {
+                    player.drain_render_context();
                 }
             }
 
             _ = progress_interval.tick() => {
+                // mpv's own diagnostics (chosen hwdec, decoder, failures) come
+                // through its event queue and are only visible if something
+                // drains it — this tick is the one point that runs whether or
+                // not frames are flowing.
+                if let Some(error) = player.drain_log_messages()
+                    && is_active
+                    && frames_rendered == 0
+                    && !current_video_path.as_os_str().is_empty()
+                {
+                    let _ = event_tx.try_send(VideoEvent::LoadFailed {
+                        path: current_video_path.clone(),
+                        error,
+                    });
+                }
+
                 if is_active {
                     // One-shot late-rotation recheck. The initial detection
                     // runs at first-frame time, but mpv can populate
@@ -567,6 +680,37 @@ async fn run_video_worker(
                                 );
                             }
                         }
+                    }
+
+                    // Every 5 s while a file is loaded, report what the frame
+                    // path actually did. A stalled video is either "nothing was
+                    // ever rendered" (`video_size` stays none, so mpv never
+                    // reported a usable size) or "rendered but the GUI is not
+                    // consuming" (`dropped` climbing while `delivered` is not).
+                    if report_at.elapsed() >= std::time::Duration::from_secs(5) {
+                        tracing::debug!(
+                            video_size = cached_video_params
+                                .map(|(w, h, _)| format!("{w}x{h}"))
+                                .unwrap_or_else(|| "none".to_string()),
+                            rendered = frames_rendered,
+                            delivered = frames_delivered,
+                            dropped = frames_dropped,
+                            starved = frames_starved,
+                            render_avg_ms = if frames_rendered > 0 {
+                                render_micros as f64 / frames_rendered as f64 / 1000.0
+                            } else {
+                                0.0
+                            },
+                            render_max_ms = render_micros_max as f64 / 1000.0,
+                            "video frame report"
+                        );
+                        frames_rendered = 0;
+                        frames_delivered = 0;
+                        frames_dropped = 0;
+                        frames_starved = 0;
+                        render_micros = 0;
+                        render_micros_max = 0;
+                        report_at = std::time::Instant::now();
                     }
 
                     let mut pos: f64 = 0.0;
@@ -732,5 +876,104 @@ mod tests {
         // The tighter dimension wins: width here, height here.
         assert_eq!(render_scale(7680, 2160, &config), 0.125);
         assert_eq!(render_scale(1920, 4320, &config), 0.125);
+    }
+
+    #[test]
+    fn test_coalesce_command_batch_preserves_load_and_settings() {
+        let batch = vec![
+            VideoCommand::SetVolume(40.0),
+            VideoCommand::SetVolume(75.0),
+            VideoCommand::Load(PathBuf::from("first.mp4")),
+            VideoCommand::Seek(1.0),
+            VideoCommand::Pause,
+            VideoCommand::SetMute(true),
+            VideoCommand::Load(PathBuf::from("second.mp4")),
+            VideoCommand::SeekAbsolute(2.0),
+            VideoCommand::SeekAbsolute(5.0),
+            VideoCommand::Play,
+        ];
+        let coalesced = coalesce_command_batch(batch);
+        assert_eq!(coalesced.len(), 5);
+        assert!(matches!(coalesced[0], VideoCommand::SetVolume(v) if (v - 75.0).abs() < 1e-6));
+        assert!(matches!(coalesced[1], VideoCommand::SetMute(true)));
+        assert!(
+            matches!(&coalesced[2], VideoCommand::Load(p) if p == std::path::Path::new("second.mp4"))
+        );
+        assert!(matches!(coalesced[3], VideoCommand::SeekAbsolute(s) if (s - 5.0).abs() < 1e-6));
+        assert!(matches!(coalesced[4], VideoCommand::Play));
+    }
+
+    #[tokio::test]
+    async fn test_video_worker_rapid_switch_and_pool_starvation_recovery() {
+        // Skip where libmpv (or a usable software VO) is unavailable, like the
+        // other video tests: the worker would fail to start and the waits below
+        // would only run into their deadline.
+        if crate::MpvContext::new().is_err() {
+            return;
+        }
+
+        let fixture = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../resources/MockState/mock 3.mp4"
+        ));
+        if !fixture.exists() {
+            return;
+        }
+
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
+        start_video_worker(cmd_rx, event_tx);
+
+        // Rapidly issue Load/Seek/Pause/Play commands to exercise async
+        // command dispatch while vo_libmpv is initializing and rendering.
+        for _ in 0..5 {
+            cmd_tx
+                .send(VideoCommand::Load(fixture.clone()))
+                .await
+                .unwrap();
+            cmd_tx.send(VideoCommand::Seek(0.2)).await.unwrap();
+            cmd_tx.send(VideoCommand::TogglePause).await.unwrap();
+            cmd_tx.send(VideoCommand::Play).await.unwrap();
+        }
+
+        // Hold 3 frame buffers simultaneously to trigger pool starvation
+        // (`frames_starved` -> `player.skip_frame()`), then drop them and
+        // confirm frame delivery resumes immediately without vo_libmpv hanging.
+        let mut held_buffers = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while held_buffers.len() < 3 {
+            let ev = tokio::time::timeout_at(deadline, event_rx.recv())
+                .await
+                .expect("timed out waiting for initial frames")
+                .expect("worker event channel closed");
+            if let VideoEvent::FrameReady {
+                rgba,
+                width,
+                height,
+                ..
+            } = ev
+            {
+                assert!(width > 0 && height > 0);
+                held_buffers.push(rgba);
+            }
+        }
+
+        // Wait briefly while all 3 pool slots are held so at least one decoded
+        // frame hits the `frames_starved` -> `skip_frame()` branch.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        drop(held_buffers);
+
+        // Delivery must resume promptly once the pool buffers are released.
+        loop {
+            let ev = tokio::time::timeout_at(deadline, event_rx.recv())
+                .await
+                .expect("timed out waiting for frame after pool starvation")
+                .expect("worker event channel closed");
+            if matches!(ev, VideoEvent::FrameReady { .. }) {
+                break;
+            }
+        }
+
+        cmd_tx.send(VideoCommand::Deactivate).await.unwrap();
     }
 }

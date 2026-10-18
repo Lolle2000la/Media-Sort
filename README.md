@@ -66,7 +66,7 @@ No data is willingly collected. If you turn on "Check for updates on startup" in
 ## Requirements
 
 - Linux, macOS, or Windows
-- Rust 1.99 or later (if building from source)
+- Rust 1.98 or later (if building from source)
 - libmpv (needed for video and audio playback)
 - libdav1d (needed for AVIF image decoding)
 - ffmpeg (bundled on Windows and macOS for fast video thumbnails; optional on Linux — falls back to mpv)
