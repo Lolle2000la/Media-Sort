@@ -54,4 +54,9 @@ libpulse-binding = { version = "2.29", optional = true, default-features = false
 [features]
 # Write the audio player's output to PulseAudio instead of cpal's ALSA device,
 # driving rodio's mixer directly (see `media/audio_decoder/pulse.rs`).
+#
+# Linux only: the dependencies are declared for Linux above and the code is
+# compiled only there, so enabling this feature on Windows or macOS is a no-op
+# rather than an error — those targets keep cpal's WASAPI/CoreAudio output, and
+# resolving for them puts no pulse crate in the dependency graph at all.
 pulse = ["dep:libpulse-simple-binding", "dep:libpulse-binding"]

@@ -346,7 +346,7 @@ Both `ffmpeg` and mpv invocations go through **bounded worker pools** in `subscr
 
 Audio playback uses `rodio` for output and `symphonia` (all codecs) for decoding, independent of mpv. The `AudioPlayer` is created in `AppState::new()` and is `None` if initialization fails (non-fatal). Commands: `PlayAudio`, `PauseAudio`, `StopAudio`. There is no seek or progress tracking for audio.
 
-With the `pulse` feature (`media/audio_decoder/pulse.rs`) the output is PulseAudio instead of a cpal device: the player still owns a rodio `Player` (so pause/seek/volume/position are unchanged) but drives `rodio::mixer::mixer()` itself and writes the samples to the PulseAudio socket, because cpal's ALSA stream cannot deliver through the ALSA pulse plugin inside a sandbox. The Flatpak enables it; a machine without a PulseAudio server falls back to the default device.
+With the `pulse` feature (`media/audio_decoder/pulse.rs`) the output is PulseAudio instead of a cpal device: the player still owns a rodio `Player` (so pause/seek/volume/position are unchanged) but drives `rodio::mixer::mixer()` itself and writes f32 samples to the PulseAudio socket, because cpal's ALSA stream cannot deliver through the ALSA pulse plugin inside a sandbox. The Flatpak and the snap enable it; a machine without a PulseAudio server falls back to the default device. It is Linux-scoped — the dependencies and the code are Linux-only, so enabling the feature elsewhere resolves to nothing and Windows/macOS keep their cpal backends.
 
 ## GIF handling
 
