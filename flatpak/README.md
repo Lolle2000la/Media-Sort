@@ -46,11 +46,6 @@ names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
   Wayland and X11 sessions alike (software decoding when a GPU cannot do it).
 - **ffmpeg CLI:** the runtime ships `/usr/bin/ffmpeg`, which is what
   `media-sort-backend`'s `find_ffmpeg()` picks up for video thumbnails.
-- **Audio:** mpv is built *without* ALSA. The sandbox grants the PulseAudio
-  socket and no raw ALSA access, so mpv's ALSA probe can only fail — it used to
-  print a stream of `ALSA function 'snd_pcm_avail_delay' failed with error 'I/O
-  error (5)'` on every file with an audio track before falling back to
-  PulseAudio. Playback was never affected, only the log.
 - **zimg:** built as a module because the runtime does not ship it, and mpv's
   software render path — the one this app drives — converts every frame with it.
   Without it mpv falls back to swscale, and a 4K video drops from ~30 fps to

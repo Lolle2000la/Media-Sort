@@ -188,12 +188,8 @@ modules:
       - -Dvapoursynth=disabled
       - -Duchardet=disabled
       # Audio output for video playback. (Standalone audio files are decoded
-      # and played by rodio, not mpv.) ALSA is disabled on purpose: the sandbox
-      # grants the PulseAudio socket only, never raw ALSA, so mpv's ALSA probe
-      # can only fail — it printed a stream of "ALSA function
-      # 'snd_pcm_avail_delay' failed with error 'I/O error (5)'" before falling
-      # back to PulseAudio on every file that has an audio track.
-      - -Dalsa=disabled
+      # and played by rodio, not mpv.)
+      - -Dalsa=enabled
       - -Dpulse=enabled
       - -Dpipewire=enabled
     cleanup:
