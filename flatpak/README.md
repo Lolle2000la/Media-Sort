@@ -50,6 +50,15 @@ names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
   software render path — the one this app drives — converts every frame with it.
   Without it mpv falls back to swscale, and a 4K video drops from ~30 fps to
   ~6.6 fps (hardware decoding on either way): ~7 ms versus ~66 ms per frame.
+- **Audio files inside the Flatpak:** the standalone audio player (rodio
+  through cpal's ALSA backend) does not play. Its stream fails with
+  `ALSA function 'snd_pcm_avail_delay' failed with error 'I/O error (5)'`,
+  never reaches the sound server, and repeats that line while any file with an
+  audio track is playing. It is *not* a sandbox-wide audio problem: from inside
+  the same sandbox, `ffmpeg` output through both libpulse and ALSA (the pulse
+  PCM) reaches the host server, and mpv's audio — i.e. video sound — works.
+  Fixing it needs an app-side change (pick the PCM explicitly, or avoid cpal's
+  ALSA stream) plus a way to exercise cpal inside a sandbox.
 - **Trash:** deletions go through `org.freedesktop.portal.Trash`, so files land
   in the *host* trash where the desktop can see and empty them. Without it the
   `trash` crate would use `$XDG_DATA_HOME/Trash`, which a Flatpak remaps to a
