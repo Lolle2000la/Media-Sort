@@ -551,10 +551,22 @@ async fn run_video_worker(
                                     }
                                 }
                             } else {
-                                // If buffer pool is currently fully occupied by iced view,
-                                // we render into a temporary scratch buffer to advance mpv's state machine.
-                                let mut dummy = vec![0u8; unrot_size];
-                                let _ = player.render_frame(render_unrot_w, render_unrot_h, &mut dummy);
+                                // Every pool buffer is still held downstream (by
+                                // the GUI, or by frames sitting in the event
+                                // queue), so there is nothing to deliver into.
+                                //
+                                // Rendering into a throwaway buffer here keeps
+                                // the decoder running at full speed while every
+                                // frame is discarded: at 4K that pegs the CPU,
+                                // starves the consumer which then falls further
+                                // behind, and collapses delivery to a fraction
+                                // of a frame per second (each iteration also
+                                // allocates a whole frame). Stop instead and let
+                                // mpv's `framedrop=vo` drop the frame — the next
+                                // decoded frame wakes us again, and delivery
+                                // resumes as soon as the consumer releases a
+                                // buffer, so the pool is the backpressure.
+                                break;
                             }
                         } else {
                             break;
