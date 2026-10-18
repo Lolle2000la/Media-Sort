@@ -46,6 +46,10 @@ names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
   Wayland and X11 sessions alike (software decoding when a GPU cannot do it).
 - **ffmpeg CLI:** the runtime ships `/usr/bin/ffmpeg`, which is what
   `media-sort-backend`'s `find_ffmpeg()` picks up for video thumbnails.
+- **zimg:** built as a module because the runtime does not ship it, and mpv's
+  software render path — the one this app drives — converts every frame with it.
+  Without it mpv falls back to swscale, and a 4K video drops from ~30 fps to
+  ~6.6 fps (hardware decoding on either way): ~7 ms versus ~66 ms per frame.
 - **Trash:** deletions go through `org.freedesktop.portal.Trash`, so files land
   in the *host* trash where the desktop can see and empty them. Without it the
   `trash` crate would use `$XDG_DATA_HOME/Trash`, which a Flatpak remaps to a

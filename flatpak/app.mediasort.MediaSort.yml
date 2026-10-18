@@ -128,6 +128,22 @@ modules:
           type: git
           tag-pattern: ^libXpresent-([\d.]+)$
 
+  # mpv renders frames through its software render API, which converts every
+  # frame with zimg when it is available and falls back to swscale without it.
+  # At 4K that is the difference between ~7 ms and ~66 ms per frame — 30 fps
+  # versus ~6.6 fps with hardware decoding — so phone/camera 4K footage is
+  # unwatchable without it. The runtime does not ship zimg.
+  - name: zimg
+    buildsystem: autotools
+    sources:
+      - type: git
+        url: https://github.com/sekrit-twc/zimg.git
+        tag: release-3.0.6
+        commit: f819b14e8f39d1282400b0d9543e8ef73c1b2bbd
+        x-checker-data:
+          type: git
+          tag-pattern: ^release-([\d.]+)$
+
   # libmpv is not part of the freedesktop runtime, so mpv is built from source.
   # It links against the runtime's ffmpeg libraries. Media Sort renders frames
   # itself through libmpv's software render API (mpv_render_context,
@@ -151,6 +167,10 @@ modules:
       - -Dvaapi-x11=enabled
       - -Dvaapi-wayland=enabled
       - -Ddmabuf-wayland=disabled
+      # The software render path that this app drives converts frames with
+      # zimg; without it mpv falls back to swscale and 4K playback collapses
+      # (see the zimg module above). It needs no display or GPU output.
+      - -Dzimg=enabled
       - -Dgl=disabled
       - -Degl=disabled
       - -Dvulkan=disabled
@@ -166,7 +186,6 @@ modules:
       - -Dlua=disabled
       - -Djavascript=disabled
       - -Dvapoursynth=disabled
-      - -Dzimg=disabled
       - -Duchardet=disabled
       # Audio output for video playback. (Standalone audio files are decoded
       # and played by rodio, not mpv.)
