@@ -52,7 +52,10 @@ impl PulseOutput {
     /// device) instead of vanishing into a thread.
     pub fn start(source: MixerSource) -> Result<Self, String> {
         let spec = Spec {
-            format: Format::S16le,
+            // float32 is what PulseAudio and PipeWire use natively, so no
+            // quantisation or conversion is imposed here (this is what the
+            // `f32` samples from the mixer already are).
+            format: Format::F32le,
             channels: 2,
             rate: 48_000,
         };
@@ -96,15 +99,17 @@ impl Drop for PulseOutput {
 
 /// Pull mixed samples and write them to the server until told to stop.
 fn write_loop(simple: Simple, mut source: MixerSource, stop: &AtomicBool) {
-    let mut buffer: Vec<u8> = Vec::with_capacity(CHUNK_SAMPLES * 2);
+    let mut buffer: Vec<u8> = Vec::with_capacity(CHUNK_SAMPLES * size_of::<f32>());
     while !stop.load(Ordering::Relaxed) {
         buffer.clear();
         for _ in 0..CHUNK_SAMPLES {
             let Some(sample) = source.next() else {
                 break;
             };
-            let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            buffer.extend_from_slice(&value.to_le_bytes());
+            // Mixed sources can sum past full scale; clip like the device path
+            // would rather than wrapping.
+            let sample = sample.clamp(-1.0, 1.0);
+            buffer.extend_from_slice(&sample.to_le_bytes());
         }
         if buffer.is_empty() {
             break;
