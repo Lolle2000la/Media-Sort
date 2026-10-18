@@ -125,7 +125,13 @@ impl MpvContext {
                 Self::set_option(handle, c"msg-level", "all=info");
             }
             if hardware_decoding {
-                Self::set_option(handle, c"hwdec", "auto-copy");
+                // `MEDIA_SORT_MPV_HWDEC` overrides the decoder, for diagnosing a
+                // hardware path that misbehaves on one machine or in a sandbox
+                // (e.g. forcing `nvdec-copy`, or `no`); the value is handed to
+                // mpv verbatim, so it also accepts a probe list.
+                let hwdec = std::env::var("MEDIA_SORT_MPV_HWDEC")
+                    .unwrap_or_else(|_| "auto-copy".to_string());
+                Self::set_option(handle, c"hwdec", &hwdec);
             } else {
                 Self::set_option(handle, c"hwdec", "no");
             }

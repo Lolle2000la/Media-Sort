@@ -329,6 +329,12 @@ async fn run_video_worker(
     let mut last_paused = false;
     let mut is_active = false;
 
+    // Diagnostics for "the video does not play": the render loop logs when the
+    // first frame of a load is delivered and how many frames follow.
+    let mut load_started: Option<std::time::Instant> = None;
+    let mut frames_since_report: u32 = 0;
+    let mut report_at = std::time::Instant::now();
+
     let mut progress_interval = tokio::time::interval(std::time::Duration::from_millis(100));
 
     loop {
@@ -354,6 +360,9 @@ async fn run_video_worker(
                                 player.set_paused(false);
                                 player.drain_render_context();
                                 is_active = true;
+                                load_started = Some(std::time::Instant::now());
+                                frames_since_report = 0;
+                                report_at = std::time::Instant::now();
                                 canonical_video_path = path.canonicalize().ok();
                                 current_video_path = path;
                                 cached_video_params = None;
@@ -507,14 +516,43 @@ async fn run_video_worker(
                                 && let Some(target_vec) = std::sync::Arc::get_mut(arc_buf)
                             {
                                 target_vec.resize(unrot_size, 0);
-                                if player.render_frame(render_unrot_w, render_unrot_h, target_vec).is_ok() {
-                                    let _ = event_tx.try_send(VideoEvent::FrameReady {
-                                        path: current_video_path.clone(),
-                                        width: render_unrot_w as u32,
-                                        height: render_unrot_h as u32,
-                                        rotation,
-                                        rgba: arc_buf.clone(),
-                                    });
+                                if player.render_frame(render_unrot_w, render_unrot_h, target_vec).is_ok()
+                                    && event_tx
+                                        .try_send(VideoEvent::FrameReady {
+                                            path: current_video_path.clone(),
+                                            width: render_unrot_w as u32,
+                                            height: render_unrot_h as u32,
+                                            rotation,
+                                            rgba: arc_buf.clone(),
+                                        })
+                                        .is_ok()
+                                {
+                                    // "Video does not play" is either no
+                                    // frames at all or far fewer than the
+                                    // file's frame rate, and which one it is
+                                    // decides where to look. Both numbers
+                                    // are cheap to log at debug level.
+                                    if let Some(started) = load_started.take() {
+                                        tracing::debug!(
+                                            width = render_unrot_w,
+                                            height = render_unrot_h,
+                                            first_frame_ms =
+                                                started.elapsed().as_millis() as u64,
+                                            "first video frame delivered"
+                                        );
+                                    }
+                                    frames_since_report += 1;
+                                    let report_window = report_at.elapsed();
+                                    if report_window >= std::time::Duration::from_secs(5) {
+                                        tracing::debug!(
+                                            frames = frames_since_report,
+                                            fps = frames_since_report as f64
+                                                / report_window.as_secs_f64(),
+                                            "video frames delivered"
+                                        );
+                                        frames_since_report = 0;
+                                        report_at = std::time::Instant::now();
+                                    }
                                 }
                             } else {
                                 // If buffer pool is currently fully occupied by iced view,
