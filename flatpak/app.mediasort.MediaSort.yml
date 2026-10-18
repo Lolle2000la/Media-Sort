@@ -218,7 +218,10 @@ modules:
         RUSTFLAGS: -L/app/lib
     build-commands:
       # The "velopack" self-updater is left off on purpose: Flatpak owns updates.
-      - cargo build --release --offline --locked -p media-sort-gui
+      # `pulse` routes the audio player's output straight to PulseAudio: the
+      # sandbox exposes only that socket, and cpal's ALSA stream cannot deliver
+      # through the ALSA pulse plugin there (see the crate's audio_decoder).
+      - cargo build --release --offline --locked -p media-sort-gui --features media-sort-backend/pulse
       - install -Dm755 target/release/media-sort-gui -t /app/bin
       - install -Dm644 packaging/linux/app.mediasort.MediaSort.metainfo.xml -t /app/share/metainfo
       - install -Dm644 packaging/linux/app.mediasort.MediaSort.desktop -t /app/share/applications

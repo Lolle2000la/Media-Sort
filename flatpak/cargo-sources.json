@@ -4487,6 +4487,58 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/libpulse-binding/libpulse-binding-2.30.1.crate",
+        "sha256": "909eb3049e16e373680fe65afe6e2a722ace06b671250cc4849557bc57d6a397",
+        "dest": "cargo/vendor/libpulse-binding-2.30.1"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"909eb3049e16e373680fe65afe6e2a722ace06b671250cc4849557bc57d6a397\", \"files\": {}}",
+        "dest": "cargo/vendor/libpulse-binding-2.30.1",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/libpulse-simple-binding/libpulse-simple-binding-2.29.0.crate",
+        "sha256": "b7bebef0381c8e3e4b23cc24aaf36fab37472bece128de96f6a111efa464cfef",
+        "dest": "cargo/vendor/libpulse-simple-binding-2.29.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"b7bebef0381c8e3e4b23cc24aaf36fab37472bece128de96f6a111efa464cfef\", \"files\": {}}",
+        "dest": "cargo/vendor/libpulse-simple-binding-2.29.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/libpulse-simple-sys/libpulse-simple-sys-1.22.0.crate",
+        "sha256": "3bd96888fe37ad270d16abf5e82cccca1424871cf6afa2861824d2a52758eebc",
+        "dest": "cargo/vendor/libpulse-simple-sys-1.22.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"3bd96888fe37ad270d16abf5e82cccca1424871cf6afa2861824d2a52758eebc\", \"files\": {}}",
+        "dest": "cargo/vendor/libpulse-simple-sys-1.22.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/libpulse-sys/libpulse-sys-1.23.0.crate",
+        "sha256": "d74371848b22e989f829cc1621d2ebd74960711557d8b45cfe740f60d0a05e61",
+        "dest": "cargo/vendor/libpulse-sys-1.23.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"d74371848b22e989f829cc1621d2ebd74960711557d8b45cfe740f60d0a05e61\", \"files\": {}}",
+        "dest": "cargo/vendor/libpulse-sys-1.23.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/libredox/libredox-0.1.25.crate",
         "sha256": "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d",
         "dest": "cargo/vendor/libredox-0.1.25"
@@ -9791,6 +9843,32 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/winapi/winapi-0.3.9.crate",
+        "sha256": "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419",
+        "dest": "cargo/vendor/winapi-0.3.9"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419\", \"files\": {}}",
+        "dest": "cargo/vendor/winapi-0.3.9",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/winapi-i686-pc-windows-gnu/winapi-i686-pc-windows-gnu-0.4.0.crate",
+        "sha256": "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6",
+        "dest": "cargo/vendor/winapi-i686-pc-windows-gnu-0.4.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6\", \"files\": {}}",
+        "dest": "cargo/vendor/winapi-i686-pc-windows-gnu-0.4.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/winapi-util/winapi-util-0.1.11.crate",
         "sha256": "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22",
         "dest": "cargo/vendor/winapi-util-0.1.11"
@@ -9799,6 +9877,19 @@
         "type": "inline",
         "contents": "{\"package\": \"c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22\", \"files\": {}}",
         "dest": "cargo/vendor/winapi-util-0.1.11",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/winapi-x86_64-pc-windows-gnu/winapi-x86_64-pc-windows-gnu-0.4.0.crate",
+        "sha256": "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f",
+        "dest": "cargo/vendor/winapi-x86_64-pc-windows-gnu-0.4.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f\", \"files\": {}}",
+        "dest": "cargo/vendor/winapi-x86_64-pc-windows-gnu-0.4.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {
