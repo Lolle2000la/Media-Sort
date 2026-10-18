@@ -203,6 +203,12 @@ fn read_exif_orientation_from_path(path: &Path) -> Option<u32> {
 
 /// Decode `path` to fit inside the `max_width` x `max_height` box (preserving
 /// aspect ratio), using the per-format optimized pipeline.
+///
+/// Image formats only. This is the preview path, and the GUI only asks for
+/// previews of `MediaType::Image` entries (`load_full_image` returns no task
+/// otherwise); audio cover art goes through
+/// [`super::thumbnail::generate_thumbnail`], which reports "no embedded cover
+/// art" as `Ok(None)` rather than an error.
 pub fn load_preview(
     path: &Path,
     max_width: u32,
