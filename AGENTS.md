@@ -234,7 +234,7 @@ Note: `app::update()` (`crates/media-sort-gui/src/app.rs:10`) delegates to the `
 
 | Module | Purpose |
 |--------|---------|
-| `mpv_context.rs` | `MpvContext` (software render context, frame capture, `query_supported_extensions()`), `MpvError`. Asks libmpv for its log messages and forwards them to `tracing` (`warn`/`error` by default, `info` — the chosen hwdec, the decoder, why an attempt failed — behind `RUST_LOG=debug`): libmpv hides them otherwise, and a Flatpak has no mpv CLI to run |
+| `mpv_context.rs` | `MpvContext` (software render context, frame capture, `query_supported_extensions()`), `MpvError`. Asks libmpv for its log messages and forwards them to `tracing` (`warn`/`error` by default, `info` — the chosen hwdec, the decoder, why an attempt failed — behind `RUST_LOG=debug`): libmpv hides them otherwise, and a Flatpak has no mpv CLI to run. Under verbose logging (`RUST_LOG=debug`/`trace`, or `MEDIA_SORT_MPV_TERMINAL`) mpv also writes to stderr at `msg-level=all=info`, because the event queue cannot be drained while a synchronous libmpv call blocks — which is precisely the "no frames" failure |
 | `worker.rs` | `VideoCommand`/`VideoEvent` worker protocol (raw frames + `Rotation` metadata), `rotate_rgba`, `PlayerConfig`, `start_video_worker(_with)` |
 | `rotation.rs` | `Rotation` enum + `detect_video_rotation` (mp4 tkhd / EXIF / mp4ameta) |
 

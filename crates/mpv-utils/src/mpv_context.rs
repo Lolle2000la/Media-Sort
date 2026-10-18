@@ -114,6 +114,16 @@ impl MpvContext {
             // Common options for both modes.
             Self::set_option(handle, c"vo", "libmpv");
             Self::set_option(handle, c"keep-open", "yes");
+            // libmpv does not log to the terminal for a library client, and the
+            // event draining in `drain_log_messages` cannot run while a
+            // synchronous libmpv call is blocked — which is exactly the failure
+            // that matters ("no frames", with nothing to explain it). When
+            // verbose logging is requested, let mpv write to stderr directly as
+            // well, so a hang still leaves its last messages behind.
+            if verbose_logging_requested() {
+                Self::set_option(handle, c"terminal", "yes");
+                Self::set_option(handle, c"msg-level", "all=info");
+            }
             if hardware_decoding {
                 Self::set_option(handle, c"hwdec", "auto-copy");
             } else {
@@ -790,6 +800,16 @@ pub(crate) unsafe extern "C" fn mpv_wakeup_callback(cb_ctx: *mut c_void) {
     if let Some(tx) = unsafe { sender.as_ref() } {
         let _ = tx.try_send(());
     }
+}
+
+/// Whether mpv should also log to the terminal: `RUST_LOG` asking for
+/// `debug`/`trace` — the same convention the app's tracing filter uses — or an
+/// explicit `MEDIA_SORT_MPV_TERMINAL`.
+fn verbose_logging_requested() -> bool {
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+    rust_log.contains("debug")
+        || rust_log.contains("trace")
+        || std::env::var_os("MEDIA_SORT_MPV_TERMINAL").is_some()
 }
 
 /// Forwards one mpv log message to `tracing`.
