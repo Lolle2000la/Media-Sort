@@ -335,6 +335,9 @@ async fn run_video_worker(
     let mut frames_rendered: u32 = 0;
     let mut frames_delivered: u32 = 0;
     let mut frames_dropped: u32 = 0;
+    let mut frames_starved: u32 = 0;
+    let mut render_micros: u128 = 0;
+    let mut render_micros_max: u128 = 0;
     let mut report_at = std::time::Instant::now();
 
     let mut progress_interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -366,6 +369,9 @@ async fn run_video_worker(
                                 frames_rendered = 0;
                                 frames_delivered = 0;
                                 frames_dropped = 0;
+                                frames_starved = 0;
+                                render_micros = 0;
+                                render_micros_max = 0;
                                 report_at = std::time::Instant::now();
                                 canonical_video_path = path.canonicalize().ok();
                                 current_video_path = path;
@@ -520,7 +526,14 @@ async fn run_video_worker(
                                 && let Some(target_vec) = std::sync::Arc::get_mut(arc_buf)
                             {
                                 target_vec.resize(unrot_size, 0);
-                                if player.render_frame(render_unrot_w, render_unrot_h, target_vec).is_ok() {
+                                let render_started = std::time::Instant::now();
+                                let rendered = player
+                                    .render_frame(render_unrot_w, render_unrot_h, target_vec)
+                                    .is_ok();
+                                let render_elapsed = render_started.elapsed().as_micros();
+                                render_micros += render_elapsed;
+                                render_micros_max = render_micros_max.max(render_elapsed);
+                                if rendered {
                                     frames_rendered += 1;
                                     if event_tx
                                         .try_send(VideoEvent::FrameReady {
@@ -566,6 +579,7 @@ async fn run_video_worker(
                                 // decoded frame wakes us again, and delivery
                                 // resumes as soon as the consumer releases a
                                 // buffer, so the pool is the backpressure.
+                                frames_starved += 1;
                                 break;
                             }
                         } else {
@@ -634,11 +648,21 @@ async fn run_video_worker(
                             rendered = frames_rendered,
                             delivered = frames_delivered,
                             dropped = frames_dropped,
+                            starved = frames_starved,
+                            render_avg_ms = if frames_rendered > 0 {
+                                render_micros as f64 / frames_rendered as f64 / 1000.0
+                            } else {
+                                0.0
+                            },
+                            render_max_ms = render_micros_max as f64 / 1000.0,
                             "video frame report"
                         );
                         frames_rendered = 0;
                         frames_delivered = 0;
                         frames_dropped = 0;
+                        frames_starved = 0;
+                        render_micros = 0;
+                        render_micros_max = 0;
                         report_at = std::time::Instant::now();
                     }
 
