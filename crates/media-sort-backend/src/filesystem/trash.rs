@@ -101,14 +101,14 @@ pub fn delete_to_trash(path: &Path) -> Result<Box<dyn TrashRestoreHandle>, Actio
                     tracing::warn!(
                         path = %original_path.display(),
                         %err,
-                        "org.freedesktop.portal.Trash failed; trashing into the home trash instead"
+                        "org.freedesktop.portal.Trash failed; trashing into the host trash directly instead"
                     );
                     match portal::trash_into_home_trash(&original_path) {
                         Ok(handle) => return Ok(handle),
                         Err(err) => tracing::warn!(
                             path = %original_path.display(),
                             %err,
-                            "the home trash cannot take the file; trashing inside the sandbox instead"
+                            "direct host trash failed; trashing inside the sandbox instead"
                         ),
                     }
                 }
@@ -117,6 +117,14 @@ pub fn delete_to_trash(path: &Path) -> Result<Box<dyn TrashRestoreHandle>, Actio
 
         trash::delete(&original_path)
             .map_err(|e| ActionError::Io(std::io::Error::other(e.to_string())))?;
+
+        // The `trash` crate creates `Trash/{,files,info}` with `fs::create_dir_all`
+        // (mode 0755 under a normal umask), whereas `xdg-desktop-portal` 1.20+
+        // strictly requires mode 0700 and rejects any subsequent portal trash
+        // call with "Directory already exists with bad permissions". Normalize
+        // permissions back to 0700 immediately after `trash::delete`.
+        #[cfg(target_os = "linux")]
+        portal::repair_existing_trash_permissions(&original_path);
 
         // Windows: remember when the delete happened so restore can bind
         // this handle to the correct trash entry among several same-name

@@ -75,30 +75,27 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
             (media_type == media_sort_core::media_type::MediaType::Video).then(|| path.clone()),
         );
 
-        if media_type == media_sort_core::media_type::MediaType::Video {
-            if let Some(ref mut ap) = state.audio.player {
-                ap.stop();
-            }
-            state.audio.playing = false;
+        if media_type == media_sort_core::media_type::MediaType::Audio {
             state.audio.position = 0.0;
-        } else if media_type == media_sort_core::media_type::MediaType::Audio {
-            if state.audio.playing
-                && let Some(ref player) = state.audio.player
-            {
+            state.audio.duration = 0.0;
+            if let Some(ref player) = state.audio.player {
                 player.stop();
-                if let Err(e) = player.play(&path) {
-                    tracing::error!("Audio play failed: {e}");
-                    state.audio.playing = false;
-                } else {
-                    state.audio.duration = player.duration();
+                if state.audio.playing {
+                    if let Err(e) = player.play(&path) {
+                        tracing::error!("Audio play failed: {e}");
+                        state.audio.playing = false;
+                    } else {
+                        state.audio.duration = player.duration();
+                    }
                 }
             }
-        } else if state.audio.playing {
+        } else {
             if let Some(ref player) = state.audio.player {
                 player.stop();
             }
             state.audio.playing = false;
             state.audio.position = 0.0;
+            state.audio.duration = 0.0;
         }
 
         let mut tasks = vec![load_metadata(state, index)];

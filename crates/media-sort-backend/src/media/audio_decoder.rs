@@ -122,6 +122,11 @@ impl AudioPlayer {
     #[cfg(all(target_os = "linux", feature = "pulse"))]
     fn with_pulse() -> Option<Self> {
         let (mixer, source) = rodio::mixer::mixer(pulse::CHANNELS, pulse::RATE);
+        // Connect the player to the mixer BEFORE starting the writer thread:
+        // `MixerSource::next()` returns `None` while the mixer has no input
+        // sources attached, which would cause the writer thread to see an
+        // empty source on its first read before `connect_new` runs.
+        let player = Player::connect_new(&mixer);
         let output = match pulse::PulseOutput::start(source) {
             Ok(output) => output,
             Err(err) => {
@@ -129,9 +134,6 @@ impl AudioPlayer {
                 return None;
             }
         };
-        // `Player::connect_new` needs the mixer, which `PulseOutput` is now
-        // reading from; the same mixer instance is shared through it.
-        let player = Player::connect_new(&mixer);
         Some(Self {
             _output: Output::Pulse(output),
             player,
@@ -147,6 +149,9 @@ impl AudioPlayer {
             .map(|d| d.as_secs_f64())
             .or_else(|| probe_duration(path))
             .unwrap_or(0.0);
+        if !self.player.empty() {
+            self.player.stop();
+        }
         self.player.append(decoder);
         if let Ok(mut d) = self.duration.lock() {
             *d = dur;
@@ -164,11 +169,17 @@ impl AudioPlayer {
     }
 
     pub fn stop(&self) {
-        self.player.stop();
+        if !self.player.empty() {
+            self.player.stop();
+        }
+        self.player.play();
+        if let Ok(mut d) = self.duration.lock() {
+            *d = 0.0;
+        }
     }
 
     pub fn is_paused(&self) -> bool {
-        self.player.is_paused()
+        self.player.is_paused() && !self.player.empty()
     }
 
     pub fn empty(&self) -> bool {

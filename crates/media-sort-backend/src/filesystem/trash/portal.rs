@@ -30,7 +30,7 @@ use std::io;
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::Local;
@@ -49,6 +49,13 @@ const MAX_TRASH_NAME_ATTEMPTS: u32 = 10_000;
 /// Ask the desktop to move `original_path` to the user's trash
 /// (`org.freedesktop.portal.Trash.TrashFile`).
 pub fn delete_to_trash(original_path: &Path) -> Result<Box<dyn TrashRestoreHandle>, ActionError> {
+    // `xdg-desktop-portal` 1.20+ strictly requires mode 0700 on `Trash`,
+    // `Trash/files`, and `Trash/info` (`ensure_dir_at`), failing with
+    // "Directory already exists with bad permissions" if any of them was
+    // created with 0755 (for instance by the `trash` crate's `create_dir_all`).
+    // Repair any existing candidate trash directories before calling the portal.
+    repair_existing_trash_permissions(original_path);
+
     // TrashFile takes a file descriptor, and the portal only trashes what the
     // caller can open read/write.
     let file = fs::OpenOptions::new()
@@ -69,6 +76,27 @@ pub fn delete_to_trash(original_path: &Path) -> Result<Box<dyn TrashRestoreHandl
 
 fn to_io(err: impl std::error::Error + Send + Sync + 'static) -> ActionError {
     ActionError::Io(io::Error::other(err))
+}
+
+/// Tighten permissions on any existing trash directories for `original_path`
+/// (plus the `$XDG_DATA_HOME/Trash` directory `trash::delete` uses on native
+/// runs) to `0700` so `xdg-desktop-portal` never rejects them for bad mode bits.
+pub fn repair_existing_trash_permissions(original_path: &Path) {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut candidates = trash_directories(home.as_deref(), original_path);
+    if let Some(xdg_data) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+        candidates.push(xdg_data.join("Trash"));
+    }
+    for base in candidates {
+        for dir in [base.as_path(), &base.join("files"), &base.join("info")] {
+            if let Ok(meta) = fs::symlink_metadata(dir)
+                && meta.is_dir()
+                && (meta.mode() & 0o7777) != 0o700
+            {
+                let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
 }
 
 /// Restore handle for a file the host trashed on our behalf. The portal does
@@ -112,11 +140,21 @@ fn restore_from_host_trash(original: &Path) -> Result<(), ActionError> {
                 .into(),
         ));
     };
+    if !trashed_path.exists() {
+        return Err(ActionError::RestorationFailed(
+            "the file is not in the trash any more (it may have been emptied)".into(),
+        ));
+    }
+    if original.exists() {
+        return Err(ActionError::RestorationFailed(
+            "a file already exists at the original path".into(),
+        ));
+    }
 
     if let Some(parent) = original.parent() {
         fs::create_dir_all(parent).map_err(ActionError::Io)?;
     }
-    fs::rename(&trashed_path, original).map_err(ActionError::Io)?;
+    move_file(&trashed_path, original).map_err(ActionError::Io)?;
     // Removing the info file is what makes the entry disappear for the file
     // manager; a leftover would only be cosmetic, so its failure is not fatal.
     let _ = fs::remove_file(&info_path);
@@ -125,13 +163,13 @@ fn restore_from_host_trash(original: &Path) -> Result<(), ActionError> {
 }
 
 /// Move `original_path` into the real home trash (`$HOME/.local/share/Trash`)
-/// without the portal.
+/// — or, when `original_path` lives on another mount, into that volume's
+/// `.Trash-<uid>` directory with specification-compliant `0700` permissions
+/// and relative `Path=` metadata — without the portal.
 ///
 /// `$XDG_DATA_HOME` is deliberately ignored: inside the sandbox it points at
 /// the app's private data directory, which is the very problem this works
-/// around. Only files on the home filesystem belong here — for anything else
-/// the caller keeps the `trash` crate's per-volume trash, which is the trash
-/// the desktop shows for that mount.
+/// around.
 pub fn trash_into_home_trash(
     original_path: &Path,
 ) -> Result<Box<dyn TrashRestoreHandle>, ActionError> {
@@ -139,7 +177,11 @@ pub fn trash_into_home_trash(
         .map(PathBuf::from)
         .ok_or_else(|| ActionError::Io(io::Error::other("HOME is not set")))?;
 
-    trash_into_home_trash_at(&home.join(".local/share/Trash"), original_path)
+    let home_trash = home.join(".local/share/Trash");
+    match trash_into_home_trash_at(&home_trash, original_path) {
+        Ok(handle) => Ok(handle),
+        Err(home_err) => trash_into_volume_trash(&home, original_path).or(Err(home_err)),
+    }
 }
 
 /// The home-trash layout below `base`: `files/` holds the moved files, `info/`
@@ -159,12 +201,54 @@ fn trash_into_home_trash_at(
         )));
     }
 
+    trash_into_directory_with_recorded_path(base, original_path, original_path)
+}
+
+/// Move `original_path` into its mount point's `.Trash-<uid>` directory,
+/// recording `Path=` relative to the mount root as required by the FreeDesktop
+/// Trash specification.
+fn trash_into_volume_trash(
+    home: &Path,
+    original_path: &Path,
+) -> Result<Box<dyn TrashRestoreHandle>, ActionError> {
+    let uid = user_id_of(home)
+        .ok_or_else(|| ActionError::Io(io::Error::other("could not determine user id")))?;
+    let topdir = mount_root_of(original_path)?;
+    // Never treat `$HOME` itself as a volume-trash topdir (inside Flatpak
+    // `$HOME` is a bind mount, and `$HOME/.Trash-<uid>` is ignored by desktop
+    // file managers).
+    if topdir == home {
+        return Err(ActionError::Io(io::Error::other(
+            "refusing to create volume trash directly under HOME",
+        )));
+    }
+    trash_into_volume_trash_at(&topdir, uid, original_path)
+}
+
+fn trash_into_volume_trash_at(
+    topdir: &Path,
+    uid: u32,
+    original_path: &Path,
+) -> Result<Box<dyn TrashRestoreHandle>, ActionError> {
+    let relative = original_path
+        .strip_prefix(topdir)
+        .map_err(|_| ActionError::Io(io::Error::other("file is not inside the volume root")))?;
+    let base = topdir.join(format!(".Trash-{uid}"));
+    ensure_trash_directory(&base)?;
+    trash_into_directory_with_recorded_path(&base, original_path, relative)
+}
+
+fn trash_into_directory_with_recorded_path(
+    base: &Path,
+    original_path: &Path,
+    recorded_path: &Path,
+) -> Result<Box<dyn TrashRestoreHandle>, ActionError> {
     let file_name = original_path
         .file_name()
         .ok_or_else(|| ActionError::Io(io::Error::other("the path has no file name")))?;
 
     let mut info = String::from("[Trash Info]\nPath=");
-    info.push_str(&percent_encode(original_path.as_os_str().as_bytes()));
+    info.push_str(&percent_encode(recorded_path.as_os_str().as_bytes()));
     info.push_str("\nDeletionDate=");
     info.push_str(&Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
     info.push('\n');
@@ -187,6 +271,23 @@ fn trash_into_home_trash_at(
     }))
 }
 
+/// Find the highest ancestor of `path` that sits on the same filesystem device
+/// (`st_dev`) as `path`.
+fn mount_root_of(path: &Path) -> Result<PathBuf, ActionError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ActionError::Io(io::Error::other("path has no parent directory")))?;
+    let dev = fs::metadata(parent).map_err(ActionError::Io)?.dev();
+    let mut topdir = parent.to_path_buf();
+    for ancestor in parent.ancestors().skip(1) {
+        match fs::metadata(ancestor) {
+            Ok(meta) if meta.dev() == dev => topdir = ancestor.to_path_buf(),
+            _ => break,
+        }
+    }
+    Ok(topdir)
+}
+
 fn ensure_trash_directory(base: &Path) -> Result<(), ActionError> {
     for directory in [base.to_path_buf(), base.join("files"), base.join("info")] {
         fs::DirBuilder::new()
@@ -194,9 +295,30 @@ fn ensure_trash_directory(base: &Path) -> Result<(), ActionError> {
             .mode(0o700)
             .create(&directory)
             .map_err(ActionError::Io)?;
+        // `DirBuilder::create` does not tighten the mode of a directory that
+        // already exists (e.g. one previously created as 0755 by the `trash`
+        // crate), so enforce 0700 explicitly.
+        if let Ok(meta) = fs::symlink_metadata(&directory)
+            && meta.is_dir()
+            && (meta.mode() & 0o7777) != 0o700
+        {
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+                .map_err(ActionError::Io)?;
+        }
     }
 
     Ok(())
+}
+
+fn move_file(src: &Path, dst: &Path) -> io::Result<()> {
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+            fs::copy(src, dst)?;
+            fs::remove_file(src)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Claim a free name in `info_dir` and write `contents` into its `.trashinfo`,
@@ -238,6 +360,15 @@ fn trash_info_file_name(name: &OsStr) -> OsString {
     OsString::from_vec(bytes)
 }
 
+fn strip_trashinfo_suffix(file_name: &OsStr) -> Option<OsString> {
+    let bytes = file_name.as_bytes();
+    let stem = bytes.strip_suffix(b".trashinfo")?;
+    if stem.is_empty() {
+        return None;
+    }
+    Some(OsString::from_vec(stem.to_vec()))
+}
+
 /// `name`, and `stem.2.ext` / `name.2` / `stem.2` for later collisions, with
 /// the counter inserted before the *first* dot — the naming the specification
 /// and the portal use. Bytes are passed through, so non-UTF-8 names survive.
@@ -264,8 +395,8 @@ fn trash_name_for(file_name: &OsStr, counter: u32) -> OsString {
     OsString::from_vec(name)
 }
 
-/// Restore handle for a file this process moved into the home trash itself, so
-/// unlike [`PortalTrashRestore`] it knows exactly where the entry is.
+/// Restore handle for a file this process moved into the home or volume trash
+/// itself, so unlike [`PortalTrashRestore`] it knows exactly where the entry is.
 struct HomeTrashRestore {
     original_path: PathBuf,
     trashed_path: PathBuf,
@@ -292,7 +423,7 @@ impl TrashRestoreHandle for HomeTrashRestore {
         if let Some(parent) = self.original_path.parent() {
             fs::create_dir_all(parent).map_err(ActionError::Io)?;
         }
-        fs::rename(&self.trashed_path, &self.original_path).map_err(ActionError::Io)?;
+        move_file(&self.trashed_path, &self.original_path).map_err(ActionError::Io)?;
         // Removing the info file is what makes the entry disappear for the file
         // manager; a leftover would only be cosmetic, so its failure is not fatal.
         let _ = fs::remove_file(&self.info_path);
@@ -323,7 +454,6 @@ fn find_entry(original: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 fn find_entry_in(directories: &[PathBuf], original: &Path) -> Option<(PathBuf, PathBuf)> {
-    let wanted = original.as_os_str().as_bytes();
     let mut youngest: Option<(String, PathBuf, PathBuf)> = None;
 
     for directory in directories {
@@ -332,21 +462,18 @@ fn find_entry_in(directories: &[PathBuf], original: &Path) -> Option<(PathBuf, P
         };
         for entry in entries.flatten() {
             let info_path = entry.path();
-            if info_path.extension().and_then(|ext| ext.to_str()) != Some("trashinfo") {
+            let Some(stem) = info_path.file_name().and_then(strip_trashinfo_suffix) else {
                 continue;
-            }
+            };
             let Ok(contents) = fs::read_to_string(&info_path) else {
                 continue;
             };
             let Some((trashed_from, deletion_date)) = parse_trash_info(&contents) else {
                 continue;
             };
-            if trashed_from != wanted {
+            if resolve_trashed_path(directory, &trashed_from) != original {
                 continue;
             }
-            let Some(stem) = info_path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
             // A name collision is resolved by renaming the entry in `files`,
             // and the info file carries that same name.
             let trashed_path = directory.join("files").join(stem);
@@ -360,6 +487,33 @@ fn find_entry_in(directories: &[PathBuf], original: &Path) -> Option<(PathBuf, P
     }
 
     youngest.map(|(_, trashed_path, info_path)| (trashed_path, info_path))
+}
+
+/// Resolve the `Path=` value from a `.trashinfo` file inside `trash_dir`.
+///
+/// Per the FreeDesktop Trash specification, home-trash entries record an
+/// absolute path, while volume-trash entries (`$topdir/.Trash/$uid` or
+/// `$topdir/.Trash-$uid`) record a path relative to `$topdir`.
+fn resolve_trashed_path(trash_dir: &Path, trashed_from: &[u8]) -> PathBuf {
+    let raw = Path::new(OsStr::from_bytes(trashed_from));
+    if raw.is_absolute() {
+        return raw.to_path_buf();
+    }
+    match trash_topdir(trash_dir) {
+        Some(topdir) => topdir.join(raw),
+        None => raw.to_path_buf(),
+    }
+}
+
+/// The `$topdir` that relative `Path=` entries in `trash_dir` are anchored to:
+/// `<topdir>` for `<topdir>/.Trash/<uid>` and `<topdir>/.Trash-<uid>`.
+fn trash_topdir(trash_dir: &Path) -> Option<&Path> {
+    let parent = trash_dir.parent()?;
+    if parent.file_name() == Some(OsStr::new(".Trash")) {
+        parent.parent()
+    } else {
+        Some(parent)
+    }
 }
 
 /// The trash directories that can hold `original`: the home trash, plus the
@@ -376,7 +530,7 @@ fn trash_directories(home: Option<&Path>, original: &Path) -> Vec<PathBuf> {
         directories.push(home.join(".local/share/Trash"));
     }
 
-    let Some(uid) = home.and_then(user_id_of) else {
+    let Some(uid) = home.and_then(user_id_of).or_else(|| user_id_of(original)) else {
         return directories;
     };
     if let Some(parent) = original.parent() {
@@ -690,5 +844,71 @@ mod tests {
         let result = trash_into_home_trash_at(&base, Path::new("/proc/self/cmdline"));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn finds_volume_trash_entries_recorded_with_relative_paths() {
+        let temp = TempDir::new("volume-relative");
+        let volume = temp.path().join("mnt/datasets");
+        let trash = volume.join(".Trash-1000");
+        let original = volume.join("DCIM/photo.jpg");
+
+        // Per the FreeDesktop Trash spec, volume trashes record `Path=`
+        // relative to the volume topdir (`DCIM/photo.jpg`, not `/.../mnt/datasets/DCIM/photo.jpg`).
+        write_trashinfo(
+            &trash,
+            "photo.jpg",
+            Path::new("DCIM/photo.jpg"),
+            "2026-10-18T10:00:00",
+        );
+
+        let (trashed_path, info_path) =
+            find_entry_in(std::slice::from_ref(&trash), &original).expect("volume entry found");
+
+        assert_eq!(trashed_path, trash.join("files/photo.jpg"));
+        assert_eq!(info_path, trash.join("info/photo.jpg.trashinfo"));
+    }
+
+    #[test]
+    fn trashing_into_volume_trash_writes_relative_path_and_restores() {
+        let temp = TempDir::new("volume-trash");
+        let volume = temp.path().join("mnt/datasets");
+        fs::create_dir_all(volume.join("sub")).expect("create sub");
+        let original = volume.join("sub/photo.jpg");
+        fs::write(&original, b"volume-content").expect("write file");
+
+        let mut handle = trash_into_volume_trash_at(&volume, 1000, &original).expect("trash");
+
+        let trash = volume.join(".Trash-1000");
+        assert!(!original.exists());
+        let info = fs::read_to_string(trash.join("info/photo.jpg.trashinfo")).expect("info file");
+        let (trashed_from, _) = parse_trash_info(&info).expect("info parses");
+        assert_eq!(trashed_from, b"sub/photo.jpg".to_vec());
+        // `find_entry_in` must also match the relative path back to `original`.
+        assert!(find_entry_in(std::slice::from_ref(&trash), &original).is_some());
+
+        handle.restore().expect("restore");
+        assert_eq!(fs::read(&original).expect("restored"), b"volume-content");
+    }
+
+    #[test]
+    fn ensure_trash_directory_tightens_existing_0755_directories_to_0700() {
+        let temp = TempDir::new("permissions");
+        let base = temp.path().join("Trash");
+        for dir in [&base, &base.join("files"), &base.join("info")] {
+            fs::create_dir_all(dir).expect("create dir");
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("set 0755");
+        }
+
+        ensure_trash_directory(&base).expect("ensure trash directory");
+
+        for dir in [&base, &base.join("files"), &base.join("info")] {
+            assert_eq!(
+                dir.metadata().expect("metadata").mode() & 0o7777,
+                0o700,
+                "{} must be tightened to 0700",
+                dir.display()
+            );
+        }
     }
 }

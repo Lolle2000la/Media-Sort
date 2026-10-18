@@ -404,7 +404,7 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
         }
         MediaMessage::AudioPlayPause => {
             if let Some(ref player) = state.audio.player {
-                if player.is_paused() {
+                if player.is_paused() && !player.empty() {
                     player.resume();
                     state.audio.playing = true;
                 } else if state.audio.playing {

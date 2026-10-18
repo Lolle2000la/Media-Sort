@@ -7,10 +7,26 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+const MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: mpv_render_param_type = 12;
+const MPV_RENDER_PARAM_SKIP_RENDERING: mpv_render_param_type = 13;
 const MPV_RENDER_PARAM_SW_SIZE: mpv_render_param_type = 17;
 const MPV_RENDER_PARAM_SW_FORMAT: mpv_render_param_type = 18;
 const MPV_RENDER_PARAM_SW_STRIDE: mpv_render_param_type = 19;
 const MPV_RENDER_PARAM_SW_POINTER: mpv_render_param_type = 20;
+
+/// Default copy-back hardware decoder probe list when hardware decoding is
+/// enabled.
+///
+/// We deliberately list the platform copy-back APIs (`nvdec-copy`, `vaapi-copy`,
+/// `d3d11va-copy`, `dxva2-copy`, `videotoolbox-copy`) instead of `auto-copy`:
+/// on Linux with mpv 0.41+ and FFmpeg 8.1+, `auto-copy` probes `vulkan-copy`
+/// first (`h264-vulkan-copy`, `hevc-vulkan-copy`, `av1-vulkan-copy`), which
+/// logs `av_log callback called with bad parameters (NULL AVClass)`, stalls
+/// ~600 ms per load, and segfaults (`SIGSEGV`) on decoder teardown when files
+/// are switched rapidly inside the Flatpak runtime. Explicit platform copy
+/// decoders use NVDEC on NVIDIA and VAAPI on AMD/Intel Mesa without touching
+/// `vulkan-copy`. Override at runtime with `MEDIA_SORT_MPV_HWDEC`.
+const DEFAULT_HWDEC: &str = "nvdec-copy,vaapi-copy,d3d11va-copy,dxva2-copy,videotoolbox-copy";
 
 /// Errors produced by [`MpvContext`] operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,17 +107,19 @@ impl MpvContext {
     }
 
     /// Creates a fully configured playback context (video + audio enabled).
-    /// `hardware_decoding` controls mpv's `hwdec` option: `true` keeps the
-    /// default `auto-copy` mode, `false` forces software decoding (`hwdec=no`).
+    /// `hardware_decoding` controls mpv's `hwdec` option: `true` enables the
+    /// platform copy-back hardware decoder list, `false` forces software
+    /// decoding (`hwdec=no`).
     pub fn new_with_hardware_decoding(hardware_decoding: bool) -> Result<Self, MpvError> {
         Self::create(false, hardware_decoding)
     }
 
-    /// Creates a minimal context tuned for thumbnail extraction: audio and
-    /// subtitles are disabled and seeking is allowed to be approximate, which
-    /// makes frame capture much faster.
+    /// Creates a minimal context tuned for thumbnail extraction: audio,
+    /// subtitles, and hardware decoding are disabled and seeking is allowed to
+    /// be approximate, which makes single-frame capture fast without opening
+    /// competing GPU hardware decode contexts across thumbnail worker threads.
     pub fn new_thumbnail_player() -> Result<Self, MpvError> {
-        Self::create(true, true)
+        Self::create(true, false)
     }
 
     fn create(thumbnail_mode: bool, hardware_decoding: bool) -> Result<Self, MpvError> {
@@ -130,7 +148,7 @@ impl MpvContext {
                 // (e.g. forcing `nvdec-copy`, or `no`); the value is handed to
                 // mpv verbatim, so it also accepts a probe list.
                 let hwdec = std::env::var("MEDIA_SORT_MPV_HWDEC")
-                    .unwrap_or_else(|_| "auto-copy".to_string());
+                    .unwrap_or_else(|_| DEFAULT_HWDEC.to_string());
                 Self::set_option(handle, c"hwdec", &hwdec);
             } else {
                 Self::set_option(handle, c"hwdec", "no");
@@ -226,9 +244,45 @@ impl MpvContext {
     }
 
     /// Returns `true` if the render context has at least one pending frame.
+    ///
+    /// IMPORTANT: When this returns `true`, the caller **must** follow up with
+    /// either [`Self::render_frame`] or [`Self::skip_frame`]. In libmpv's
+    /// `vo_libmpv`, `mpv_render_context_update` clears the update flag without
+    /// releasing `ctx->next_frame`, leaving `vo_libmpv`'s `draw_frame` blocked
+    /// in `pthread_cond_timedwait` until `mpv_render_context_render` runs.
     pub fn has_frame_ready(&self) -> bool {
         let flags = unsafe { mpv_render_context_update(self.render_ctx) };
         (flags & mpv_render_update_flag_MPV_RENDER_UPDATE_FRAME as u64) != 0
+    }
+
+    /// Consumes a pending frame in `vo_libmpv` without rendering pixels.
+    ///
+    /// In libmpv's `vo_libmpv`, `draw_frame` sets `ctx->next_frame` and blocks
+    /// in `pthread_cond_timedwait` until `mpv_render_context_render` clears
+    /// `ctx->next_frame`. Calling `mpv_render_context_render` with
+    /// `MPV_RENDER_PARAM_SKIP_RENDERING = 1` and
+    /// `MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME = 0` immediately clears
+    /// `ctx->next_frame` and wakes the VO thread with zero pixel work.
+    pub fn skip_frame(&self) {
+        unsafe {
+            let mut skip: c_int = 1;
+            let mut block: c_int = 0;
+            let mut params = [
+                mpv_render_param {
+                    type_: MPV_RENDER_PARAM_SKIP_RENDERING,
+                    data: &mut skip as *mut _ as *mut c_void,
+                },
+                mpv_render_param {
+                    type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                    data: &mut block as *mut _ as *mut c_void,
+                },
+                mpv_render_param {
+                    type_: 0,
+                    data: ptr::null_mut(),
+                },
+            ];
+            let _ = mpv_render_context_render(self.render_ctx, params.as_mut_ptr());
+        }
     }
 
     /// Forwards mpv's pending log messages to `tracing`, draining mpv's client
@@ -240,7 +294,8 @@ impl MpvContext {
     /// periodic tick and from the thumbnail capture loop, and why it must run on
     /// the thread that owns the handle. It never blocks (zero timeout), so it
     /// cannot stall frame delivery.
-    pub(crate) fn drain_log_messages(&self) {
+    pub(crate) fn drain_log_messages(&self) -> Option<String> {
+        let mut load_error = None;
         unsafe {
             loop {
                 let event = mpv_wait_event(self.handle, 0.0);
@@ -251,11 +306,25 @@ impl MpvContext {
                 if event.event_id == mpv_event_id_MPV_EVENT_NONE {
                     break;
                 }
-                if event.event_id == mpv_event_id_MPV_EVENT_LOG_MESSAGE {
+                if event.event_id == mpv_event_id_MPV_EVENT_LOG_MESSAGE && !event.data.is_null() {
                     forward_log_message(&*event.data.cast::<mpv_event_log_message>());
+                } else if event.event_id == mpv_event_id_MPV_EVENT_END_FILE && !event.data.is_null()
+                {
+                    let end_file = &*event.data.cast::<mpv_event_end_file>();
+                    if end_file.reason == mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as c_int
+                        && end_file.error < 0
+                    {
+                        let err_str = cstr_lossy(mpv_error_string(end_file.error));
+                        load_error = Some(if err_str.is_empty() {
+                            format!("mpv playback error (code {})", end_file.error)
+                        } else {
+                            err_str
+                        });
+                    }
                 }
             }
         }
+        load_error
     }
 
     /// The path of the currently loaded file, if any.
@@ -281,6 +350,7 @@ impl MpvContext {
     /// Loads a file into the player. Returns an error when the path is not
     /// valid UTF-8 or mpv rejects the file.
     pub fn load_file(&mut self, path: &Path) -> Result<(), MpvError> {
+        self.drain_render_context();
         unsafe {
             let path_str = CString::new(path.to_str().ok_or(MpvError::InvalidPath)?)
                 .map_err(|_| MpvError::InvalidCString)?;
@@ -294,25 +364,47 @@ impl MpvContext {
         }
     }
 
-    /// Sends a `stop` command to release the current file and flush internal
-    /// caches. Must be called before loading a new file to prevent mpv from
-    /// entering an inconsistent state when files are switched rapidly.
-    pub fn stop(&mut self) {
+    /// Loads a file asynchronously without blocking the render thread.
+    ///
+    /// `mpv_command_async` is explicitly safe to call from libmpv render API
+    /// threads (`mpv/client.h`), whereas synchronous `mpv_command` can deadlock
+    /// if the mpv core waits on `vo_libmpv` while `vo_libmpv` waits on
+    /// `mpv_render_context_render`.
+    pub(crate) fn load_file_async(&mut self, path: &Path) -> Result<(), MpvError> {
+        self.drain_render_context();
         unsafe {
-            let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
-            mpv_command(self.handle, cmd.as_mut_ptr());
-            self.drain_render_context();
+            let path_str = CString::new(path.to_str().ok_or(MpvError::InvalidPath)?)
+                .map_err(|_| MpvError::InvalidCString)?;
+            let mut cmd: [*const c_char; 3] =
+                [c"loadfile".as_ptr(), path_str.as_ptr(), ptr::null()];
+            let err = mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+            if err < 0 {
+                return Err(MpvError::Command(err));
+            }
+            Ok(())
         }
     }
 
-    /// Drains all pending render-context updates without rendering.
-    pub fn drain_render_context(&self) {
+    /// Sends a `stop` command to release the current file and flush internal
+    /// caches. Drains any pending frame first so `vo_libmpv` is not blocked in
+    /// `draw_frame` while the core processes `stop`.
+    pub fn stop(&mut self) {
+        self.drain_render_context();
         unsafe {
-            for _ in 0..128 {
-                if mpv_render_context_update(self.render_ctx) == 0 {
-                    break;
-                }
+            let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
+            mpv_command(self.handle, cmd.as_mut_ptr());
+        }
+        self.drain_render_context();
+    }
+
+    /// Drains all pending render-context frames without rendering pixels,
+    /// waking `vo_libmpv` if it is waiting in `draw_frame`.
+    pub fn drain_render_context(&self) {
+        for _ in 0..128 {
+            if !self.has_frame_ready() {
+                break;
             }
+            self.skip_frame();
         }
     }
 
@@ -515,6 +607,7 @@ impl MpvContext {
         unsafe {
             let format = CString::new("rgba").map_err(|_| MpvError::InvalidCString)?;
             let mut size: [c_int; 2] = [width, height];
+            let mut block: c_int = 0;
 
             let mut params = [
                 mpv_render_param {
@@ -532,6 +625,10 @@ impl MpvContext {
                 mpv_render_param {
                     type_: MPV_RENDER_PARAM_SW_POINTER,
                     data: buffer.as_mut_ptr() as *mut c_void,
+                },
+                mpv_render_param {
+                    type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                    data: &mut block as *mut _ as *mut c_void,
                 },
                 mpv_render_param {
                     type_: 0,
@@ -562,6 +659,7 @@ impl MpvContext {
     }
 
     pub fn set_paused(&mut self, paused: bool) {
+        self.drain_render_context();
         unsafe {
             let val: c_int = if paused { 1 } else { 0 };
             mpv_set_property(
@@ -573,14 +671,36 @@ impl MpvContext {
         }
     }
 
+    pub(crate) fn set_paused_async(&mut self, paused: bool) {
+        unsafe {
+            let mut val: c_int = if paused { 1 } else { 0 };
+            mpv_set_property_async(
+                self.handle,
+                0,
+                c"pause".as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &mut val as *mut _ as *mut c_void,
+            );
+        }
+    }
+
     pub fn toggle_pause(&mut self) {
+        self.drain_render_context();
         unsafe {
             let mut cmd: [*const c_char; 3] = [c"cycle".as_ptr(), c"pause".as_ptr(), ptr::null()];
             mpv_command(self.handle, cmd.as_mut_ptr());
         }
     }
 
+    pub(crate) fn toggle_pause_async(&mut self) {
+        unsafe {
+            let mut cmd: [*const c_char; 3] = [c"cycle".as_ptr(), c"pause".as_ptr(), ptr::null()];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
     pub fn seek(&mut self, seconds: f64) {
+        self.drain_render_context();
         unsafe {
             let sec_str = CString::new(seconds.to_string())
                 .expect("floating point number string contains no null bytes");
@@ -594,7 +714,23 @@ impl MpvContext {
         }
     }
 
+    pub(crate) fn seek_async(&mut self, seconds: f64) {
+        self.drain_render_context();
+        unsafe {
+            let sec_str = CString::new(seconds.to_string())
+                .expect("floating point number string contains no null bytes");
+            let mut cmd: [*const c_char; 4] = [
+                c"seek".as_ptr(),
+                sec_str.as_ptr(),
+                c"relative".as_ptr(),
+                ptr::null(),
+            ];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
     pub fn seek_absolute(&mut self, seconds: f64) {
+        self.drain_render_context();
         unsafe {
             let sec_str = CString::new(seconds.to_string())
                 .expect("floating point number string contains no null bytes");
@@ -609,6 +745,30 @@ impl MpvContext {
         }
     }
 
+    pub(crate) fn seek_absolute_async(&mut self, seconds: f64) {
+        self.drain_render_context();
+        unsafe {
+            let sec_str = CString::new(seconds.to_string())
+                .expect("floating point number string contains no null bytes");
+            let mut cmd: [*const c_char; 5] = [
+                c"seek".as_ptr(),
+                sec_str.as_ptr(),
+                c"absolute".as_ptr(),
+                c"exact".as_ptr(),
+                ptr::null(),
+            ];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
+    pub(crate) fn stop_async(&mut self) {
+        self.drain_render_context();
+        unsafe {
+            let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
     pub fn set_volume(&mut self, volume: f64) {
         unsafe {
             mpv_set_property(
@@ -616,6 +776,18 @@ impl MpvContext {
                 c"volume".as_ptr(),
                 mpv_format_MPV_FORMAT_DOUBLE,
                 &volume as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    pub(crate) fn set_volume_async(&mut self, mut volume: f64) {
+        unsafe {
+            mpv_set_property_async(
+                self.handle,
+                0,
+                c"volume".as_ptr(),
+                mpv_format_MPV_FORMAT_DOUBLE,
+                &mut volume as *mut _ as *mut c_void,
             );
         }
     }
@@ -628,6 +800,19 @@ impl MpvContext {
                 c"mute".as_ptr(),
                 mpv_format_MPV_FORMAT_FLAG,
                 &val as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    pub(crate) fn set_mute_async(&mut self, mute: bool) {
+        unsafe {
+            let mut val: c_int = if mute { 1 } else { 0 };
+            mpv_set_property_async(
+                self.handle,
+                0,
+                c"mute".as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &mut val as *mut _ as *mut c_void,
             );
         }
     }
@@ -685,54 +870,60 @@ impl MpvContext {
             // hardware decoder that cannot be opened) instead of a bare timeout.
             self.drain_log_messages();
 
-            if self.has_frame_ready()
-                && let Some(current_p_str) = self.get_current_path()
-            {
-                let current_p = PathBuf::from(current_p_str);
-                let paths_match = current_p == path
-                    || target_canonical.as_ref().is_some_and(|tc| {
-                        current_p == *tc || current_p.canonicalize().ok().as_ref() == Some(tc)
-                    });
+            if self.has_frame_ready() {
+                if let Some(current_p_str) = self.get_current_path() {
+                    let current_p = PathBuf::from(current_p_str);
+                    let paths_match = current_p == path
+                        || target_canonical.as_ref().is_some_and(|tc| {
+                            current_p == *tc || current_p.canonicalize().ok().as_ref() == Some(tc)
+                        });
 
-                if paths_match && self.is_video_ready() {
-                    let (w, h) = self.get_video_size();
-                    if w > 0 && h > 0 {
-                        let rotation = self.get_video_rotation();
-                        let (eff_w, eff_h) = if rotation.is_swapped() {
-                            (h, w)
-                        } else {
-                            (w, h)
-                        };
-
-                        let scale = (max_w as f64 / eff_w as f64)
-                            .min(max_h as f64 / eff_h as f64)
-                            .min(1.0);
-                        let render_w = ((w as f64 * scale) as i32) & !1;
-                        let render_h = ((h as f64 * scale) as i32) & !1;
-
-                        if render_w > 0 && render_h > 0 {
-                            // Checked size math: hostile video-params dims
-                            // would overflow the i32 product; skip the frame
-                            // instead of allocating a giant buffer.
-                            let Some(buf_size) =
-                                crate::worker::rgba_frame_size(render_w as u32, render_h as u32)
-                            else {
-                                continue;
+                    if paths_match && self.is_video_ready() {
+                        let (w, h) = self.get_video_size();
+                        if w > 0 && h > 0 {
+                            let rotation = self.get_video_rotation();
+                            let (eff_w, eff_h) = if rotation.is_swapped() {
+                                (h, w)
+                            } else {
+                                (w, h)
                             };
-                            let mut buffer = vec![0u8; buf_size];
-                            if self.render_frame(render_w, render_h, &mut buffer).is_ok() {
-                                let (final_w, final_h, final_rgba) = crate::rotate_rgba(
+
+                            let scale = (max_w as f64 / eff_w as f64)
+                                .min(max_h as f64 / eff_h as f64)
+                                .min(1.0);
+                            let render_w = ((w as f64 * scale) as i32) & !1;
+                            let render_h = ((h as f64 * scale) as i32) & !1;
+
+                            if render_w > 0 && render_h > 0 {
+                                // Checked size math: hostile video-params dims
+                                // would overflow the i32 product; skip the frame
+                                // instead of allocating a giant buffer.
+                                let Some(buf_size) = crate::worker::rgba_frame_size(
                                     render_w as u32,
                                     render_h as u32,
-                                    &buffer,
-                                    rotation,
-                                );
-                                self.stop();
-                                return Ok((final_w, final_h, final_rgba));
+                                ) else {
+                                    self.skip_frame();
+                                    continue;
+                                };
+                                let mut buffer = vec![0u8; buf_size];
+                                if self.render_frame(render_w, render_h, &mut buffer).is_ok() {
+                                    let (final_w, final_h, final_rgba) = crate::rotate_rgba(
+                                        render_w as u32,
+                                        render_h as u32,
+                                        &buffer,
+                                        rotation,
+                                    );
+                                    self.stop();
+                                    return Ok((final_w, final_h, final_rgba));
+                                }
+                                continue;
                             }
                         }
                     }
                 }
+                // Release `ctx->next_frame` whenever a ready frame was not
+                // rendered above so `vo_libmpv` does not stall in `draw_frame`.
+                self.skip_frame();
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -746,11 +937,19 @@ impl MpvContext {
     /// created or the `demuxer-lavf-list` property cannot be read.
     pub fn query_supported_extensions() -> std::collections::HashSet<String> {
         let mut extensions = std::collections::HashSet::new();
-        if let Ok(ctx) = Self::new() {
-            unsafe {
+        unsafe {
+            let handle = mpv_create();
+            if handle.is_null() {
+                return extensions;
+            }
+            Self::set_option(handle, c"vo", "null");
+            Self::set_option(handle, c"ao", "null");
+            Self::set_option(handle, c"hwdec", "no");
+            Self::set_option(handle, c"input-default-bindings", "no");
+            if mpv_initialize(handle) >= 0 {
                 let mut ptr: *mut c_char = ptr::null_mut();
                 let err = mpv_get_property(
-                    ctx.handle,
+                    handle,
                     c"demuxer-lavf-list".as_ptr(),
                     mpv_format_MPV_FORMAT_STRING,
                     &mut ptr as *mut _ as *mut c_void,
@@ -767,6 +966,7 @@ impl MpvContext {
                     mpv_free(ptr as *mut c_void);
                 }
             }
+            mpv_terminate_destroy(handle);
         }
         extensions
     }
@@ -774,6 +974,7 @@ impl MpvContext {
 
 impl Drop for MpvContext {
     fn drop(&mut self) {
+        self.drain_render_context();
         unsafe {
             let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
             mpv_command(self.handle, cmd.as_mut_ptr());
@@ -929,36 +1130,40 @@ mod tests {
         label: &str,
     ) -> (u32, u32, Vec<u8>) {
         while Instant::now() < deadline {
-            if player.has_frame_ready() && player.is_video_ready() {
-                let (w, h) = player.get_video_size();
-                if w > 0 && h > 0 {
-                    let rotation = player.get_video_rotation();
-                    let (eff_w, eff_h) = if rotation.is_swapped() {
-                        (h, w)
-                    } else {
-                        (w, h)
-                    };
-                    let scale = (128.0f64 / eff_w as f64)
-                        .min(128.0f64 / eff_h as f64)
-                        .min(1.0);
-                    let render_w = ((w as f64 * scale) as i32) & !1;
-                    let render_h = ((h as f64 * scale) as i32) & !1;
-                    if render_w > 0 && render_h > 0 {
-                        let mut buffer = vec![0u8; (render_w * render_h * 4) as usize];
-                        if player.render_frame(render_w, render_h, &mut buffer).is_ok() {
-                            let (final_w, final_h, rgba) = crate::rotate_rgba(
-                                render_w as u32,
-                                render_h as u32,
-                                &buffer,
-                                rotation,
-                            );
-                            assert!(final_w > 0 && final_h > 0);
-                            assert!(final_w <= 128 && final_h <= 128);
-                            assert_eq!(rgba.len(), (final_w * final_h * 4) as usize);
-                            return (final_w, final_h, rgba);
+            if player.has_frame_ready() {
+                if player.is_video_ready() {
+                    let (w, h) = player.get_video_size();
+                    if w > 0 && h > 0 {
+                        let rotation = player.get_video_rotation();
+                        let (eff_w, eff_h) = if rotation.is_swapped() {
+                            (h, w)
+                        } else {
+                            (w, h)
+                        };
+                        let scale = (128.0f64 / eff_w as f64)
+                            .min(128.0f64 / eff_h as f64)
+                            .min(1.0);
+                        let render_w = ((w as f64 * scale) as i32) & !1;
+                        let render_h = ((h as f64 * scale) as i32) & !1;
+                        if render_w > 0 && render_h > 0 {
+                            let mut buffer = vec![0u8; (render_w * render_h * 4) as usize];
+                            if player.render_frame(render_w, render_h, &mut buffer).is_ok() {
+                                let (final_w, final_h, rgba) = crate::rotate_rgba(
+                                    render_w as u32,
+                                    render_h as u32,
+                                    &buffer,
+                                    rotation,
+                                );
+                                assert!(final_w > 0 && final_h > 0);
+                                assert!(final_w <= 128 && final_h <= 128);
+                                assert_eq!(rgba.len(), (final_w * final_h * 4) as usize);
+                                return (final_w, final_h, rgba);
+                            }
+                            continue;
                         }
                     }
                 }
+                player.skip_frame();
             }
             std::thread::sleep(Duration::from_millis(10));
         }

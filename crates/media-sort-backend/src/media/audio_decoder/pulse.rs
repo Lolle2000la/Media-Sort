@@ -22,6 +22,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use libpulse_binding::def::BufferAttr;
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
@@ -34,9 +35,10 @@ pub const RATE: SampleRate = NonZero::new(48_000).expect("48000 is not zero");
 /// See [`RATE`].
 pub const CHANNELS: ChannelCount = NonZero::new(2).expect("2 is not zero");
 
-/// Interleaved samples per write. `pa_simple_write` blocks until the server has
-/// room, so this only bounds how long a stop request can take to be noticed.
-const CHUNK_SAMPLES: usize = 4096;
+/// Interleaved samples per write (20 ms of stereo audio at 48 kHz).
+/// `pa_simple_write` blocks until the server has room, so this bounds both
+/// output latency and how long a stop request can take to be noticed.
+const CHUNK_SAMPLES: usize = 1920;
 
 /// A running PulseAudio output. Dropping it stops the writer thread.
 pub struct PulseOutput {
@@ -62,6 +64,18 @@ impl PulseOutput {
         if !spec.is_valid() {
             return Err("invalid PulseAudio sample spec".to_string());
         }
+        // Without explicit buffer attributes PulseAudio defaults `tlength` to
+        // 2 seconds (384 KB). Because rodio's mixer continuously produces `0.0`
+        // samples while idle or paused, a 2 s server buffer queues 2 s of
+        // silence ahead of any newly started or resumed track. Keep `tlength`
+        // to ~40 ms (two chunks) and let the server choose the remaining fields.
+        let attr = BufferAttr {
+            maxlength: u32::MAX,
+            tlength: (CHUNK_SAMPLES * 2 * size_of::<f32>()) as u32,
+            prebuf: u32::MAX,
+            minreq: u32::MAX,
+            fragsize: u32::MAX,
+        };
         let simple = Simple::new(
             None,
             "media-sort",
@@ -70,7 +84,7 @@ impl PulseOutput {
             "Media Sort",
             &spec,
             None,
-            None,
+            Some(&attr),
         )
         .map_err(|err| format!("could not connect to PulseAudio: {err}"))?;
 
@@ -103,22 +117,16 @@ fn write_loop(simple: Simple, mut source: MixerSource, stop: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
         buffer.clear();
         for _ in 0..CHUNK_SAMPLES {
-            let Some(sample) = source.next() else {
-                break;
-            };
-            // Mixed sources can sum past full scale; clip like the device path
-            // would rather than wrapping.
-            let sample = sample.clamp(-1.0, 1.0);
+            // Match rodio's own device stream callback: if the mixer ever has
+            // no active sub-sources, emit silence rather than terminating the
+            // output thread permanently. Mixed sources can also sum past full
+            // scale, so clip like the device path would.
+            let sample = source.next().unwrap_or(0.0).clamp(-1.0, 1.0);
             buffer.extend_from_slice(&sample.to_le_bytes());
-        }
-        if buffer.is_empty() {
-            break;
         }
         if let Err(err) = simple.write(&buffer) {
             tracing::warn!("PulseAudio write failed: {err}");
             break;
         }
     }
-    // Flush what the server already accepted before dropping the connection.
-    let _ = simple.drain();
 }

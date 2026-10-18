@@ -39,11 +39,13 @@ names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
   vulkan/shaderc/lcms2), so no codec stack is built here. Media Sort renders
   frames itself through libmpv's software render API, so mpv needs no
   display/GPU output of its own.
-- **Hardware decoding (VA-API):** mpv gates VA-API behind one of its display
+- **Hardware decoding (NVDEC / VA-API):** mpv gates VA-API behind one of its display
   back-ends, and both of those are missing a dependency in the runtime — its
   Wayland back-end wants `wayland-protocols` and its X11 back-end wants
-  `libXpresent`. Both are built as small modules so `hwdec=auto-copy` works on
-  Wayland and X11 sessions alike (software decoding when a GPU cannot do it).
+  `libXpresent`. Both are built as small modules so hardware copy-back decoding
+  (`nvdec-copy,vaapi-copy,...`) works on Wayland and X11 sessions alike, while
+  skipping FFmpeg 8.1's `vulkan-copy` decoder (which `auto-copy` would probe
+  first and which crashes on rapid decoder teardown).
 - **ffmpeg CLI:** the runtime ships `/usr/bin/ffmpeg`, which is what
   `media-sort-backend`'s `find_ffmpeg()` picks up for video thumbnails.
 - **zimg:** built as a module because the runtime does not ship it, and mpv's
@@ -70,34 +72,29 @@ names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
   land in the *host* trash where the desktop can see and empty them. Without it
   the `trash` crate would use `$XDG_DATA_HOME/Trash`, which a Flatpak remaps to
   a private directory inside `~/.var/app` that only survives until the app is
-  uninstalled with `--delete-data`. The portal is not always usable, though: it
-  refuses files on system-internal mounts (`/tmp`, `/run`, `/dev`) by design, it
-  rejects a pre-existing `.Trash-<uid>` that is not mode 0700, and the fd-based
-  rewrite behind the CVE-2026-40354 fix broke it for Flatpak callers on several
-  versions (upstream
+  uninstalled with `--delete-data`. Before calling the portal (and after any
+  native `trash::delete` call), `repair_existing_trash_permissions` tightens any
+  existing `Trash/{,files,info}` directories to mode `0700` — the `trash` crate
+  creates them with `create_dir_all` (`0755`), which `xdg-desktop-portal` 1.20+
+  rejects with `"Directory already exists with bad permissions"`. When the
+  portal still refuses a file (system-internal mounts `/tmp`, `/run`, `/dev`, or
+  distributions with an unpatched CVE-2026-40354 portal build — upstream
   [flatpak/xdg-desktop-portal#1972](https://github.com/flatpak/xdg-desktop-portal/issues/1972),
-  fixed in #1982 / 1.21.2 and backported to distributions at different speeds —
-  including 1.22.1 builds that still fail). On any such failure the file is
-  moved into the *real* home trash instead
-  (`$HOME/.local/share/Trash/{files,info}`, written by
-  `trash_into_home_trash`), which is possible because the manifest grants
-  `--filesystem=home` and is where the desktop looks. Only a file from another
-  filesystem — where the home trash cannot take it — falls back to the `trash`
-  crate, whose per-volume trash is then the right one for that mount; without
-  the home-trash step the crate would trash into `$HOME/.Trash-1000`, a volume
-  trash derived from the sandbox's own bind mount of the home directory that no
-  file manager shows. Undo/restore works for both: the portal only reports
-  nothing, so its entries are found again by reading `.trashinfo` metadata, and
-  entries this module wrote itself are restored from the path it recorded.
+  fixed in #1982 / 1.21.2), `trash_into_home_trash` writes the entry directly
+  into `$HOME/.local/share/Trash/{files,info}` for home-filesystem files, or
+  into `<mount_root>/.Trash-<uid>` (with `0700` permissions and a mount-relative
+  `Path=`) for files on another volume. Undo/restore works for both home and
+  volume trashes, resolving relative `Path=` entries against the volume root.
 - **Open externally / reveal in file manager:** inside the sandbox both go
   through `org.freedesktop.portal.OpenURI` (`platform/desktop_portal.rs`). The
   file manager and the default handler are *host* applications, and the
   sandbox's session-bus policy lets the app reach only its own name,
   `org.freedesktop.DBus` and `org.freedesktop.portal.*` — so the native
   `dbus-send` (`org.freedesktop.FileManager1`) route cannot work there at all.
-  `OpenURI` takes file descriptors and has no select-a-file call, so revealing
-  opens the containing folder rather than highlighting the entry. Outside
-  Flatpak the native `open`/`explorer`/`xdg-open` code runs unchanged.
+  `OpenURI.OpenDirectory` takes a file descriptor for the target file itself and
+  calls `org.freedesktop.FileManager1.ShowItems` on the host to open its
+  containing folder with the file selected. Outside Flatpak the native
+  `open`/`explorer`/`xdg-open` code runs unchanged.
 - **The self-updater (`velopack` feature) is intentionally not built** — Flatpak
   owns updates. That is also why the manifest needs no network access.
 
@@ -255,14 +252,14 @@ pushes made with the default `GITHUB_TOKEN` do not.
   references them at `https://mediasort.app/screenshots/…`, so the **website
   must be deployed before the Flathub build** — Flathub mirrors the URLs at
   build time and the build fails if they are unreachable.
-- **Portals:** deletion goes through `org.freedesktop.portal.Trash` — with the
-  real home trash as the fallback while the portal is broken for Flatpak
-  callers (see the Trash bullet above) — and under
-  Flatpak *open externally* and *reveal in file manager* go through
-  `org.freedesktop.portal.OpenURI` — the session-bus policy allows an app to
-  talk only to its own name, `org.freedesktop.DBus` and
+- **Portals:** deletion goes through `org.freedesktop.portal.Trash` — with direct
+  host home/volume trash writes as the fallback when the portal refuses a file
+  (see the Trash bullet above) — and under Flatpak *open externally* and *reveal
+  in file manager* go through `org.freedesktop.portal.OpenURI` — the session-bus
+  policy allows an app to talk only to its own name, `org.freedesktop.DBus` and
   `org.freedesktop.portal.*`, so the native `dbus-send`
-  (`org.freedesktop.FileManager1`) route cannot work there at all. `OpenURI`
-  has no select-a-file call, so revealing opens the containing folder rather
-  than highlighting the entry. Outside Flatpak both keep their native
+  (`org.freedesktop.FileManager1`) route cannot work there at all.
+  `OpenURI.OpenDirectory` takes a file descriptor for the file itself and asks
+  the host's `org.freedesktop.FileManager1.ShowItems` to open the containing
+  folder with the entry selected. Outside Flatpak both keep their native
   implementations.

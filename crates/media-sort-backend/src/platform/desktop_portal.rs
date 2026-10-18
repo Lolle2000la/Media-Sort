@@ -66,27 +66,32 @@ pub fn open_externally(path: &Path) -> Result<(), PortalError> {
     log_failure(result, path, "OpenURI.OpenFile")
 }
 
-/// Show `path`'s containing folder in the file manager
-/// (`OpenURI.OpenDirectory`).
+/// Show `path` in the file manager (`OpenURI.OpenDirectory`).
 ///
-/// `OpenURI` has no "select this file" call, so a file is revealed by opening
-/// the folder it lives in rather than highlighting the entry.
+/// Despite its name, `OpenURI.OpenDirectory` takes a file descriptor for the
+/// file (or directory) to reveal and asks the host to open its *containing*
+/// directory with the item selected via `org.freedesktop.FileManager1.ShowItems`
+/// (falling back to opening the containing directory when `FileManager1` is
+/// absent). Passing `path.parent()` would open the *grandparent* directory and
+/// highlight the parent folder instead of the file. We only fall back to
+/// [`fallback_parent_directory`] when `path` itself cannot be opened.
 pub fn reveal_in_file_manager(path: &Path) -> Result<(), PortalError> {
     if !in_flatpak() {
         return Err(PortalError::Unavailable);
     }
-    let directory = reveal_target(path);
-    let handle = open(directory)?;
+    let handle = open(path).or_else(|err| match fallback_parent_directory(path) {
+        Some(parent) => open(parent),
+        None => Err(err),
+    })?;
     let result = pollster::block_on(OpenDirectoryRequest::default().send(&handle.as_fd()));
     log_failure(result, path, "OpenURI.OpenDirectory")
 }
 
-/// The directory to open for `path`: its parent, or `path` itself when it has
-/// none (a bare file name, as opposed to `/somewhere/name.png`).
-fn reveal_target(path: &Path) -> &Path {
+/// Fallback parent directory when `path` itself no longer exists on disk, or
+/// `None` when `path` is a bare file name or filesystem root.
+fn fallback_parent_directory(path: &Path) -> Option<&Path> {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(path)
 }
 
 /// Open `path` read-only, for the descriptor the portal authorises on.
@@ -114,17 +119,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_file_is_revealed_through_its_folder() {
+    fn fallback_parent_directory_resolves_containing_folder() {
         assert_eq!(
-            reveal_target(Path::new("/home/user/Pictures/img.png")),
-            Path::new("/home/user/Pictures")
+            fallback_parent_directory(Path::new("/home/user/Pictures/img.png")),
+            Some(Path::new("/home/user/Pictures"))
         );
 
         // A bare file name has an empty parent, which would otherwise open the
         // current directory instead of anything the user asked for.
-        assert_eq!(reveal_target(Path::new("img.png")), Path::new("img.png"));
+        assert_eq!(fallback_parent_directory(Path::new("img.png")), None);
 
         // A filesystem root has no parent at all.
-        assert_eq!(reveal_target(Path::new("/")), Path::new("/"));
+        assert_eq!(fallback_parent_directory(Path::new("/")), None);
     }
 }
