@@ -86,18 +86,31 @@ pub fn delete_to_trash(path: &Path) -> Result<Box<dyn TrashRestoreHandle>, Actio
 
         // Under Flatpak `$XDG_DATA_HOME` is remapped to a per-app directory, so
         // `trash` would move the file into the sandbox's private data
-        // directory, where the desktop cannot see or empty it. Ask the host to
-        // trash it instead, and only fall back to the in-sandbox trash when
-        // that is not possible (no portal, or a file the portal will not take).
+        // directory, where the desktop cannot see or empty it; it would also
+        // read the sandbox's bind mount of the home directory as a mount point
+        // and trash into a `$HOME/.Trash-1000` volume trash that no file
+        // manager shows. Ask the host through the portal first, then write the
+        // real home trash ourselves, and keep the in-sandbox fallback only for
+        // files the home trash cannot take (another filesystem, where the
+        // crate finds the volume's own trash).
         #[cfg(target_os = "linux")]
         if portal::in_flatpak() {
             match portal::delete_to_trash(&original_path) {
                 Ok(handle) => return Ok(handle),
                 Err(err) => {
                     tracing::warn!(
+                        path = %original_path.display(),
                         %err,
-                        "org.freedesktop.portal.Trash failed; trashing inside the sandbox instead"
+                        "org.freedesktop.portal.Trash failed; trashing into the home trash instead"
                     );
+                    match portal::trash_into_home_trash(&original_path) {
+                        Ok(handle) => return Ok(handle),
+                        Err(err) => tracing::warn!(
+                            path = %original_path.display(),
+                            %err,
+                            "the home trash cannot take the file; trashing inside the sandbox instead"
+                        ),
+                    }
                 }
             }
         }

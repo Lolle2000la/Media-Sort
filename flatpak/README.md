@@ -66,12 +66,29 @@ names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
   and `libpulse0` staged), so the audio player uses the same PulseAudio path as
   the Flatpak. Unverified by ear — CI has no sound server — but it is the code
   path verified in the Flatpak.
-- **Trash:** deletions go through `org.freedesktop.portal.Trash`, so files land
-  in the *host* trash where the desktop can see and empty them. Without it the
-  `trash` crate would use `$XDG_DATA_HOME/Trash`, which a Flatpak remaps to a
-  private directory inside `~/.var/app` that only survives until the app is
-  uninstalled with `--delete-data`. Undo/restore finds the entry again by
-  reading the host trash's `.trashinfo` metadata (the portal only deletes).
+- **Trash:** deletions first go through `org.freedesktop.portal.Trash`, so files
+  land in the *host* trash where the desktop can see and empty them. Without it
+  the `trash` crate would use `$XDG_DATA_HOME/Trash`, which a Flatpak remaps to
+  a private directory inside `~/.var/app` that only survives until the app is
+  uninstalled with `--delete-data`. The portal is not always usable, though: it
+  refuses files on system-internal mounts (`/tmp`, `/run`, `/dev`) by design, it
+  rejects a pre-existing `.Trash-<uid>` that is not mode 0700, and the fd-based
+  rewrite behind the CVE-2026-40354 fix broke it for Flatpak callers on several
+  versions (upstream
+  [flatpak/xdg-desktop-portal#1972](https://github.com/flatpak/xdg-desktop-portal/issues/1972),
+  fixed in #1982 / 1.21.2 and backported to distributions at different speeds —
+  including 1.22.1 builds that still fail). On any such failure the file is
+  moved into the *real* home trash instead
+  (`$HOME/.local/share/Trash/{files,info}`, written by
+  `trash_into_home_trash`), which is possible because the manifest grants
+  `--filesystem=home` and is where the desktop looks. Only a file from another
+  filesystem — where the home trash cannot take it — falls back to the `trash`
+  crate, whose per-volume trash is then the right one for that mount; without
+  the home-trash step the crate would trash into `$HOME/.Trash-1000`, a volume
+  trash derived from the sandbox's own bind mount of the home directory that no
+  file manager shows. Undo/restore works for both: the portal only reports
+  nothing, so its entries are found again by reading `.trashinfo` metadata, and
+  entries this module wrote itself are restored from the path it recorded.
 - **Open externally / reveal in file manager:** inside the sandbox both go
   through `org.freedesktop.portal.OpenURI` (`platform/desktop_portal.rs`). The
   file manager and the default handler are *host* applications, and the
@@ -238,7 +255,9 @@ pushes made with the default `GITHUB_TOKEN` do not.
   references them at `https://mediasort.app/screenshots/…`, so the **website
   must be deployed before the Flathub build** — Flathub mirrors the URLs at
   build time and the build fails if they are unreachable.
-- **Portals:** deletion goes through `org.freedesktop.portal.Trash`, and under
+- **Portals:** deletion goes through `org.freedesktop.portal.Trash` — with the
+  real home trash as the fallback while the portal is broken for Flatpak
+  callers (see the Trash bullet above) — and under
   Flatpak *open externally* and *reveal in file manager* go through
   `org.freedesktop.portal.OpenURI` — the session-bus policy allows an app to
   talk only to its own name, `org.freedesktop.DBus` and
