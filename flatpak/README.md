@@ -61,11 +61,11 @@ names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
   Video sound was never affected (mpv talks to PulseAudio directly). Without
   the feature nothing changes; with it, a machine that has no PulseAudio server
   simply falls back to the default device.
-- **Snap:** the snap grants `audio-playback` (the PulseAudio socket) the same
-  way, so the audio player is likely to hit the same cpal/ALSA limitation
-  there. Untested; enabling `media-sort-backend`'s `pulse` feature in
-  `snap/snapcraft.yaml` (plus `libpulse0` in `stage-packages` for
-  `libpulse-simple.so.0`) would make it moot.
+- **Snap:** the snap enables `media-sort-backend`'s `pulse` feature too
+  (`rust-features` in `snap/snapcraft.yaml`, with `libpulse-dev` at build time
+  and `libpulse0` staged), so the audio player uses the same PulseAudio path as
+  the Flatpak. Unverified by ear — CI has no sound server — but it is the code
+  path verified in the Flatpak.
 - **Trash:** deletions go through `org.freedesktop.portal.Trash`, so files land
   in the *host* trash where the desktop can see and empty them. Without it the
   `trash` crate would use `$XDG_DATA_HOME/Trash`, which a Flatpak remaps to a
