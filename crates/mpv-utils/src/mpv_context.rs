@@ -916,6 +916,10 @@ impl MpvContext {
                                     self.stop();
                                     return Ok((final_w, final_h, final_rgba));
                                 }
+                                // Consume the frame even though rendering failed,
+                                // so `vo_libmpv` is not left waiting for a render
+                                // that will not come.
+                                self.skip_frame();
                                 continue;
                             }
                         }

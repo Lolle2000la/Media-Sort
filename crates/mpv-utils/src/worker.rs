@@ -905,6 +905,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_video_worker_rapid_switch_and_pool_starvation_recovery() {
+        // Skip where libmpv (or a usable software VO) is unavailable, like the
+        // other video tests: the worker would fail to start and the waits below
+        // would only run into their deadline.
+        if crate::MpvContext::new().is_err() {
+            return;
+        }
+
         let fixture = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../resources/MockState/mock 3.mp4"
@@ -933,7 +940,7 @@ mod tests {
         // (`frames_starved` -> `player.skip_frame()`), then drop them and
         // confirm frame delivery resumes immediately without vo_libmpv hanging.
         let mut held_buffers = Vec::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while held_buffers.len() < 3 {
             let ev = tokio::time::timeout_at(deadline, event_rx.recv())
                 .await

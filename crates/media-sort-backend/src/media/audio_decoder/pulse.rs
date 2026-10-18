@@ -40,6 +40,15 @@ pub const CHANNELS: ChannelCount = NonZero::new(2).expect("2 is not zero");
 /// output latency and how long a stop request can take to be noticed.
 const CHUNK_SAMPLES: usize = 1920;
 
+/// Target length of the server-side buffer.
+///
+/// PulseAudio's default is 2 seconds, and because the writer keeps producing
+/// silence while idle or paused, that much audio sits ahead of whatever is
+/// started or resumed next — which is what made pause/stop lag. A smaller
+/// buffer trades that latency against the headroom the writer thread needs when
+/// it is descheduled while thumbnails or 4K video are decoded.
+const TARGET_BUFFER_MS: u32 = 150;
+
 /// A running PulseAudio output. Dropping it stops the writer thread.
 pub struct PulseOutput {
     stop: Arc<AtomicBool>,
@@ -65,13 +74,12 @@ impl PulseOutput {
             return Err("invalid PulseAudio sample spec".to_string());
         }
         // Without explicit buffer attributes PulseAudio defaults `tlength` to
-        // 2 seconds (384 KB). Because rodio's mixer continuously produces `0.0`
-        // samples while idle or paused, a 2 s server buffer queues 2 s of
-        // silence ahead of any newly started or resumed track. Keep `tlength`
-        // to ~40 ms (two chunks) and let the server choose the remaining fields.
+        // 2 seconds (384 KB); keep it at [`TARGET_BUFFER_MS`] and let the server
+        // choose the remaining fields.
+        let bytes_per_frame = u32::from(CHANNELS.get()) * size_of::<f32>() as u32;
         let attr = BufferAttr {
             maxlength: u32::MAX,
-            tlength: (CHUNK_SAMPLES * 2 * size_of::<f32>()) as u32,
+            tlength: (RATE.get() / 1000) * TARGET_BUFFER_MS * bytes_per_frame,
             prebuf: u32::MAX,
             minreq: u32::MAX,
             fragsize: u32::MAX,
