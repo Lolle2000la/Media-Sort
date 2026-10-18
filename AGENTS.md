@@ -234,7 +234,7 @@ Note: `app::update()` (`crates/media-sort-gui/src/app.rs:10`) delegates to the `
 
 | Module | Purpose |
 |--------|---------|
-| `mpv_context.rs` | `MpvContext` (software render context, frame capture, `query_supported_extensions()`), `MpvError`. Asks libmpv for its log messages and forwards them to `tracing` (`warn`/`error` by default, `info` — the chosen hwdec, the decoder, why an attempt failed — behind `RUST_LOG=debug`): libmpv hides them otherwise, and a Flatpak has no mpv CLI to run. Under verbose logging (`RUST_LOG=debug`/`trace`, or `MEDIA_SORT_MPV_TERMINAL`) mpv also writes to stderr at `msg-level=all=info`, because the event queue cannot be drained while a synchronous libmpv call blocks — which is precisely the "no frames" failure |
+| `mpv_context.rs` | `MpvContext` (software render context, frame capture, `query_supported_extensions()`), `MpvError`. Asks libmpv for its log messages and forwards them to `tracing` (`warn`/`error` by default, `info` — the chosen hwdec, the decoder, why an attempt failed — behind `RUST_LOG=debug`): libmpv hides them otherwise, and a Flatpak has no mpv CLI to run. Under verbose logging (`RUST_LOG=debug`/`trace`, or `MEDIA_SORT_MPV_TERMINAL`) mpv also writes to stderr at `msg-level=all=info`, because the event queue cannot be drained while a synchronous libmpv call blocks — which is precisely the "no frames" failure. `MEDIA_SORT_MPV_HWDEC` overrides the hardware decoder (default `auto-copy`), and the worker logs a `video frame report` every five seconds at debug level (`video_size`, `rendered`, `delivered`, `dropped`, `starved`, `render_avg_ms`) plus the first-frame latency — the numbers that separate "the worker cannot keep up" from "the consumer cannot" |
 | `worker.rs` | `VideoCommand`/`VideoEvent` worker protocol (raw frames + `Rotation` metadata), `rotate_rgba`, `PlayerConfig`, `start_video_worker(_with)` |
 | `rotation.rs` | `Rotation` enum + `detect_video_rotation` (mp4 tkhd / EXIF / mp4ameta) |
 
@@ -264,7 +264,7 @@ The raw tokio command channel is hidden behind the opaque `PlayerHandle`; produc
 | Module | Purpose |
 |--------|---------|
 | `app.rs` | `update()`, `view()`, `theme()`, `subscription()`, helper async tasks |
-| `main.rs` | Entry point: init mpv registry, load settings, launch iced application |
+| `main.rs` | Entry point: init mpv registry, load settings, launch iced application, and set up the tracing filter (`log_filter()`): `RUST_LOG` wins outright, so a bare `RUST_LOG=debug` works — while the default holds `iced_winit` at `warn`, because its info-level "Window attributes" line formats the window icon as `RgbaIcon { rgba: [262144 numbers] }`, one line per byte (~260k lines per start). Use `RUST_LOG=iced_winit=warn,debug` for debug output without it |
 | `message.rs` | `Message` and sub-enum definitions |
 | `demo.rs` | Consolidates both interactive demo initialization and headless video export |
 | `state.rs` | `AppState` struct, media scanning, `detect_media_type()`; folder tree logic lives in `state/folder/tree.rs`, per-folder classification in `state/folder_inspection.rs` |
