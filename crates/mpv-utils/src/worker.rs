@@ -530,6 +530,12 @@ async fn run_video_worker(
             }
 
             _ = progress_interval.tick() => {
+                // mpv's own diagnostics (chosen hwdec, decoder, failures) come
+                // through its event queue and are only visible if something
+                // drains it — this tick is the one point that runs whether or
+                // not frames are flowing.
+                player.drain_log_messages();
+
                 if is_active {
                     // One-shot late-rotation recheck. The initial detection
                     // runs at first-frame time, but mpv can populate

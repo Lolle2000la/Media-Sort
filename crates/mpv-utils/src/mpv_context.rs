@@ -146,6 +146,13 @@ impl MpvContext {
                 return Err(MpvError::Initialize(err));
             }
 
+            // Ask libmpv for its own log messages, which are otherwise dropped
+            // on the floor. Inside a Flatpak there is no mpv CLI to fall back
+            // on, so a decoder or driver problem — which hwdec mpv picked, and
+            // why it failed — would be invisible. `drain_log_messages` forwards
+            // them to `tracing`.
+            mpv_request_log_messages(handle, c"info".as_ptr());
+
             let api_type = CString::new("sw").map_err(|_| MpvError::InvalidCString)?;
             let mut params = [
                 mpv_render_param {
@@ -206,6 +213,33 @@ impl MpvContext {
     pub fn has_frame_ready(&self) -> bool {
         let flags = unsafe { mpv_render_context_update(self.render_ctx) };
         (flags & mpv_render_update_flag_MPV_RENDER_UPDATE_FRAME as u64) != 0
+    }
+
+    /// Forwards mpv's pending log messages to `tracing`, draining mpv's client
+    /// event queue.
+    ///
+    /// mpv delivers its log messages as *events*, so a client that never waits
+    /// for events both loses every diagnostic and lets the queue grow for as
+    /// long as a file plays. That is why this is called from the worker's
+    /// periodic tick and from the thumbnail capture loop, and why it must run on
+    /// the thread that owns the handle. It never blocks (zero timeout), so it
+    /// cannot stall frame delivery.
+    pub(crate) fn drain_log_messages(&self) {
+        unsafe {
+            loop {
+                let event = mpv_wait_event(self.handle, 0.0);
+                if event.is_null() {
+                    break;
+                }
+                let event = &*event;
+                if event.event_id == mpv_event_id_MPV_EVENT_NONE {
+                    break;
+                }
+                if event.event_id == mpv_event_id_MPV_EVENT_LOG_MESSAGE {
+                    forward_log_message(&*event.data.cast::<mpv_event_log_message>());
+                }
+            }
+        }
     }
 
     /// The path of the currently loaded file, if any.
@@ -631,6 +665,10 @@ impl MpvContext {
         let target_canonical = path.canonicalize().ok();
 
         while start.elapsed() < timeout {
+            // Surfaces the reason a capture is failing (an unsupported codec, a
+            // hardware decoder that cannot be opened) instead of a bare timeout.
+            self.drain_log_messages();
+
             if self.has_frame_ready()
                 && let Some(current_p_str) = self.get_current_path()
             {
@@ -754,7 +792,41 @@ pub(crate) unsafe extern "C" fn mpv_wakeup_callback(cb_ctx: *mut c_void) {
     }
 }
 
-// SAFETY: MpvContext owns pointers to `mpv_handle` and `mpv_render_context`.
+/// Forwards one mpv log message to `tracing`.
+///
+/// mpv's levels map down one step: `fatal`/`error` and `warn` are visible by
+/// default, while `info` — the per-file detail that names the hwdec mpv picked,
+/// the decoder that opened the file, and why an attempt failed — stays behind
+/// `RUST_LOG=debug` (or `RUST_LOG=mpv=debug`) so a normal run is not flooded.
+fn forward_log_message(msg: &mpv_event_log_message) {
+    let text = cstr_lossy(msg.text);
+    let text = text.trim_end();
+    if text.is_empty() {
+        return;
+    }
+    let prefix = cstr_lossy(msg.prefix);
+    let prefix = prefix.trim();
+    match cstr_lossy(msg.level).as_str() {
+        "fatal" | "error" => tracing::error!(target: "mpv", "[{prefix}] {text}"),
+        "warn" => tracing::warn!(target: "mpv", "[{prefix}] {text}"),
+        "info" => tracing::debug!(target: "mpv", "[{prefix}] {text}"),
+        _ => tracing::trace!(target: "mpv", "[{prefix}] {text}"),
+    }
+}
+
+/// Reads a libmpv string, tolerating a null pointer (which must not become a
+/// dereference) and invalid UTF-8 (mpv message text can quote arbitrary file
+/// content).
+fn cstr_lossy(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 // libmpv's core is internally synchronized, so it is sound to move the
 // context to the thread that owns it (the worker task, the thumbnail worker
 // threads). `Send` alone is sound because a moved context is used from
