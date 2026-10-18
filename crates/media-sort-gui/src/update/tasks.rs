@@ -376,14 +376,11 @@ pub fn load_thumbnail(
                 {
                     return Ok(None);
                 }
-                match crate::subscriptions::prefetch::generate_thumbnail(
+                crate::subscriptions::prefetch::generate_thumbnail(
                     &path_clone,
                     media_type,
                     animated,
-                ) {
-                    Ok((w, h, rgba)) => Ok(Some((w, h, rgba))),
-                    Err(e) => Err(e),
-                }
+                )
             })
             .await
             .unwrap_or(Ok(None));

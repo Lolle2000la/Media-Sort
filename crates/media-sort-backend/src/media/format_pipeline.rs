@@ -11,7 +11,9 @@
 //!   re-opening of the file.
 //! - avif: native dav1d decode (`avif-native` feature) with an ffmpeg pipe
 //!   fallback for builds without a native AVIF decoder.
-//! - audio extensions: embedded cover art, resized with fast_image_resize.
+//! - audio extensions: embedded cover art, resized with fast_image_resize
+//!   (`thumbnail_image` returns `None` when there is no cover art — that is a
+//!   normal, playable file, not a decode failure).
 //! - everything else: `image_decoder::load_image` (keeps EXIF orientation for
 //!   jpeg-like formats) + the image crate's `thumbnail()`.
 
@@ -31,7 +33,7 @@ fn extension_lower(path: &Path) -> String {
         .to_lowercase()
 }
 
-fn is_audio_extension(ext: &str) -> bool {
+pub(crate) fn is_audio_extension(ext: &str) -> bool {
     media_sort_core::media_type::MediaType::Audio
         .extensions()
         .contains(&ext)
@@ -50,16 +52,14 @@ fn io_image_error(err: std::io::Error) -> image::ImageError {
 
 /// Decode `path` to fit inside the `max_width` x `max_height` box, preserving
 /// aspect ratio.
+///
+/// Image formats only — audio cover art is dispatched by [`thumbnail_image`].
 pub(crate) fn process_image(
     path: &Path,
     max_width: u32,
     max_height: u32,
 ) -> Result<DecodedImage, image::ImageError> {
     let ext = extension_lower(path);
-
-    if is_audio_extension(&ext) {
-        return audio_cover_image(path, max_width, max_height);
-    }
 
     match ext.as_str() {
         "jpg" | "jpeg" => jpeg_image(path, max_width, max_height),
@@ -69,16 +69,40 @@ pub(crate) fn process_image(
     }
 }
 
+/// Produce a grid thumbnail for `path`.
+///
+/// Unlike [`process_image`], this distinguishes "there is no image to show"
+/// from "decoding failed": an audio file with no embedded cover art is a
+/// normal, playable file, so it returns `Ok(None)` instead of an error.
+/// Genuine decode failures — including cover art that is present but corrupt —
+/// stay `Err`.
+pub(crate) fn thumbnail_image(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+) -> Result<Option<DecodedImage>, image::ImageError> {
+    if is_audio_extension(&extension_lower(path)) {
+        return audio_cover_image(path, max_width, max_height);
+    }
+    process_image(path, max_width, max_height).map(Some)
+}
+
+/// Decode an audio file's embedded cover art into the thumbnail box.
+///
+/// `Ok(None)` means the file carries no embedded cover art. It must NOT fall
+/// back to decoding the audio file itself: the audio container is not an
+/// image, and that fallback produced "the file extension `.wav` was not
+/// recognized as an image format" and marked the whole file unsupported.
 fn audio_cover_image(
     path: &Path,
     max_width: u32,
     max_height: u32,
-) -> Result<DecodedImage, image::ImageError> {
-    let img = match super::thumbnail::extract_audio_cover(path) {
-        Some(bytes) => super::image_decoder::decode_bytes_with_limits(bytes.as_slice())?,
-        None => super::image_decoder::load_image(path)?,
+) -> Result<Option<DecodedImage>, image::ImageError> {
+    let Some(bytes) = super::thumbnail::extract_audio_cover(path) else {
+        return Ok(None);
     };
-    resize_with_fir(&img.to_rgba8(), max_width, max_height)
+    let img = super::image_decoder::decode_bytes_with_limits(bytes.as_slice())?;
+    resize_with_fir(&img.to_rgba8(), max_width, max_height).map(Some)
 }
 
 fn decode_fir_image(

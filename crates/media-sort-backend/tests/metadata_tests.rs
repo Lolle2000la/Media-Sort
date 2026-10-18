@@ -74,11 +74,14 @@ fn test_load_file_not_found() {
 #[test]
 fn test_thumbnail_dimensions() {
     let path = fixtures_dir().join("test_image.jpg");
-    let dims = thumbnail::thumbnail_dimensions(&path).unwrap();
+    let dims = thumbnail::thumbnail_dimensions(&path)
+        .unwrap()
+        .expect("expected thumbnail dimensions");
     assert_eq!(dims, (64, 64));
 
     let (w, h, _rgba) = thumbnail::generate_thumbnail(&path, 32, 32)
         .unwrap()
+        .expect("expected a thumbnail image")
         .into_parts();
     assert!(w <= 32, "thumbnail width {w} should be clamped to max 32");
     assert!(h <= 32, "thumbnail height {h} should be clamped to max 32");
@@ -93,6 +96,7 @@ fn test_thumbnail_generation() {
     let path = fixtures_dir().join("test_image.jpg");
     let (w, h, rgba) = thumbnail::generate_thumbnail(&path, 32, 32)
         .unwrap()
+        .expect("expected a thumbnail image")
         .into_parts();
     assert!(w > 0 && h > 0);
     assert!(w <= 32, "width {w} should be clamped to max 32");
@@ -110,6 +114,7 @@ fn test_thumbnail_respects_max() {
     let path = fixtures_dir().join("test_image.jpg");
     let (w, h, _rgba) = thumbnail::generate_thumbnail(&path, 16, 16)
         .unwrap()
+        .expect("expected a thumbnail image")
         .into_parts();
     assert!(w <= 16, "width {w} exceeds max 16");
     assert!(h <= 16, "height {h} exceeds max 16");
@@ -124,6 +129,7 @@ fn test_thumbnail_aspect_ratio() {
 
     let (w, h, _rgba) = thumbnail::generate_thumbnail(&tmp_path, 20, 20)
         .unwrap()
+        .expect("expected a thumbnail image")
         .into_parts();
     assert!(w <= 20 && h <= 20);
     assert!(
@@ -508,6 +514,7 @@ fn test_thumbnail_extreme_landscape() {
 
     let (w, h, _rgba) = thumbnail::generate_thumbnail(&tmp_path, 100, 100)
         .unwrap()
+        .expect("expected a thumbnail image")
         .into_parts();
     assert_eq!(w, 100, "extreme landscape width should be 100");
     assert_eq!(h, 1, "extreme landscape height should be 1");
@@ -525,6 +532,7 @@ fn test_thumbnail_extreme_portrait() {
 
     let (w, h, _rgba) = thumbnail::generate_thumbnail(&tmp_path, 100, 100)
         .unwrap()
+        .expect("expected a thumbnail image")
         .into_parts();
     assert_eq!(w, 1, "extreme portrait width should be 1");
     assert_eq!(h, 100, "extreme portrait height should be 100");
@@ -696,6 +704,7 @@ fn test_thumbnail_exif_orientation() {
 
     let (w, h, _rgba) = thumbnail::generate_thumbnail(&tmp_path, 128, 128)
         .unwrap()
+        .expect("expected a thumbnail image")
         .into_parts();
     assert!(
         h > w,

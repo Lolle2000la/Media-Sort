@@ -55,12 +55,16 @@ fn assert_aspect(src_w: u32, src_h: u32, w: u32, h: u32) {
     );
 }
 
-fn assert_thumbnail(src_w: u32, src_h: u32, result: Result<DecodedImage, image::ImageError>) {
+fn assert_thumbnail(
+    src_w: u32,
+    src_h: u32,
+    result: Result<Option<DecodedImage>, image::ImageError>,
+) {
     let DecodedImage {
         width: w,
         height: h,
         rgba,
-    } = result.unwrap();
+    } = result.unwrap().expect("expected a thumbnail image");
     assert!(w > 0, "width must be > 0");
     assert!(h > 0, "height must be > 0");
     assert!(w <= 128, "thumbnail width {w} exceeds 128");
@@ -150,6 +154,7 @@ fn test_thumbnail_exif_orientation() {
 
     let (w, h, rgba) = thumbnail::generate_thumbnail(&path, 128, 128)
         .unwrap()
+        .expect("oriented JPEG should yield a thumbnail")
         .into_parts();
     assert!(
         h > w,
@@ -206,19 +211,70 @@ fn test_audio_cover_thumbnail() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Write a minimal, tag-less PCM WAV file (canonical 44-byte RIFF header plus
+/// silence), so the "no embedded cover art" path can be exercised without a
+/// bundled fixture or an ffmpeg dependency.
+fn write_silent_wav(path: &std::path::Path) {
+    let sample_rate: u32 = 8000;
+    let channels: u16 = 1;
+    let bits: u16 = 8;
+    let frames: u32 = 800; // 0.1 s
+    let data_len = frames * u32::from(bits / 8) * u32::from(channels);
+    let byte_rate = sample_rate * u32::from(channels) * u32::from(bits / 8);
+    let block_align = channels * (bits / 8);
+
+    let mut buf = Vec::with_capacity(44 + data_len as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_len).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.resize(44 + data_len as usize, 128u8); // silence (unsigned 8-bit center)
+    std::fs::write(path, &buf).unwrap();
+}
+
 #[test]
-fn test_audio_fixture_without_cover_behavior_preserved() {
-    // The bundled audio fixtures carry no embedded cover art. Before the
-    // per-format pipeline the cover probe returned `None` and the audio file
-    // was then decoded as an image, which fails. Keep that behavior: no
-    // panic, an `Err` is returned.
+fn test_audio_without_cover_yields_no_thumbnail() {
+    // Regression: an audio file without embedded cover art used to be handed
+    // to the *image* decoder as a fallback, which failed with "the file
+    // extension `.wav` was not recognized as an image format" and marked the
+    // whole file as unsupported. No cover art is not a decode failure — the
+    // file must report "no thumbnail" and stay usable.
+    let dir = temp_dir("audio_no_cover");
+    let wav = dir.join("silent.wav");
+    write_silent_wav(&wav);
+
+    // The bug's exact reproduction case: a plain `.wav` with no tags.
+    let result = thumbnail::generate_thumbnail(&wav, 128, 128);
+    match result {
+        Ok(None) => {}
+        Ok(Some(_)) => panic!("tag-less WAV has no cover art; expected no thumbnail"),
+        Err(e) => panic!("tag-less WAV is not a decode failure, got error: {e}"),
+    }
+    assert!(
+        matches!(thumbnail::thumbnail_dimensions(&wav), Ok(None)),
+        "tag-less WAV must report no thumbnail dimensions"
+    );
+
+    // The general case: every audio format without a cover behaves the same.
     for name in ["test_audio.mp3", "test_audio.flac"] {
         let path = fixtures_dir().join(name);
-        assert!(
-            thumbnail::generate_thumbnail(&path, 128, 128).is_err(),
-            "audio fixture {name} has no cover; thumbnail must error"
-        );
+        match thumbnail::generate_thumbnail(&path, 128, 128) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("fixture {name} has no cover; expected no thumbnail"),
+            Err(e) => panic!("fixture {name} without cover must not be a decode error: {e}"),
+        }
     }
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
