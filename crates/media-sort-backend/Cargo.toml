@@ -40,7 +40,7 @@ ashpd = { version = "0.13", default-features = false, features = [
     "open_uri",
     "trash",
 ] }
-pollster = "0.4"
+pollster = "1.0"
 
 # PulseAudio output for the audio player, behind the `pulse` feature (the
 # Flatpak enables it). A sandbox exposes only the PulseAudio socket, and
