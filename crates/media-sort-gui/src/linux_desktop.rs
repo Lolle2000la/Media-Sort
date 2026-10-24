@@ -10,6 +10,9 @@
 //!
 //! [`application_id`] closes that gap at startup:
 //!
+//! 0. Under Flatpak the runtime already exports a desktop entry named after the
+//!    sandbox id (`FLATPAK_ID`, e.g. `app.mediasort.MediaSort`) with the icon
+//!    alongside it, so that id is returned verbatim and nothing is provisioned.
 //! 1. If a packaged or hand-written `MediaSort.desktop` (the canonical id)
 //!    exists at any level, it wins: its name is used as the app id and nothing
 //!    is written.
@@ -85,6 +88,16 @@ const MAX_DESKTOP_FILE_BYTES: u64 = 64 * 1024;
 /// `$XDG_DATA_DIRS` are read from the environment; failures to write are logged
 /// and never prevent the app from starting.
 pub fn application_id() -> String {
+    // Under Flatpak the sandbox id is the name of the desktop entry the runtime
+    // exports (and the icon it installs), so it must be used verbatim on every
+    // backend: it is what the shell and the compositor match the window
+    // against. Nothing needs to be provisioned, and the AppImage-style
+    // provisioning below must not run (it would write into the app's private
+    // data directory for no benefit).
+    if let Some(id) = flatpak_app_id() {
+        return id;
+    }
+
     // Wayland is the only backend where the compositor resolves the window
     // icon through the desktop entry; on X11 (and any other backend) the icon
     // is delivered by the window itself, so provisioning there would only
@@ -113,6 +126,28 @@ pub fn application_id() -> String {
         appimage.as_deref(),
         exe.as_deref(),
     )
+}
+
+/// The application id Flatpak assigned to this sandbox, or `None` when not
+/// running under Flatpak.
+///
+/// `flatpak run` sets `FLATPAK_ID` to the manifest's `app-id`
+/// (`app.mediasort.MediaSort`, see `flatpak/app.mediasort.MediaSort.yml`),
+/// which is exactly the name of the desktop entry and icon the runtime exports
+/// into the sandbox - the value the shell needs for window grouping, the icon
+/// and the app name.
+pub fn flatpak_app_id() -> Option<String> {
+    flatpak_id_from(std::env::var_os("FLATPAK_ID").as_deref())
+}
+
+/// The pure predicate behind [`flatpak_app_id`], so it can be tested without
+/// touching the process environment.
+fn flatpak_id_from(value: Option<&std::ffi::OsStr>) -> Option<String> {
+    value
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 /// True when this process is running under Wayland. `WAYLAND_DISPLAY` is set by
@@ -1023,5 +1058,19 @@ mod tests {
         assert!(is_wayland_session(Some(OsStr::new("wayland-0"))));
         assert!(!is_wayland_session(Some(OsStr::new(""))));
         assert!(!is_wayland_session(None));
+    }
+
+    #[test]
+    fn flatpak_id_comes_from_the_environment() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            flatpak_id_from(Some(OsStr::new("app.mediasort.MediaSort"))).as_deref(),
+            Some("app.mediasort.MediaSort")
+        );
+        // A variable that is set but empty/unusable must not become the app id.
+        assert_eq!(flatpak_id_from(Some(OsStr::new("  "))), None);
+        assert_eq!(flatpak_id_from(Some(OsStr::new(""))), None);
+        assert_eq!(flatpak_id_from(None), None);
     }
 }

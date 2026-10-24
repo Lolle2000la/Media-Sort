@@ -109,6 +109,12 @@ parts:
     # in-app self-updater is neither built nor offered.
     rust-path:
       - crates/media-sort-gui
+    # The audio player is built with `media-sort-backend/pulse`: a snap exposes
+    # the PulseAudio socket through `audio-playback`, and cpal's ALSA stream
+    # cannot deliver there (see media-sort-backend's `audio_decoder` module).
+    # Workspace-member features use the `package/feature` form.
+    rust-features:
+      - media-sort-backend/pulse
     # Belt and braces for the staged runtime libraries: snapcraft's strict
     # command-chain already puts $SNAP/usr/lib/<triplet> on LD_LIBRARY_PATH, and
     # this additionally writes an `$ORIGIN`-relative RPATH (e.g.
@@ -127,17 +133,23 @@ parts:
       - nasm
       - build-essential
       - pkg-config
-      # libmpv (video/GIF playback), ALSA (rodio/cpal audio output) and dav1d
-      # (AVIF image decoding) headers. dav1d is found via pkg-config, so the
-      # vendored meson fallback is not exercised.
+      # libmpv (video/GIF playback), ALSA (the cpal fallback), PulseAudio (the
+      # output the `pulse` feature builds against) and dav1d (AVIF image
+      # decoding) headers. dav1d is found via pkg-config, so the vendored meson
+      # fallback is not exercised.
       - libmpv-dev
       - libasound2-dev
+      - libpulse-dev
       - libdav1d-dev
     stage-packages:
       # Runtime counterparts of the -dev packages above. Snapcraft pulls their
       # transitive dependencies (libav*, ...) automatically.
       - libmpv2
       - libasound2t64
+      # `libpulse0` carries `libpulse-simple.so.0`, which the `pulse` feature
+      # links; it is already pulled in transitively by libmpv2, but naming it
+      # keeps the audio output from depending on another package's closure.
+      - libpulse0
       - libdav1d7
       # The ffmpeg CLI, used for fast video thumbnails and as the AVIF decode
       # fallback. Its libav* dependencies are already pulled in by libmpv2, so

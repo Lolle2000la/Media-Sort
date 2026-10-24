@@ -220,8 +220,9 @@ pub fn baseline_gui(path: &Path) -> VariantResult {
 /// Baseline 2: backend `generate_thumbnail` (includes wasteful symphonia probe).
 pub fn backend_fir(path: &Path) -> VariantResult {
     media_sort_backend::media::thumbnail::generate_thumbnail(path, 128, 128)
+        .map_err(|e| format!("{e}"))?
         .map(|d| d.into_parts())
-        .map_err(|e| format!("{e}"))
+        .ok_or_else(|| "backend thumbnail produced no image".to_string())
 }
 
 /// Like `backend_fir` but skip `extract_audio_cover` entirely for image extensions.

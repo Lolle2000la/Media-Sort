@@ -5,6 +5,11 @@ use media_sort_core::actions::reversible::ActionError;
 #[cfg(target_os = "windows")]
 use media_sort_core::path_utils;
 
+/// Reaching the host trash through `org.freedesktop.portal.Trash` under Flatpak
+/// (see the module for why the `trash` crate cannot be used there).
+#[cfg(target_os = "linux")]
+mod portal;
+
 #[cfg(target_os = "macos")]
 fn macos_trash_item(path: &Path) -> Result<PathBuf, ActionError> {
     use objc2::rc::Retained;
@@ -52,6 +57,16 @@ fn macos_trash_item(path: &Path) -> Result<PathBuf, ActionError> {
     }
 }
 
+/// Whether a portal failure was a *timeout* rather than a refusal.
+///
+/// `trash/portal.rs::to_io` maps `PortalError::Timeout` to
+/// `io::ErrorKind::TimedOut`; that distinction decides whether the caller may
+/// still trash the file another way.
+#[cfg(target_os = "linux")]
+fn is_portal_timeout(err: &ActionError) -> bool {
+    matches!(err, ActionError::Io(io_err) if io_err.kind() == std::io::ErrorKind::TimedOut)
+}
+
 pub fn delete_to_trash(path: &Path) -> Result<Box<dyn TrashRestoreHandle>, ActionError> {
     let original_path = path.to_path_buf();
 
@@ -79,8 +94,65 @@ pub fn delete_to_trash(path: &Path) -> Result<Box<dyn TrashRestoreHandle>, Actio
             }
         };
 
+        // Under Flatpak `$XDG_DATA_HOME` is remapped to a per-app directory, so
+        // `trash` would move the file into the sandbox's private data
+        // directory, where the desktop cannot see or empty it; it would also
+        // read the sandbox's bind mount of the home directory as a mount point
+        // and trash into a `$HOME/.Trash-1000` volume trash that no file
+        // manager shows. Ask the host through the portal first, then write the
+        // real home trash ourselves, and keep the in-sandbox fallback only for
+        // files the home trash cannot take (another filesystem, where the
+        // crate finds the volume's own trash).
+        #[cfg(target_os = "linux")]
+        if portal::in_flatpak() {
+            match portal::delete_to_trash(&original_path) {
+                Ok(handle) => return Ok(handle),
+                // A timed-out `TrashFile` is NOT a refusal: its outcome is
+                // unknown. `xdg-desktop-portal` may still complete the request
+                // late, may never answer, or may have moved the file already —
+                // and the D-Bus call handed it the descriptor, so it can act on
+                // the file after this function returns. Running the home-trash
+                // fallback (or `trash::delete`) on the same path would race that
+                // unknown move and can corrupt the trash entry, since the two
+                // would touch one file with different metadata. Fail with the
+                // timeout instead: the user sees that the delete did not
+                // complete, and a file the portal leaves alone stays in place.
+                Err(err) if is_portal_timeout(&err) => {
+                    tracing::warn!(
+                        path = %original_path.display(),
+                        error = %err,
+                        "org.freedesktop.portal.Trash timed out; not falling back because the request may still be in flight"
+                    );
+                    return Err(err);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %original_path.display(),
+                        %err,
+                        "org.freedesktop.portal.Trash failed; trashing into the host trash directly instead"
+                    );
+                    match portal::trash_into_home_trash(&original_path) {
+                        Ok(handle) => return Ok(handle),
+                        Err(err) => tracing::warn!(
+                            path = %original_path.display(),
+                            %err,
+                            "direct host trash failed; trashing inside the sandbox instead"
+                        ),
+                    }
+                }
+            }
+        }
+
         trash::delete(&original_path)
             .map_err(|e| ActionError::Io(std::io::Error::other(e.to_string())))?;
+
+        // The `trash` crate creates `Trash/{,files,info}` with `fs::create_dir_all`
+        // (mode 0755 under a normal umask), whereas `xdg-desktop-portal` 1.20+
+        // strictly requires mode 0700 and rejects any subsequent portal trash
+        // call with "Directory already exists with bad permissions". Normalize
+        // permissions back to 0700 immediately after `trash::delete`.
+        #[cfg(target_os = "linux")]
+        portal::repair_existing_trash_permissions(&original_path);
 
         // Windows: remember when the delete happened so restore can bind
         // this handle to the correct trash entry among several same-name

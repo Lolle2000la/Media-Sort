@@ -1,0 +1,209 @@
+name: Flatpak Cargo Sources
+
+# flatpak/cargo-sources.json is the crate set Flathub builds offline from,
+# generated from Cargo.lock. A dependency bump that forgets to regenerate it
+# would otherwise only surface in the Flathub build, so it is checked here.
+#
+# This deliberately uses `pull_request`, not `pull_request_target`. See
+# https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target:
+# `pull_request_target` runs with the base repository's write token, and GitHub
+# is adding a default Actions event policy that blocks it in public
+# repositories (enforced from 2026-11-02). `pull_request` needs no such
+# privilege: it gets a write token only for pull requests from this repository,
+# which is exactly the case where the regenerated file can be pushed back.
+#
+# For a pull request from a fork the token is read-only, so the file cannot be
+# written back or commented. That case gets the patch in the job log and the
+# regenerated file as a build artifact, neither of which needs any local
+# tooling to apply.
+#
+# No code from a pull request is ever executed: only Cargo.lock is read, as
+# data, through the API, and the generator (pinned to a commit) is run on it.
+#
+# NOTE: the paths filter lists Cargo.lock but deliberately not any Cargo.toml.
+# The generated file is a pure function of the lock (the generator takes it as
+# its only input), so a manifest change that does not change the lock -- MSRV,
+# metadata, lints, profiles, or a requirement that resolves to the same version
+# -- cannot make it stale, and running here would only produce a guaranteed
+# pass. Changes that do change the resolved package set (adding dependencies,
+# version bumps, workspace members/versions, patches) update Cargo.lock, which
+# is filtered.
+#
+# NOTE: a PR touching none of these files is simply not scheduled. That is fine
+# only while this check is not required: GitHub leaves a path-filtered
+# workflow's checks "Pending" (not "skipped") on PRs it does not run for, and
+# such a PR then cannot merge once the check is required. If this ever needs to
+# be a required check, drop the filter and gate the steps with a job-level `if:`
+# instead -- a job skipped by a condition reports success.
+
+on:
+  push:
+    branches: [master]
+    paths: &paths
+      - Cargo.lock
+      - flatpak/cargo-sources.json
+      - .github/workflows/flatpak-sources.yml
+  pull_request:
+    paths: *paths
+  merge_group:
+    # Path filters are ignored for merge_group, so a filter here would be
+    # misleading -- it always runs (see ci.yml).
+    branches: [master]
+    types: [checks_requested]
+
+permissions:
+  contents: write # push the regenerated file to a same-repository PR branch
+  pull-requests: write # comment on that PR
+
+concurrency:
+  group: flatpak-cargo-sources-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to a commit: this job regenerates the committed file and compares,
+  # so the generator itself has to be reproducible.
+  GENERATOR_URL: https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/74697c75b630d7330e77250fc13cb5ea688d9479/cargo/flatpak-cargo-generator.py
+  MARKER: '<!-- flatpak-cargo-sources -->'
+  # The generator clones git dependencies named in Cargo.lock. Without this a
+  # crafted `ext::` URL (or ssh/file) would run arbitrary commands, so restrict
+  # git to https -- which is all actions/checkout and the crates.io sources use.
+  GIT_ALLOW_PROTOCOL: https
+
+jobs:
+  cargo-sources:
+    name: cargo-sources.json in sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Work out which revision to check
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          {
+            if [ "$EVENT" = "pull_request" ]; then
+              echo "sha=$HEAD_SHA"
+              echo "pr=${{ github.event.pull_request.number }}"
+              if [ "$HEAD_REPO" = "${{ github.repository }}" ]; then
+                # A branch in this repository: its author can already push to
+                # it, so writing the regenerated file back grants nothing new.
+                echo "pushable=true"
+                echo "head_ref=$HEAD_REF"
+              else
+                echo "pushable=false"
+              fi
+            else
+              echo "sha=${{ github.sha }}"
+              echo "pushable=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.x'
+
+      - name: Install the pinned generator
+        run: |
+          pip install aiohttp tomlkit
+          curl -fsSL -o "$RUNNER_TEMP/generator.py" "$GENERATOR_URL"
+
+      - name: Fetch Cargo.lock and the committed sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          api() { gh api "repos/${{ github.repository }}/contents/$1?ref=$SHA" -H 'Accept: application/vnd.github.raw'; }
+          api Cargo.lock > Cargo.lock
+          mkdir -p flatpak
+          api flatpak/cargo-sources.json > flatpak/cargo-sources.json
+
+      - name: Regenerate and compare
+        id: check
+        run: |
+          python3 "$RUNNER_TEMP/generator.py" Cargo.lock -o "$RUNNER_TEMP/cargo-sources.json"
+          if diff -q flatpak/cargo-sources.json "$RUNNER_TEMP/cargo-sources.json" > /dev/null; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            echo "flatpak/cargo-sources.json is in sync with Cargo.lock."
+          else
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            diff -u flatpak/cargo-sources.json "$RUNNER_TEMP/cargo-sources.json" > "$RUNNER_TEMP/cargo-sources.diff" || true
+            {
+              echo "::warning::flatpak/cargo-sources.json is out of date; regenerate it with:"
+              echo "  python3 flatpak-cargo-generator.py Cargo.lock -o flatpak/cargo-sources.json"
+              echo
+              echo "Patch:"
+              cat "$RUNNER_TEMP/cargo-sources.diff"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the regenerated file
+        if: steps.check.outputs.stale == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: flatpak-cargo-sources
+          path: |
+            ${{ runner.temp }}/cargo-sources.json
+            ${{ runner.temp }}/cargo-sources.diff
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Check out the PR branch
+        if: steps.check.outputs.stale == 'true' && steps.target.outputs.pushable == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.target.outputs.head_ref }}
+          token: ${{ secrets.FLATPAK_SOURCES_TOKEN || github.token }}
+
+      - name: Push the regenerated file
+        id: push
+        if: steps.check.outputs.stale == 'true' && steps.target.outputs.pushable == 'true'
+        run: |
+          cp "$RUNNER_TEMP/cargo-sources.json" flatpak/cargo-sources.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add flatpak/cargo-sources.json
+          git commit -m 'chore(flatpak): regenerate cargo-sources.json'
+          git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on the PR
+        if: steps.check.outputs.stale == 'true' && steps.target.outputs.pushable == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FLATPAK_SOURCES_TOKEN || github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          {
+            echo "$MARKER"
+            if [ "${{ steps.push.outputs.pushed }}" = "true" ]; then
+              echo "\`flatpak/cargo-sources.json\` was out of date with \`Cargo.lock\`; I regenerated it and pushed it to this branch."
+            else
+              echo "\`flatpak/cargo-sources.json\` is out of date with \`Cargo.lock\` and I could not push the update."
+            fi
+          } > "$RUNNER_TEMP/comment.md"
+          id="$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
+                  --jq ".[] | select(.user.login == \"$(gh api user --jq .login)\") | select(.body | contains(\"$MARKER\")) | .id" | head -n 1)"
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$id" -F body=@"$RUNNER_TEMP/comment.md"
+          else
+            gh api -X POST "repos/${{ github.repository }}/issues/$PR/comments" -F body=@"$RUNNER_TEMP/comment.md"
+          fi
+
+      - name: Remove a stale comment once in sync
+        if: steps.check.outputs.stale == 'false' && steps.target.outputs.pushable == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FLATPAK_SOURCES_TOKEN || github.token }}
+          PR: ${{ steps.target.outputs.pr }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.user.login == \"$(gh api user --jq .login)\") | select(.body | contains(\"$MARKER\")) | .id" \
+            | while read -r id; do
+                gh api -X DELETE "repos/${{ github.repository }}/issues/comments/$id"
+              done
+
+      - name: Fail when the file is still stale
+        if: steps.check.outputs.stale == 'true' && steps.push.outputs.pushed != 'true'
+        run: |
+          echo "::error::flatpak/cargo-sources.json is out of date with Cargo.lock. See the job summary for the patch, download the 'flatpak-cargo-sources' artifact for the regenerated file, or follow https://github.com/${{ github.repository }}/blob/master/flatpak/README.md"
+          exit 1

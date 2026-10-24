@@ -75,30 +75,27 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
             (media_type == media_sort_core::media_type::MediaType::Video).then(|| path.clone()),
         );
 
-        if media_type == media_sort_core::media_type::MediaType::Video {
-            if let Some(ref mut ap) = state.audio.player {
-                ap.stop();
-            }
-            state.audio.playing = false;
+        if media_type == media_sort_core::media_type::MediaType::Audio {
             state.audio.position = 0.0;
-        } else if media_type == media_sort_core::media_type::MediaType::Audio {
-            if state.audio.playing
-                && let Some(ref player) = state.audio.player
-            {
+            state.audio.duration = 0.0;
+            if let Some(ref player) = state.audio.player {
                 player.stop();
-                if let Err(e) = player.play(&path) {
-                    tracing::error!("Audio play failed: {e}");
-                    state.audio.playing = false;
-                } else {
-                    state.audio.duration = player.duration();
+                if state.audio.playing {
+                    if let Err(e) = player.play(&path) {
+                        tracing::error!("Audio play failed: {e}");
+                        state.audio.playing = false;
+                    } else {
+                        state.audio.duration = player.duration();
+                    }
                 }
             }
-        } else if state.audio.playing {
+        } else {
             if let Some(ref player) = state.audio.player {
                 player.stop();
             }
             state.audio.playing = false;
             state.audio.position = 0.0;
+            state.audio.duration = 0.0;
         }
 
         let mut tasks = vec![load_metadata(state, index)];
@@ -376,14 +373,11 @@ pub fn load_thumbnail(
                 {
                     return Ok(None);
                 }
-                match crate::subscriptions::prefetch::generate_thumbnail(
+                crate::subscriptions::prefetch::generate_thumbnail(
                     &path_clone,
                     media_type,
                     animated,
-                ) {
-                    Ok((w, h, rgba)) => Ok(Some((w, h, rgba))),
-                    Err(e) => Err(e),
-                }
+                )
             })
             .await
             .unwrap_or(Ok(None));
@@ -400,6 +394,30 @@ pub fn load_thumbnail(
 }
 
 pub fn open_externally(path: &std::path::Path) {
+    // The default handler for a file is a *host* application, and inside the
+    // Flatpak sandbox `xdg-open` reaches it only by accident. Hand the file to
+    // the OpenURI portal instead. Only `Unavailable` — not sandboxed, or the
+    // path is a web address / not a file on disk — falls through to the
+    // platform handler below: a portal that failed or timed out must not be
+    // retried there, because `open::that` runs `xdg-open`, which re-invokes the
+    // very same (wedged) OpenURI portal with no deadline at all.
+    #[cfg(target_os = "linux")]
+    {
+        use media_sort_backend::platform::desktop_portal::{self, PortalError};
+        match desktop_portal::open_externally(path) {
+            Ok(()) => return,
+            Err(PortalError::Unavailable) => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "the OpenURI portal could not open the file; not retrying through xdg-open"
+                );
+                return;
+            }
+        }
+    }
+
     // The `open` crate uses ShellExecuteW on Windows (a single typed
     // parameter, no cmd.exe re-tokenization), `open` on macOS and xdg-open
     // on Linux. The previous Windows branch ran `cmd /C start "" <path>`
@@ -412,6 +430,30 @@ pub fn open_externally(path: &std::path::Path) {
 }
 
 pub fn reveal_in_file_manager(path: &std::path::Path) {
+    // The file manager is a host application too, and inside Flatpak the
+    // session-bus policy blocks `org.freedesktop.FileManager1` outright, so the
+    // request goes through the OpenURI portal. It has no select-a-file call, so
+    // this opens the containing folder rather than highlighting the entry.
+    // As above, only `Unavailable` falls back to `dbus-send`/`xdg-open`: those
+    // cannot work in the sandbox, so a portal failure is reported instead of
+    // being retried on a route the sandbox blocks.
+    #[cfg(target_os = "linux")]
+    {
+        use media_sort_backend::platform::desktop_portal::{self, PortalError};
+        match desktop_portal::reveal_in_file_manager(path) {
+            Ok(()) => return,
+            Err(PortalError::Unavailable) => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "the OpenURI portal could not reveal the file; the sandbox blocks the native routes"
+                );
+                return;
+            }
+        }
+    }
+
     let res = if cfg!(target_os = "windows") {
         std::process::Command::new("explorer")
             .arg(format!("/select,{}", path.display()))

@@ -2,15 +2,44 @@ use crate::rotation::{Rotation, detect_video_rotation};
 use libmpv_sys::*;
 use std::ffi::{CStr, CString};
 use std::fmt;
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int, c_ulong, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::{Duration, Instant};
 
+const MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME: mpv_render_param_type = 12;
+const MPV_RENDER_PARAM_SKIP_RENDERING: mpv_render_param_type = 13;
 const MPV_RENDER_PARAM_SW_SIZE: mpv_render_param_type = 17;
 const MPV_RENDER_PARAM_SW_FORMAT: mpv_render_param_type = 18;
 const MPV_RENDER_PARAM_SW_STRIDE: mpv_render_param_type = 19;
 const MPV_RENDER_PARAM_SW_POINTER: mpv_render_param_type = 20;
+
+/// Default copy-back hardware decoder probe list when hardware decoding is
+/// enabled.
+///
+/// We deliberately list the platform copy-back APIs (`nvdec-copy`, `vaapi-copy`,
+/// `d3d11va-copy`, `dxva2-copy`, `videotoolbox-copy`) instead of `auto-copy`:
+/// on Linux with mpv 0.41+ and FFmpeg 8.1+, `auto-copy` probes `vulkan-copy`
+/// first (`h264-vulkan-copy`, `hevc-vulkan-copy`, `av1-vulkan-copy`), which
+/// logs `av_log callback called with bad parameters (NULL AVClass)`, stalls
+/// ~600 ms per load, and segfaults (`SIGSEGV`) on decoder teardown when files
+/// are switched rapidly inside the Flatpak runtime. Explicit platform copy
+/// decoders use NVDEC on NVIDIA and VAAPI on AMD/Intel Mesa without touching
+/// `vulkan-copy`. Override at runtime with `MEDIA_SORT_MPV_HWDEC`.
+const DEFAULT_HWDEC: &str = "nvdec-copy,vaapi-copy,d3d11va-copy,dxva2-copy,videotoolbox-copy";
+
+/// Default copy-back hardware decoder for libmpv older than 0.36.
+///
+/// Comma-separated `hwdec` lists are an `OPT_STRINGLIST` only since mpv 0.36.0:
+/// before that `hwdec` is a single `OPT_STRING`, so [`DEFAULT_HWDEC`] matches no
+/// backend there and silently disables hardware decoding (Debian 12, for
+/// example, ships mpv 0.35 as `libmpv.so.2`, which the Linux AppImage and a
+/// native build then load).
+const LEGACY_HWDEC: &str = "auto-copy";
+
+/// libmpv client API version of mpv 0.36.0 (`MPV_MAKE_VERSION(2, 1)`), the
+/// first release whose `hwdec` option takes a comma-separated probe list.
+const MPV_API_VERSION_0_36: c_ulong = (2 << 16) | 1;
 
 /// Errors produced by [`MpvContext`] operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +110,16 @@ pub struct MpvContext {
     pub(crate) handle: *mut mpv_handle,
     pub(crate) render_ctx: *mut mpv_render_context,
     callback_context_raw: *mut c_void,
+    /// A `loadfile` has been queued and mpv has not yet announced the new file
+    /// with `MPV_EVENT_START_FILE`.
+    ///
+    /// While this is set, an `MPV_EVENT_END_FILE` error still belongs to the
+    /// *previous* file: mpv ends it before it starts the replacement, and
+    /// `loadfile` is delivered asynchronously — so the end-of-file event for a
+    /// file that was playing fine arrives *after* the command was issued.
+    /// Attributing it to the new file is what made a switch show "file not
+    /// supported".
+    awaiting_start_file: bool,
 }
 
 impl MpvContext {
@@ -91,17 +130,19 @@ impl MpvContext {
     }
 
     /// Creates a fully configured playback context (video + audio enabled).
-    /// `hardware_decoding` controls mpv's `hwdec` option: `true` keeps the
-    /// default `auto-copy` mode, `false` forces software decoding (`hwdec=no`).
+    /// `hardware_decoding` controls mpv's `hwdec` option: `true` enables the
+    /// platform copy-back hardware decoder list, `false` forces software
+    /// decoding (`hwdec=no`).
     pub fn new_with_hardware_decoding(hardware_decoding: bool) -> Result<Self, MpvError> {
         Self::create(false, hardware_decoding)
     }
 
-    /// Creates a minimal context tuned for thumbnail extraction: audio and
-    /// subtitles are disabled and seeking is allowed to be approximate, which
-    /// makes frame capture much faster.
+    /// Creates a minimal context tuned for thumbnail extraction: audio,
+    /// subtitles, and hardware decoding are disabled and seeking is allowed to
+    /// be approximate, which makes single-frame capture fast without opening
+    /// competing GPU hardware decode contexts across thumbnail worker threads.
     pub fn new_thumbnail_player() -> Result<Self, MpvError> {
-        Self::create(true, true)
+        Self::create(true, false)
     }
 
     fn create(thumbnail_mode: bool, hardware_decoding: bool) -> Result<Self, MpvError> {
@@ -114,8 +155,20 @@ impl MpvContext {
             // Common options for both modes.
             Self::set_option(handle, c"vo", "libmpv");
             Self::set_option(handle, c"keep-open", "yes");
+            // libmpv does not log to the terminal for a library client, and the
+            // event draining in `drain_log_messages` cannot run while a
+            // synchronous libmpv call is blocked — which is exactly the failure
+            // that matters ("no frames", with nothing to explain it). When
+            // verbose logging is requested, let mpv write to stderr directly as
+            // well, so a hang still leaves its last messages behind.
+            if verbose_logging_requested() {
+                Self::set_option(handle, c"terminal", "yes");
+                Self::set_option(handle, c"msg-level", "all=info");
+            }
             if hardware_decoding {
-                Self::set_option(handle, c"hwdec", "auto-copy");
+                let hwdec = resolve_hwdec();
+                tracing::debug!(hwdec = %hwdec, "configuring mpv hardware decoding");
+                Self::set_option(handle, c"hwdec", &hwdec);
             } else {
                 Self::set_option(handle, c"hwdec", "no");
             }
@@ -146,6 +199,13 @@ impl MpvContext {
                 return Err(MpvError::Initialize(err));
             }
 
+            // Ask libmpv for its own log messages, which are otherwise dropped
+            // on the floor. Inside a Flatpak there is no mpv CLI to fall back
+            // on, so a decoder or driver problem — which hwdec mpv picked, and
+            // why it failed — would be invisible. `drain_log_messages` forwards
+            // them to `tracing`.
+            mpv_request_log_messages(handle, c"info".as_ptr());
+
             let api_type = CString::new("sw").map_err(|_| MpvError::InvalidCString)?;
             let mut params = [
                 mpv_render_param {
@@ -169,16 +229,26 @@ impl MpvContext {
                 handle,
                 render_ctx,
                 callback_context_raw: ptr::null_mut(),
+                awaiting_start_file: false,
             })
         }
     }
 
-    /// Best-effort option setter; errors are ignored because the option set is
-    /// static and expected to be accepted by any libmpv version in use.
+    /// Best-effort option setter: a rejected option must not abort playback, so
+    /// failures are logged (at `debug`, next to mpv's own `info` messages)
+    /// rather than propagated.
     fn set_option(handle: *mut mpv_handle, key: &'static std::ffi::CStr, value: &str) {
         unsafe {
-            let value = CString::new(value).expect("static string contains no null bytes");
-            mpv_set_option_string(handle, key.as_ptr(), value.as_ptr());
+            let value_c = CString::new(value).expect("static string contains no null bytes");
+            let ret = mpv_set_option_string(handle, key.as_ptr(), value_c.as_ptr());
+            if ret < 0 {
+                tracing::debug!(
+                    option = %key.to_string_lossy(),
+                    value,
+                    code = ret,
+                    "mpv rejected option"
+                );
+            }
         }
     }
 
@@ -203,9 +273,110 @@ impl MpvContext {
     }
 
     /// Returns `true` if the render context has at least one pending frame.
+    ///
+    /// IMPORTANT: When this returns `true`, the caller **must** follow up with
+    /// either [`Self::render_frame`] or [`Self::skip_frame`]. In libmpv's
+    /// `vo_libmpv`, `mpv_render_context_update` clears the update flag without
+    /// releasing `ctx->next_frame`, leaving `vo_libmpv`'s `draw_frame` blocked
+    /// in `pthread_cond_timedwait` until `mpv_render_context_render` runs.
     pub fn has_frame_ready(&self) -> bool {
         let flags = unsafe { mpv_render_context_update(self.render_ctx) };
         (flags & mpv_render_update_flag_MPV_RENDER_UPDATE_FRAME as u64) != 0
+    }
+
+    /// Consumes a pending frame in `vo_libmpv` without rendering pixels.
+    ///
+    /// In libmpv's `vo_libmpv`, `draw_frame` sets `ctx->next_frame` and blocks
+    /// in `pthread_cond_timedwait` until `mpv_render_context_render` clears
+    /// `ctx->next_frame`. Calling `mpv_render_context_render` with
+    /// `MPV_RENDER_PARAM_SKIP_RENDERING = 1` and
+    /// `MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME = 0` immediately clears
+    /// `ctx->next_frame` and wakes the VO thread with zero pixel work.
+    pub fn skip_frame(&self) {
+        unsafe {
+            let mut skip: c_int = 1;
+            let mut block: c_int = 0;
+            let mut params = [
+                mpv_render_param {
+                    type_: MPV_RENDER_PARAM_SKIP_RENDERING,
+                    data: &mut skip as *mut _ as *mut c_void,
+                },
+                mpv_render_param {
+                    type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                    data: &mut block as *mut _ as *mut c_void,
+                },
+                mpv_render_param {
+                    type_: 0,
+                    data: ptr::null_mut(),
+                },
+            ];
+            let _ = mpv_render_context_render(self.render_ctx, params.as_mut_ptr());
+        }
+    }
+
+    /// Forwards mpv's pending log messages to `tracing`, draining mpv's client
+    /// event queue, and returns the first failure that belongs to the file
+    /// currently playing.
+    ///
+    /// mpv delivers its log messages as *events*, so a client that never waits
+    /// for events both loses every diagnostic and lets the queue grow for as
+    /// long as a file plays. That is why this is called from the worker's
+    /// periodic tick and from the thumbnail capture loop, and why it must run on
+    /// the thread that owns the handle. It never blocks (zero timeout), so it
+    /// cannot stall frame delivery.
+    ///
+    /// `MPV_EVENT_START_FILE` is the boundary between files: mpv ends the old
+    /// file (emitting `MPV_EVENT_END_FILE`) *after* a queued `loadfile` but
+    /// *before* it starts the new one, so while [`Self::awaiting_start_file`] is
+    /// set an `END_FILE` error belongs to the previous file, not the new one.
+    ///
+    /// Only `MPV_EVENT_END_FILE` with `MPV_END_FILE_REASON_ERROR` is ever
+    /// reported as a failure. Log messages are *not*: mpv logs recoverable
+    /// problems at `error` level while playback continues normally (`[ao/pulse]
+    /// Init failed: Connection refused` with no audio server, for instance), and
+    /// treating those as a load failure would badge a playable video as
+    /// unsupported.
+    pub(crate) fn drain_log_messages(&mut self) -> Option<String> {
+        let mut first_error = None;
+        unsafe {
+            loop {
+                let event = mpv_wait_event(self.handle, 0.0);
+                if event.is_null() {
+                    break;
+                }
+                let event = &*event;
+                // Compared, not matched: the binding names are not
+                // upper-case, so a `match` pattern would trip the
+                // `non_upper_case_globals` lint from this crate.
+                if event.event_id == mpv_event_id_MPV_EVENT_NONE {
+                    break;
+                } else if event.event_id == mpv_event_id_MPV_EVENT_START_FILE {
+                    // The new file is starting: anything recorded so far
+                    // belonged to the file that just ended.
+                    self.awaiting_start_file = false;
+                    first_error = None;
+                } else if event.event_id == mpv_event_id_MPV_EVENT_LOG_MESSAGE
+                    && !event.data.is_null()
+                {
+                    forward_log_message(&*event.data.cast::<mpv_event_log_message>());
+                } else if event.event_id == mpv_event_id_MPV_EVENT_END_FILE && !event.data.is_null()
+                {
+                    let end_file = &*event.data.cast::<mpv_event_end_file>();
+                    if !self.awaiting_start_file
+                        && end_file.reason == mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as c_int
+                        && end_file.error < 0
+                    {
+                        let err_str = cstr_lossy(mpv_error_string(end_file.error));
+                        first_error = Some(if err_str.is_empty() {
+                            format!("mpv playback error (code {})", end_file.error)
+                        } else {
+                            err_str
+                        });
+                    }
+                }
+            }
+        }
+        first_error
     }
 
     /// The path of the currently loaded file, if any.
@@ -231,6 +402,7 @@ impl MpvContext {
     /// Loads a file into the player. Returns an error when the path is not
     /// valid UTF-8 or mpv rejects the file.
     pub fn load_file(&mut self, path: &Path) -> Result<(), MpvError> {
+        self.drain_render_context();
         unsafe {
             let path_str = CString::new(path.to_str().ok_or(MpvError::InvalidPath)?)
                 .map_err(|_| MpvError::InvalidCString)?;
@@ -244,25 +416,56 @@ impl MpvContext {
         }
     }
 
-    /// Sends a `stop` command to release the current file and flush internal
-    /// caches. Must be called before loading a new file to prevent mpv from
-    /// entering an inconsistent state when files are switched rapidly.
-    pub fn stop(&mut self) {
+    /// Loads a file asynchronously without blocking the render thread.
+    ///
+    /// `mpv_command_async` is explicitly safe to call from libmpv render API
+    /// threads (`mpv/client.h`), whereas synchronous `mpv_command` can deadlock
+    /// if the mpv core waits on `vo_libmpv` while `vo_libmpv` waits on
+    /// `mpv_render_context_render`.
+    pub(crate) fn load_file_async(&mut self, path: &Path) -> Result<(), MpvError> {
+        self.drain_render_context();
         unsafe {
-            let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
-            mpv_command(self.handle, cmd.as_mut_ptr());
-            self.drain_render_context();
+            let path_str = CString::new(path.to_str().ok_or(MpvError::InvalidPath)?)
+                .map_err(|_| MpvError::InvalidCString)?;
+            let mut cmd: [*const c_char; 3] =
+                [c"loadfile".as_ptr(), path_str.as_ptr(), ptr::null()];
+            let err = mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+            if err < 0 {
+                return Err(MpvError::Command(err));
+            }
+            // `loadfile` is queued: mpv will end the old file (emitting its
+            // `MPV_EVENT_END_FILE`) before starting this one, so that event
+            // must not be read as a failure of this file. `MPV_EVENT_START_FILE`
+            // (client API 1.108, long predating mpv 0.35) clears the wait.
+            self.awaiting_start_file = true;
+            Ok(())
         }
     }
 
-    /// Drains all pending render-context updates without rendering.
-    pub fn drain_render_context(&self) {
+    /// Sends a `stop` command to release the current file and flush internal
+    /// caches. Drains any pending frame first so `vo_libmpv` is not blocked in
+    /// `draw_frame` while the core processes `stop`.
+    pub fn stop(&mut self) {
+        self.drain_render_context();
         unsafe {
-            for _ in 0..128 {
-                if mpv_render_context_update(self.render_ctx) == 0 {
-                    break;
-                }
+            let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
+            mpv_command(self.handle, cmd.as_mut_ptr());
+        }
+        // No `MPV_EVENT_START_FILE` follows a `stop`, so waiting for one would
+        // suppress every error of the next file loaded through a path other
+        // than `load_file_async`.
+        self.awaiting_start_file = false;
+        self.drain_render_context();
+    }
+
+    /// Drains all pending render-context frames without rendering pixels,
+    /// waking `vo_libmpv` if it is waiting in `draw_frame`.
+    pub fn drain_render_context(&self) {
+        for _ in 0..128 {
+            if !self.has_frame_ready() {
+                break;
             }
+            self.skip_frame();
         }
     }
 
@@ -465,6 +668,7 @@ impl MpvContext {
         unsafe {
             let format = CString::new("rgba").map_err(|_| MpvError::InvalidCString)?;
             let mut size: [c_int; 2] = [width, height];
+            let mut block: c_int = 0;
 
             let mut params = [
                 mpv_render_param {
@@ -482,6 +686,10 @@ impl MpvContext {
                 mpv_render_param {
                     type_: MPV_RENDER_PARAM_SW_POINTER,
                     data: buffer.as_mut_ptr() as *mut c_void,
+                },
+                mpv_render_param {
+                    type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                    data: &mut block as *mut _ as *mut c_void,
                 },
                 mpv_render_param {
                     type_: 0,
@@ -512,6 +720,7 @@ impl MpvContext {
     }
 
     pub fn set_paused(&mut self, paused: bool) {
+        self.drain_render_context();
         unsafe {
             let val: c_int = if paused { 1 } else { 0 };
             mpv_set_property(
@@ -523,14 +732,36 @@ impl MpvContext {
         }
     }
 
+    pub(crate) fn set_paused_async(&mut self, paused: bool) {
+        unsafe {
+            let mut val: c_int = if paused { 1 } else { 0 };
+            mpv_set_property_async(
+                self.handle,
+                0,
+                c"pause".as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &mut val as *mut _ as *mut c_void,
+            );
+        }
+    }
+
     pub fn toggle_pause(&mut self) {
+        self.drain_render_context();
         unsafe {
             let mut cmd: [*const c_char; 3] = [c"cycle".as_ptr(), c"pause".as_ptr(), ptr::null()];
             mpv_command(self.handle, cmd.as_mut_ptr());
         }
     }
 
+    pub(crate) fn toggle_pause_async(&mut self) {
+        unsafe {
+            let mut cmd: [*const c_char; 3] = [c"cycle".as_ptr(), c"pause".as_ptr(), ptr::null()];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
     pub fn seek(&mut self, seconds: f64) {
+        self.drain_render_context();
         unsafe {
             let sec_str = CString::new(seconds.to_string())
                 .expect("floating point number string contains no null bytes");
@@ -544,7 +775,23 @@ impl MpvContext {
         }
     }
 
+    pub(crate) fn seek_async(&mut self, seconds: f64) {
+        self.drain_render_context();
+        unsafe {
+            let sec_str = CString::new(seconds.to_string())
+                .expect("floating point number string contains no null bytes");
+            let mut cmd: [*const c_char; 4] = [
+                c"seek".as_ptr(),
+                sec_str.as_ptr(),
+                c"relative".as_ptr(),
+                ptr::null(),
+            ];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
     pub fn seek_absolute(&mut self, seconds: f64) {
+        self.drain_render_context();
         unsafe {
             let sec_str = CString::new(seconds.to_string())
                 .expect("floating point number string contains no null bytes");
@@ -559,6 +806,30 @@ impl MpvContext {
         }
     }
 
+    pub(crate) fn seek_absolute_async(&mut self, seconds: f64) {
+        self.drain_render_context();
+        unsafe {
+            let sec_str = CString::new(seconds.to_string())
+                .expect("floating point number string contains no null bytes");
+            let mut cmd: [*const c_char; 5] = [
+                c"seek".as_ptr(),
+                sec_str.as_ptr(),
+                c"absolute".as_ptr(),
+                c"exact".as_ptr(),
+                ptr::null(),
+            ];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
+    pub(crate) fn stop_async(&mut self) {
+        self.drain_render_context();
+        unsafe {
+            let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
+            mpv_command_async(self.handle, 0, cmd.as_mut_ptr());
+        }
+    }
+
     pub fn set_volume(&mut self, volume: f64) {
         unsafe {
             mpv_set_property(
@@ -566,6 +837,18 @@ impl MpvContext {
                 c"volume".as_ptr(),
                 mpv_format_MPV_FORMAT_DOUBLE,
                 &volume as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    pub(crate) fn set_volume_async(&mut self, mut volume: f64) {
+        unsafe {
+            mpv_set_property_async(
+                self.handle,
+                0,
+                c"volume".as_ptr(),
+                mpv_format_MPV_FORMAT_DOUBLE,
+                &mut volume as *mut _ as *mut c_void,
             );
         }
     }
@@ -578,6 +861,19 @@ impl MpvContext {
                 c"mute".as_ptr(),
                 mpv_format_MPV_FORMAT_FLAG,
                 &val as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    pub(crate) fn set_mute_async(&mut self, mute: bool) {
+        unsafe {
+            let mut val: c_int = if mute { 1 } else { 0 };
+            mpv_set_property_async(
+                self.handle,
+                0,
+                c"mute".as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &mut val as *mut _ as *mut c_void,
             );
         }
     }
@@ -631,54 +927,68 @@ impl MpvContext {
         let target_canonical = path.canonicalize().ok();
 
         while start.elapsed() < timeout {
-            if self.has_frame_ready()
-                && let Some(current_p_str) = self.get_current_path()
-            {
-                let current_p = PathBuf::from(current_p_str);
-                let paths_match = current_p == path
-                    || target_canonical.as_ref().is_some_and(|tc| {
-                        current_p == *tc || current_p.canonicalize().ok().as_ref() == Some(tc)
-                    });
+            // Surfaces the reason a capture is failing (an unsupported codec, a
+            // hardware decoder that cannot be opened) instead of a bare timeout.
+            self.drain_log_messages();
 
-                if paths_match && self.is_video_ready() {
-                    let (w, h) = self.get_video_size();
-                    if w > 0 && h > 0 {
-                        let rotation = self.get_video_rotation();
-                        let (eff_w, eff_h) = if rotation.is_swapped() {
-                            (h, w)
-                        } else {
-                            (w, h)
-                        };
+            if self.has_frame_ready() {
+                if let Some(current_p_str) = self.get_current_path() {
+                    let current_p = PathBuf::from(current_p_str);
+                    let paths_match = current_p == path
+                        || target_canonical.as_ref().is_some_and(|tc| {
+                            current_p == *tc || current_p.canonicalize().ok().as_ref() == Some(tc)
+                        });
 
-                        let scale = (max_w as f64 / eff_w as f64)
-                            .min(max_h as f64 / eff_h as f64)
-                            .min(1.0);
-                        let render_w = ((w as f64 * scale) as i32) & !1;
-                        let render_h = ((h as f64 * scale) as i32) & !1;
-
-                        if render_w > 0 && render_h > 0 {
-                            // Checked size math: hostile video-params dims
-                            // would overflow the i32 product; skip the frame
-                            // instead of allocating a giant buffer.
-                            let Some(buf_size) =
-                                crate::worker::rgba_frame_size(render_w as u32, render_h as u32)
-                            else {
-                                continue;
+                    if paths_match && self.is_video_ready() {
+                        let (w, h) = self.get_video_size();
+                        if w > 0 && h > 0 {
+                            let rotation = self.get_video_rotation();
+                            let (eff_w, eff_h) = if rotation.is_swapped() {
+                                (h, w)
+                            } else {
+                                (w, h)
                             };
-                            let mut buffer = vec![0u8; buf_size];
-                            if self.render_frame(render_w, render_h, &mut buffer).is_ok() {
-                                let (final_w, final_h, final_rgba) = crate::rotate_rgba(
+
+                            let scale = (max_w as f64 / eff_w as f64)
+                                .min(max_h as f64 / eff_h as f64)
+                                .min(1.0);
+                            let render_w = ((w as f64 * scale) as i32) & !1;
+                            let render_h = ((h as f64 * scale) as i32) & !1;
+
+                            if render_w > 0 && render_h > 0 {
+                                // Checked size math: hostile video-params dims
+                                // would overflow the i32 product; skip the frame
+                                // instead of allocating a giant buffer.
+                                let Some(buf_size) = crate::worker::rgba_frame_size(
                                     render_w as u32,
                                     render_h as u32,
-                                    &buffer,
-                                    rotation,
-                                );
-                                self.stop();
-                                return Ok((final_w, final_h, final_rgba));
+                                ) else {
+                                    self.skip_frame();
+                                    continue;
+                                };
+                                let mut buffer = vec![0u8; buf_size];
+                                if self.render_frame(render_w, render_h, &mut buffer).is_ok() {
+                                    let (final_w, final_h, final_rgba) = crate::rotate_rgba(
+                                        render_w as u32,
+                                        render_h as u32,
+                                        &buffer,
+                                        rotation,
+                                    );
+                                    self.stop();
+                                    return Ok((final_w, final_h, final_rgba));
+                                }
+                                // Consume the frame even though rendering failed,
+                                // so `vo_libmpv` is not left waiting for a render
+                                // that will not come.
+                                self.skip_frame();
+                                continue;
                             }
                         }
                     }
                 }
+                // Release `ctx->next_frame` whenever a ready frame was not
+                // rendered above so `vo_libmpv` does not stall in `draw_frame`.
+                self.skip_frame();
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -692,11 +1002,19 @@ impl MpvContext {
     /// created or the `demuxer-lavf-list` property cannot be read.
     pub fn query_supported_extensions() -> std::collections::HashSet<String> {
         let mut extensions = std::collections::HashSet::new();
-        if let Ok(ctx) = Self::new() {
-            unsafe {
+        unsafe {
+            let handle = mpv_create();
+            if handle.is_null() {
+                return extensions;
+            }
+            Self::set_option(handle, c"vo", "null");
+            Self::set_option(handle, c"ao", "null");
+            Self::set_option(handle, c"hwdec", "no");
+            Self::set_option(handle, c"input-default-bindings", "no");
+            if mpv_initialize(handle) >= 0 {
                 let mut ptr: *mut c_char = ptr::null_mut();
                 let err = mpv_get_property(
-                    ctx.handle,
+                    handle,
                     c"demuxer-lavf-list".as_ptr(),
                     mpv_format_MPV_FORMAT_STRING,
                     &mut ptr as *mut _ as *mut c_void,
@@ -713,6 +1031,7 @@ impl MpvContext {
                     mpv_free(ptr as *mut c_void);
                 }
             }
+            mpv_terminate_destroy(handle);
         }
         extensions
     }
@@ -720,6 +1039,7 @@ impl MpvContext {
 
 impl Drop for MpvContext {
     fn drop(&mut self) {
+        self.drain_render_context();
         unsafe {
             let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
             mpv_command(self.handle, cmd.as_mut_ptr());
@@ -754,7 +1074,85 @@ pub(crate) unsafe extern "C" fn mpv_wakeup_callback(cb_ctx: *mut c_void) {
     }
 }
 
-// SAFETY: MpvContext owns pointers to `mpv_handle` and `mpv_render_context`.
+/// The `hwdec` value to configure when the caller did not override it.
+///
+/// libmpv 0.36.0 turned `hwdec` into an `OPT_STRINGLIST`; on the 0.35 line it is
+/// still an `OPT_STRING`, where a comma-separated list matches no backend and
+/// hardware decoding silently falls back to software.
+fn hwdec_for_api_version(api_version: c_ulong) -> &'static str {
+    if api_version >= MPV_API_VERSION_0_36 {
+        DEFAULT_HWDEC
+    } else {
+        LEGACY_HWDEC
+    }
+}
+
+/// The `hwdec` value for this process.
+///
+/// `MEDIA_SORT_MPV_HWDEC` overrides the decoder, for diagnosing a hardware path
+/// that misbehaves on one machine or in a sandbox (e.g. forcing `nvdec-copy`,
+/// or `no`); the value is handed to mpv verbatim, so it also accepts a probe
+/// list. Otherwise the default is chosen for the libmpv version actually loaded
+/// at runtime (`mpv_client_api_version` reports the *linked* library, not the
+/// headers this crate was built against), so an old `libmpv.so.2` gets the
+/// single decoder it understands.
+fn resolve_hwdec() -> String {
+    match std::env::var("MEDIA_SORT_MPV_HWDEC") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            // SAFETY: `mpv_client_api_version` takes no arguments and only
+            // reports the library's client API version, so it is valid to call
+            // before any handle exists.
+            hwdec_for_api_version(unsafe { libmpv_sys::mpv_client_api_version() }).to_string()
+        }
+    }
+}
+
+/// Whether mpv should also log to the terminal: `RUST_LOG` asking for
+/// `debug`/`trace` — the same convention the app's tracing filter uses — or an
+/// explicit `MEDIA_SORT_MPV_TERMINAL`.
+fn verbose_logging_requested() -> bool {
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+    rust_log.contains("debug")
+        || rust_log.contains("trace")
+        || std::env::var_os("MEDIA_SORT_MPV_TERMINAL").is_some()
+}
+
+/// Forwards one mpv log message to `tracing`.
+///
+/// mpv's levels map down one step: `fatal`/`error` and `warn` are visible by
+/// default, while `info` — the per-file detail that names the hwdec mpv picked,
+/// the decoder that opened the file, and why an attempt failed — stays behind
+/// `RUST_LOG=debug` (or `RUST_LOG=mpv=debug`) so a normal run is not flooded.
+fn forward_log_message(msg: &mpv_event_log_message) {
+    let text = cstr_lossy(msg.text);
+    let text = text.trim_end();
+    if text.is_empty() {
+        return;
+    }
+    let prefix = cstr_lossy(msg.prefix);
+    let prefix = prefix.trim();
+    match cstr_lossy(msg.level).as_str() {
+        "fatal" | "error" => tracing::error!(target: "mpv", "[{prefix}] {text}"),
+        "warn" => tracing::warn!(target: "mpv", "[{prefix}] {text}"),
+        "info" => tracing::debug!(target: "mpv", "[{prefix}] {text}"),
+        _ => tracing::trace!(target: "mpv", "[{prefix}] {text}"),
+    }
+}
+
+/// Reads a libmpv string, tolerating a null pointer (which must not become a
+/// dereference) and invalid UTF-8 (mpv message text can quote arbitrary file
+/// content).
+fn cstr_lossy(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 // libmpv's core is internally synchronized, so it is sound to move the
 // context to the thread that owns it (the worker task, the thumbnail worker
 // threads). `Send` alone is sound because a moved context is used from
@@ -831,36 +1229,40 @@ mod tests {
         label: &str,
     ) -> (u32, u32, Vec<u8>) {
         while Instant::now() < deadline {
-            if player.has_frame_ready() && player.is_video_ready() {
-                let (w, h) = player.get_video_size();
-                if w > 0 && h > 0 {
-                    let rotation = player.get_video_rotation();
-                    let (eff_w, eff_h) = if rotation.is_swapped() {
-                        (h, w)
-                    } else {
-                        (w, h)
-                    };
-                    let scale = (128.0f64 / eff_w as f64)
-                        .min(128.0f64 / eff_h as f64)
-                        .min(1.0);
-                    let render_w = ((w as f64 * scale) as i32) & !1;
-                    let render_h = ((h as f64 * scale) as i32) & !1;
-                    if render_w > 0 && render_h > 0 {
-                        let mut buffer = vec![0u8; (render_w * render_h * 4) as usize];
-                        if player.render_frame(render_w, render_h, &mut buffer).is_ok() {
-                            let (final_w, final_h, rgba) = crate::rotate_rgba(
-                                render_w as u32,
-                                render_h as u32,
-                                &buffer,
-                                rotation,
-                            );
-                            assert!(final_w > 0 && final_h > 0);
-                            assert!(final_w <= 128 && final_h <= 128);
-                            assert_eq!(rgba.len(), (final_w * final_h * 4) as usize);
-                            return (final_w, final_h, rgba);
+            if player.has_frame_ready() {
+                if player.is_video_ready() {
+                    let (w, h) = player.get_video_size();
+                    if w > 0 && h > 0 {
+                        let rotation = player.get_video_rotation();
+                        let (eff_w, eff_h) = if rotation.is_swapped() {
+                            (h, w)
+                        } else {
+                            (w, h)
+                        };
+                        let scale = (128.0f64 / eff_w as f64)
+                            .min(128.0f64 / eff_h as f64)
+                            .min(1.0);
+                        let render_w = ((w as f64 * scale) as i32) & !1;
+                        let render_h = ((h as f64 * scale) as i32) & !1;
+                        if render_w > 0 && render_h > 0 {
+                            let mut buffer = vec![0u8; (render_w * render_h * 4) as usize];
+                            if player.render_frame(render_w, render_h, &mut buffer).is_ok() {
+                                let (final_w, final_h, rgba) = crate::rotate_rgba(
+                                    render_w as u32,
+                                    render_h as u32,
+                                    &buffer,
+                                    rotation,
+                                );
+                                assert!(final_w > 0 && final_h > 0);
+                                assert!(final_w <= 128 && final_h <= 128);
+                                assert_eq!(rgba.len(), (final_w * final_h * 4) as usize);
+                                return (final_w, final_h, rgba);
+                            }
+                            continue;
                         }
                     }
                 }
+                player.skip_frame();
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -940,5 +1342,28 @@ mod tests {
             ),
             "a too-small buffer must keep reporting BufferTooSmall"
         );
+    }
+
+    /// mpv 0.35's `hwdec` is a single `OPT_STRING`: the comma-separated probe
+    /// list matches no backend there and disables hardware decoding without any
+    /// error, so the default must follow the *loaded* library's API version.
+    #[test]
+    fn test_hwdec_for_api_version_picks_a_value_the_library_understands() {
+        // Below 0.36.0 (mpv 0.35.x, e.g. Debian 12's libmpv.so.2): a single
+        // decoder name, no list. `MPV_MAKE_VERSION(2, 0)` is `2 << 16`.
+        assert_eq!(hwdec_for_api_version(2 << 16), LEGACY_HWDEC);
+        assert_eq!(hwdec_for_api_version(0), LEGACY_HWDEC);
+        assert!(
+            !hwdec_for_api_version(2 << 16).contains(','),
+            "a pre-0.36 library reads hwdec as a single OPT_STRING"
+        );
+
+        // 0.36.0 itself and later take the probe list. The literal
+        // `(2 << 16) | 1` is asserted next to the constant so an off-by-one in
+        // `MPV_API_VERSION_0_36` cannot pass unnoticed.
+        assert_eq!(hwdec_for_api_version((2 << 16) | 1), DEFAULT_HWDEC);
+        assert_eq!(hwdec_for_api_version(MPV_API_VERSION_0_36), DEFAULT_HWDEC);
+        assert_eq!(hwdec_for_api_version((2 << 16) | 7), DEFAULT_HWDEC);
+        assert_eq!(hwdec_for_api_version(c_ulong::MAX), DEFAULT_HWDEC);
     }
 }
