@@ -102,8 +102,9 @@ modules:
   # dependency in the runtime: mpv's Wayland backend wants wayland-protocols
   # (the protocol data is present but the `.pc` is not), and its X11 backend
   # wants libXpresent. Building both enables hardware decoding on Wayland and
-  # X11 sessions alike (the app asks for `hwdec=auto-copy` and falls back to
-  # software decoding when a GPU/driver cannot do it).
+  # X11 sessions alike (the app asks for the copy-back decoder list
+  # `nvdec-copy,vaapi-copy,...` and falls back to software decoding when a
+  # GPU/driver cannot do it).
   - name: wayland-protocols
     buildsystem: meson
     config-opts:
@@ -235,7 +236,14 @@ modules:
         # v3.0.0 predates it. Cut that release (e.g. scripts/release.sh 3.0.1)
         # and set the tag and its commit here before submitting to Flathub.
         tag: v3.0.1
-        # TODO: add the released `commit:` (Flathub prefers tag *and* commit).
+        # `commit:` is REQUIRED, not just preferred: Flathub's new-submission
+        # linter pipeline refuses a tag-only git source with
+        # `module-media-sort-source-git-no-commit-with-tag`. Fill in the tagged
+        # commit (`git rev-parse v3.0.1^{commit}`) alongside the tag.
+        # The AppStream <release> for that tag is written by scripts/release.sh
+        # into packaging/linux/app.mediasort.MediaSort.metainfo.xml, so it is
+        # already in the tagged tree this source fetches.
+        # TODO: add the released `commit:`.
         x-checker-data:
           type: git
           tag-pattern: ^v([\d.]+)$

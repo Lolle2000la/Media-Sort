@@ -104,12 +104,20 @@ The app is a media *sorter*: it moves, renames, copies and deletes files in a
 folder the user opens, including into pinned destination folders elsewhere.
 That is file-management work, so it needs real filesystem access rather than the
 document-portal view of a single chosen folder, hence `--filesystem=home` plus
-the removable-media mount points. `portal-storage-feasibility.md` records why
-the document portal cannot replace that grant: the filesystem watcher sees no
-change a host application makes, and the folder tree needs paths above the
-folder the user picked. There is no `--filesystem=host` and no
+the removable-media mount points. The document portal cannot replace that grant:
+a picked folder is only usable through its FUSE mount, where inotify never sees
+a change made by a host process (the filesystem watcher goes blind), moves
+between two separately picked grants degrade to copy-then-delete (`EXDEV`), and
+the folder tree still needs paths above the folder the user picked. There is no
+`--filesystem=host` and no
 network access. Device/audio access is `--device=dri` (wgpu/Vulkan rendering and
 VA-API hardware decoding) and `--socket=pulseaudio`.
+
+`--filesystem=home` is the broadest grant here and the one Flathub scrutinises:
+its submission policy requires the justification above to be written into the
+submission, and a human reviewer approves the grant — a local
+`flatpak-builder-lint` run does **not** fail on it by itself, so a manifest that
+lints clean is not automatically accepted with this permission.
 
 ## NVIDIA
 
@@ -126,7 +134,7 @@ Tell the user to install the extension matching the drivers in `/sys/module/nvid
 ```bash
 # GL/EGL/Vulkan userspace — required for GPU rendering at all
 flatpak install flathub org.freedesktop.Platform.GL.nvidia-<major>-<minor>-<patch>
-# nvidia-vaapi-driver, so mpv's hwdec=auto-copy can decode on the GPU
+# nvidia-vaapi-driver, so mpv's vaapi-copy hardware decoder can decode on the GPU
 flatpak install flathub org.freedesktop.Platform.VAAPI.nvidia//26.08
 ```
 
@@ -146,8 +154,8 @@ when the app is *launched*, so an instance that was already running when the
 driver was installed keeps the software stack and has to be quit and started
 again. A working setup shows `NVIDIA … DiscreteGpu` in the adapter list and
 names that adapter on the `Selected:` line, and `libva` loading
-`…/dri/nvidia-vaapi-driver/nvidia_drv_video.so` ("VA-API NVDEC driver") for
-`hwdec=auto-copy`.
+`…/dri/nvidia-vaapi-driver/nvidia_drv_video.so` ("VA-API NVDEC driver") for the
+`vaapi-copy` hardware decoder.
 
 ## Building locally
 
@@ -165,7 +173,7 @@ flatpak-builder --user --install --force-clean build-dir flatpak/app.mediasort.M
 flatpak run app.mediasort.MediaSort
 ```
 
-The manifest's app source points at the **released tag** (`v3.0.0`), so for a
+The manifest's app source points at the **released tag** (`v3.0.1`), so for a
 local build of uncommitted work, temporarily point that source at this checkout
 (e.g. a `type: dir` or local `type: git` source) instead.
 
@@ -193,7 +201,13 @@ infrastructure — nothing here is published automatically.
    `packaging/linux/app.mediasort.MediaSort.*` and `flatpak/`. `v3.0.0` predates
    them, so cut a follow-up (e.g. `scripts/release.sh 3.0.1`).
 2. Point the manifest's `media-sort` source at that tag *and* its commit
-   (Flathub wants both) and add the matching `<release>` to the metainfo.
+   (`git rev-parse v3.0.1^{commit}`). The commit is **required**, not a
+   preference: Flathub's new-submission linter fails a tag-only git source with
+   `module-media-sort-source-git-no-commit-with-tag`. The matching `<release>`
+   needs no hand-editing — `scripts/release.sh` inserts it (with the tag's UTC
+   date) into `packaging/linux/app.mediasort.MediaSort.metainfo.xml` as part of
+   cutting the release, and `verify-version` in `release.yml` refuses to build a
+   tag whose first `<release>` is not that version.
 3. Regenerate `cargo-sources.json` whenever `Cargo.lock` changes (see below).
 4. Fork [`flathub/flathub`](https://github.com/flathub/flathub), create a branch
    named `app.mediasort.MediaSort`, add `app.mediasort.MediaSort.yml` and
@@ -221,8 +235,12 @@ fails if the committed file differs, so it cannot silently drift from
 
 Every release touches the Flatpak packaging:
 
-- bump `tag` (and `commit`) of the `media-sort` source in the manifest;
-- add a matching `<release version="…" date="…"/>` to the metainfo;
+- bump `tag` (and `commit`) of the `media-sort` source in the manifest — the
+  `commit` is mandatory, not optional (Flathub's
+  `module-media-sort-source-git-no-commit-with-tag` error);
+- the matching `<release version="…" date="…"/>` in the metainfo is written by
+  `scripts/release.sh` when the tag is cut, so only a hand-made tag needs it
+  added manually;
 - regenerate `cargo-sources.json` if `Cargo.lock` changed.
 
 The `x-checker-data` blocks let Flathub's external data checker open automated

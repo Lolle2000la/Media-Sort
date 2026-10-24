@@ -2,7 +2,7 @@ use crate::rotation::{Rotation, detect_video_rotation};
 use libmpv_sys::*;
 use std::ffi::{CStr, CString};
 use std::fmt;
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int, c_ulong, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -27,6 +27,19 @@ const MPV_RENDER_PARAM_SW_POINTER: mpv_render_param_type = 20;
 /// decoders use NVDEC on NVIDIA and VAAPI on AMD/Intel Mesa without touching
 /// `vulkan-copy`. Override at runtime with `MEDIA_SORT_MPV_HWDEC`.
 const DEFAULT_HWDEC: &str = "nvdec-copy,vaapi-copy,d3d11va-copy,dxva2-copy,videotoolbox-copy";
+
+/// Default copy-back hardware decoder for libmpv older than 0.36.
+///
+/// Comma-separated `hwdec` lists are an `OPT_STRINGLIST` only since mpv 0.36.0:
+/// before that `hwdec` is a single `OPT_STRING`, so [`DEFAULT_HWDEC`] matches no
+/// backend there and silently disables hardware decoding (Debian 12, for
+/// example, ships mpv 0.35 as `libmpv.so.2`, which the Linux AppImage and a
+/// native build then load).
+const LEGACY_HWDEC: &str = "auto-copy";
+
+/// libmpv client API version of mpv 0.36.0 (`MPV_MAKE_VERSION(2, 1)`), the
+/// first release whose `hwdec` option takes a comma-separated probe list.
+const MPV_API_VERSION_0_36: c_ulong = (2 << 16) | 1;
 
 /// Errors produced by [`MpvContext`] operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +110,16 @@ pub struct MpvContext {
     pub(crate) handle: *mut mpv_handle,
     pub(crate) render_ctx: *mut mpv_render_context,
     callback_context_raw: *mut c_void,
+    /// A `loadfile` has been queued and mpv has not yet announced the new file
+    /// with `MPV_EVENT_START_FILE`.
+    ///
+    /// While this is set, an `MPV_EVENT_END_FILE` error still belongs to the
+    /// *previous* file: mpv ends it before it starts the replacement, and
+    /// `loadfile` is delivered asynchronously — so the end-of-file event for a
+    /// file that was playing fine arrives *after* the command was issued.
+    /// Attributing it to the new file is what made a switch show "file not
+    /// supported".
+    awaiting_start_file: bool,
 }
 
 impl MpvContext {
@@ -143,12 +166,8 @@ impl MpvContext {
                 Self::set_option(handle, c"msg-level", "all=info");
             }
             if hardware_decoding {
-                // `MEDIA_SORT_MPV_HWDEC` overrides the decoder, for diagnosing a
-                // hardware path that misbehaves on one machine or in a sandbox
-                // (e.g. forcing `nvdec-copy`, or `no`); the value is handed to
-                // mpv verbatim, so it also accepts a probe list.
-                let hwdec = std::env::var("MEDIA_SORT_MPV_HWDEC")
-                    .unwrap_or_else(|_| DEFAULT_HWDEC.to_string());
+                let hwdec = resolve_hwdec();
+                tracing::debug!(hwdec = %hwdec, "configuring mpv hardware decoding");
                 Self::set_option(handle, c"hwdec", &hwdec);
             } else {
                 Self::set_option(handle, c"hwdec", "no");
@@ -210,16 +229,26 @@ impl MpvContext {
                 handle,
                 render_ctx,
                 callback_context_raw: ptr::null_mut(),
+                awaiting_start_file: false,
             })
         }
     }
 
-    /// Best-effort option setter; errors are ignored because the option set is
-    /// static and expected to be accepted by any libmpv version in use.
+    /// Best-effort option setter: a rejected option must not abort playback, so
+    /// failures are logged (at `debug`, next to mpv's own `info` messages)
+    /// rather than propagated.
     fn set_option(handle: *mut mpv_handle, key: &'static std::ffi::CStr, value: &str) {
         unsafe {
-            let value = CString::new(value).expect("static string contains no null bytes");
-            mpv_set_option_string(handle, key.as_ptr(), value.as_ptr());
+            let value_c = CString::new(value).expect("static string contains no null bytes");
+            let ret = mpv_set_option_string(handle, key.as_ptr(), value_c.as_ptr());
+            if ret < 0 {
+                tracing::debug!(
+                    option = %key.to_string_lossy(),
+                    value,
+                    code = ret,
+                    "mpv rejected option"
+                );
+            }
         }
     }
 
@@ -286,7 +315,8 @@ impl MpvContext {
     }
 
     /// Forwards mpv's pending log messages to `tracing`, draining mpv's client
-    /// event queue.
+    /// event queue, and returns the first failure that belongs to the file
+    /// currently playing.
     ///
     /// mpv delivers its log messages as *events*, so a client that never waits
     /// for events both loses every diagnostic and lets the queue grow for as
@@ -294,8 +324,20 @@ impl MpvContext {
     /// periodic tick and from the thumbnail capture loop, and why it must run on
     /// the thread that owns the handle. It never blocks (zero timeout), so it
     /// cannot stall frame delivery.
-    pub(crate) fn drain_log_messages(&self) -> Option<String> {
-        let mut load_error = None;
+    ///
+    /// `MPV_EVENT_START_FILE` is the boundary between files: mpv ends the old
+    /// file (emitting `MPV_EVENT_END_FILE`) *after* a queued `loadfile` but
+    /// *before* it starts the new one, so while [`Self::awaiting_start_file`] is
+    /// set an `END_FILE` error belongs to the previous file, not the new one.
+    ///
+    /// Only `MPV_EVENT_END_FILE` with `MPV_END_FILE_REASON_ERROR` is ever
+    /// reported as a failure. Log messages are *not*: mpv logs recoverable
+    /// problems at `error` level while playback continues normally (`[ao/pulse]
+    /// Init failed: Connection refused` with no audio server, for instance), and
+    /// treating those as a load failure would badge a playable video as
+    /// unsupported.
+    pub(crate) fn drain_log_messages(&mut self) -> Option<String> {
+        let mut first_error = None;
         unsafe {
             loop {
                 let event = mpv_wait_event(self.handle, 0.0);
@@ -303,19 +345,29 @@ impl MpvContext {
                     break;
                 }
                 let event = &*event;
+                // Compared, not matched: the binding names are not
+                // upper-case, so a `match` pattern would trip the
+                // `non_upper_case_globals` lint from this crate.
                 if event.event_id == mpv_event_id_MPV_EVENT_NONE {
                     break;
-                }
-                if event.event_id == mpv_event_id_MPV_EVENT_LOG_MESSAGE && !event.data.is_null() {
+                } else if event.event_id == mpv_event_id_MPV_EVENT_START_FILE {
+                    // The new file is starting: anything recorded so far
+                    // belonged to the file that just ended.
+                    self.awaiting_start_file = false;
+                    first_error = None;
+                } else if event.event_id == mpv_event_id_MPV_EVENT_LOG_MESSAGE
+                    && !event.data.is_null()
+                {
                     forward_log_message(&*event.data.cast::<mpv_event_log_message>());
                 } else if event.event_id == mpv_event_id_MPV_EVENT_END_FILE && !event.data.is_null()
                 {
                     let end_file = &*event.data.cast::<mpv_event_end_file>();
-                    if end_file.reason == mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as c_int
+                    if !self.awaiting_start_file
+                        && end_file.reason == mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as c_int
                         && end_file.error < 0
                     {
                         let err_str = cstr_lossy(mpv_error_string(end_file.error));
-                        load_error = Some(if err_str.is_empty() {
+                        first_error = Some(if err_str.is_empty() {
                             format!("mpv playback error (code {})", end_file.error)
                         } else {
                             err_str
@@ -324,7 +376,7 @@ impl MpvContext {
                 }
             }
         }
-        load_error
+        first_error
     }
 
     /// The path of the currently loaded file, if any.
@@ -381,6 +433,11 @@ impl MpvContext {
             if err < 0 {
                 return Err(MpvError::Command(err));
             }
+            // `loadfile` is queued: mpv will end the old file (emitting its
+            // `MPV_EVENT_END_FILE`) before starting this one, so that event
+            // must not be read as a failure of this file. `MPV_EVENT_START_FILE`
+            // (client API 1.108, long predating mpv 0.35) clears the wait.
+            self.awaiting_start_file = true;
             Ok(())
         }
     }
@@ -394,6 +451,10 @@ impl MpvContext {
             let mut cmd: [*const c_char; 2] = [c"stop".as_ptr(), ptr::null()];
             mpv_command(self.handle, cmd.as_mut_ptr());
         }
+        // No `MPV_EVENT_START_FILE` follows a `stop`, so waiting for one would
+        // suppress every error of the next file loaded through a path other
+        // than `load_file_async`.
+        self.awaiting_start_file = false;
         self.drain_render_context();
     }
 
@@ -1013,6 +1074,40 @@ pub(crate) unsafe extern "C" fn mpv_wakeup_callback(cb_ctx: *mut c_void) {
     }
 }
 
+/// The `hwdec` value to configure when the caller did not override it.
+///
+/// libmpv 0.36.0 turned `hwdec` into an `OPT_STRINGLIST`; on the 0.35 line it is
+/// still an `OPT_STRING`, where a comma-separated list matches no backend and
+/// hardware decoding silently falls back to software.
+fn hwdec_for_api_version(api_version: c_ulong) -> &'static str {
+    if api_version >= MPV_API_VERSION_0_36 {
+        DEFAULT_HWDEC
+    } else {
+        LEGACY_HWDEC
+    }
+}
+
+/// The `hwdec` value for this process.
+///
+/// `MEDIA_SORT_MPV_HWDEC` overrides the decoder, for diagnosing a hardware path
+/// that misbehaves on one machine or in a sandbox (e.g. forcing `nvdec-copy`,
+/// or `no`); the value is handed to mpv verbatim, so it also accepts a probe
+/// list. Otherwise the default is chosen for the libmpv version actually loaded
+/// at runtime (`mpv_client_api_version` reports the *linked* library, not the
+/// headers this crate was built against), so an old `libmpv.so.2` gets the
+/// single decoder it understands.
+fn resolve_hwdec() -> String {
+    match std::env::var("MEDIA_SORT_MPV_HWDEC") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            // SAFETY: `mpv_client_api_version` takes no arguments and only
+            // reports the library's client API version, so it is valid to call
+            // before any handle exists.
+            hwdec_for_api_version(unsafe { libmpv_sys::mpv_client_api_version() }).to_string()
+        }
+    }
+}
+
 /// Whether mpv should also log to the terminal: `RUST_LOG` asking for
 /// `debug`/`trace` — the same convention the app's tracing filter uses — or an
 /// explicit `MEDIA_SORT_MPV_TERMINAL`.
@@ -1247,5 +1342,28 @@ mod tests {
             ),
             "a too-small buffer must keep reporting BufferTooSmall"
         );
+    }
+
+    /// mpv 0.35's `hwdec` is a single `OPT_STRING`: the comma-separated probe
+    /// list matches no backend there and disables hardware decoding without any
+    /// error, so the default must follow the *loaded* library's API version.
+    #[test]
+    fn test_hwdec_for_api_version_picks_a_value_the_library_understands() {
+        // Below 0.36.0 (mpv 0.35.x, e.g. Debian 12's libmpv.so.2): a single
+        // decoder name, no list. `MPV_MAKE_VERSION(2, 0)` is `2 << 16`.
+        assert_eq!(hwdec_for_api_version(2 << 16), LEGACY_HWDEC);
+        assert_eq!(hwdec_for_api_version(0), LEGACY_HWDEC);
+        assert!(
+            !hwdec_for_api_version(2 << 16).contains(','),
+            "a pre-0.36 library reads hwdec as a single OPT_STRING"
+        );
+
+        // 0.36.0 itself and later take the probe list. The literal
+        // `(2 << 16) | 1` is asserted next to the constant so an off-by-one in
+        // `MPV_API_VERSION_0_36` cannot pass unnoticed.
+        assert_eq!(hwdec_for_api_version((2 << 16) | 1), DEFAULT_HWDEC);
+        assert_eq!(hwdec_for_api_version(MPV_API_VERSION_0_36), DEFAULT_HWDEC);
+        assert_eq!(hwdec_for_api_version((2 << 16) | 7), DEFAULT_HWDEC);
+        assert_eq!(hwdec_for_api_version(c_ulong::MAX), DEFAULT_HWDEC);
     }
 }

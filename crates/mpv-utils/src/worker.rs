@@ -14,7 +14,10 @@ pub struct PlayerConfig {
     /// Maximum rendered frame height in pixels.
     /// Only applied when [`Self::hardware_decoding`] is `false`.
     pub max_frame_height: u32,
-    /// Whether the worker enables mpv hardware decoding (`hwdec=auto-copy`).
+    /// Whether the worker enables mpv hardware decoding. `true` configures
+    /// `hwdec` with the platform copy-back decoder list (see
+    /// `mpv_context::DEFAULT_HWDEC`; a pre-0.36 libmpv gets the single
+    /// `auto-copy` decoder, and `MEDIA_SORT_MPV_HWDEC` overrides either).
     /// When `true`, frames are rendered at the video's native resolution
     /// (mpv defaults — no downscaling). When `false`, software decoding
     /// (`hwdec=no`) is used and frames are capped at
@@ -81,6 +84,17 @@ pub enum VideoEvent {
         error: String,
     },
 }
+
+/// Counts the frames the worker had to skip because every pooled buffer was
+/// still held downstream.
+///
+/// Test-only: it exists so
+/// `test_video_worker_rapid_switch_and_pool_starvation_recovery` can prove that
+/// the pool-starvation branch actually ran. The pre-fix implementation rendered
+/// into a throwaway buffer instead of skipping, so it never reached this branch
+/// and the test passed without exercising it.
+#[cfg(test)]
+static FRAMES_STARVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Rotates raw RGBA bytes by the given [`Rotation`].
 ///
@@ -362,6 +376,16 @@ async fn run_video_worker(
     let mut last_volume = -1.0;
     let mut last_paused = false;
     let mut is_active = false;
+    // Per-load: whether any frame was ever rendered for the file loaded by the
+    // current `Load`. Deliberately NOT reset by the 5 s telemetry window below
+    // (which resets the counters it reports), because this is what keeps a
+    // stale `MPV_EVENT_END_FILE` error from the previous file — or a transient
+    // decoder warning — from being reported as a failure of a file that
+    // actually renders.
+    let mut has_rendered_frame_for_load = false;
+    // At most one `LoadFailed` per load: mpv's log queue can hand over several
+    // messages, and the consumer only needs to know the file did not play.
+    let mut load_error_reported = false;
 
     // Diagnostics for "the video does not play": reported every 5 s from the
     // progress tick, which runs whether or not a frame is ever produced.
@@ -395,6 +419,13 @@ async fn run_video_worker(
                 for cmd in coalesce_command_batch(raw_batch) {
                     match cmd {
                         VideoCommand::Load(path) => {
+                            // Discard anything the *previous* file left in mpv's
+                            // log/event queue before the new load starts: a
+                            // pending `MPV_EVENT_END_FILE` from the old file
+                            // would otherwise be drained by the progress tick
+                            // after this load and attributed to `path`, showing
+                            // "file not supported" for a file that plays fine.
+                            let _ = player.drain_log_messages();
                             // `loadfile` replaces any currently loaded file directly.
                             // Using `load_file_async` + `set_paused_async` avoids
                             // blocking the render thread on synchronous `stop` +
@@ -404,6 +435,8 @@ async fn run_video_worker(
                                     player.set_paused_async(false);
                                     player.drain_render_context();
                                     is_active = true;
+                                    has_rendered_frame_for_load = false;
+                                    load_error_reported = false;
                                     load_started = Some(std::time::Instant::now());
                                     frames_rendered = 0;
                                     frames_delivered = 0;
@@ -419,6 +452,7 @@ async fn run_video_worker(
                                     rotation_matched_path = None;
                                 }
                                 Err(err) => {
+                                    load_error_reported = true;
                                     let _ = event_tx
                                         .send(VideoEvent::LoadFailed {
                                             path: path.clone(),
@@ -455,12 +489,16 @@ async fn run_video_worker(
                             cached_video_params = None;
                             rotation_recheck_deadline = None;
                             rotation_matched_path = None;
+                            has_rendered_frame_for_load = false;
+                            load_error_reported = false;
                         }
                         VideoCommand::Deactivate => {
                             player.set_paused_async(true);
                             cached_video_params = None;
                             rotation_recheck_deadline = None;
                             rotation_matched_path = None;
+                            has_rendered_frame_for_load = false;
+                            load_error_reported = false;
                             // Release the current file handle and flush internal mpv
                             // caches so rename/move/delete operations on the
                             // last-played video are not blocked.
@@ -572,6 +610,7 @@ async fn run_video_worker(
                                 render_micros_max = render_micros_max.max(render_elapsed);
                                 if rendered {
                                     frames_rendered += 1;
+                                    has_rendered_frame_for_load = true;
                                     if event_tx
                                         .try_send(VideoEvent::FrameReady {
                                             path: current_video_path.clone(),
@@ -611,6 +650,8 @@ async fn run_video_worker(
                                 // as soon as the consumer releases a buffer.
                                 player.skip_frame();
                                 frames_starved += 1;
+                                #[cfg(test)]
+                                FRAMES_STARVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 break;
                             }
                         } else {
@@ -634,9 +675,11 @@ async fn run_video_worker(
                 // not frames are flowing.
                 if let Some(error) = player.drain_log_messages()
                     && is_active
-                    && frames_rendered == 0
+                    && !has_rendered_frame_for_load
+                    && !load_error_reported
                     && !current_video_path.as_os_str().is_empty()
                 {
+                    load_error_reported = true;
                     let _ = event_tx.try_send(VideoEvent::LoadFailed {
                         path: current_video_path.clone(),
                         error,
@@ -936,7 +979,7 @@ mod tests {
             cmd_tx.send(VideoCommand::Play).await.unwrap();
         }
 
-        // Hold 3 frame buffers simultaneously to trigger pool starvation
+        // Hold all 3 frame buffers simultaneously to trigger pool starvation
         // (`frames_starved` -> `player.skip_frame()`), then drop them and
         // confirm frame delivery resumes immediately without vo_libmpv hanging.
         let mut held_buffers = Vec::new();
@@ -958,14 +1001,54 @@ mod tests {
             }
         }
 
-        // Wait briefly while all 3 pool slots are held so at least one decoded
-        // frame hits the `frames_starved` -> `skip_frame()` branch.
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        drop(held_buffers);
+        // Wait until the exhaustion branch has actually run at least once. This
+        // is what distinguishes the real pool from the pre-fix "render into a
+        // throwaway buffer" code, which kept frames flowing instead of skipping
+        // them. No fourth `FrameReady` may arrive in the meantime.
+        FRAMES_STARVED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let starve_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while FRAMES_STARVED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            assert!(
+                tokio::time::Instant::now() < starve_deadline,
+                "no frame was skipped while all three pool buffers were held: the pool-starvation branch never ran"
+            );
+            match tokio::time::timeout_at(starve_deadline, event_rx.recv()).await {
+                Ok(Some(VideoEvent::FrameReady { .. })) => panic!(
+                    "a fourth FrameReady arrived while all three pool buffers were held: frame delivery is not bounded by the pool"
+                ),
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("worker event channel closed"),
+                // The deadline itself is asserted at the top of the loop.
+                Err(_) => {}
+            }
+        }
 
-        // Delivery must resume promptly once the pool buffers are released.
+        // All three pool slots are downstream now, so the worker must skip
+        // frames instead of handing out a fourth buffer — and it must keep
+        // servicing commands while it does (it is not stuck in `draw_frame`).
+        cmd_tx.send(VideoCommand::SetMute(true)).await.unwrap();
+        let responsive_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut saw_muted = false;
+        while !saw_muted {
+            let ev = tokio::time::timeout_at(responsive_deadline, event_rx.recv())
+                .await
+                .expect("worker stopped servicing commands while every pool buffer was held")
+                .expect("worker event channel closed");
+            match ev {
+                VideoEvent::FrameReady { .. } => panic!(
+                    "a fourth FrameReady arrived while all three pool buffers were held: frame delivery is not bounded by the pool"
+                ),
+                VideoEvent::Muted(muted) => saw_muted = muted,
+                _ => {}
+            }
+        }
+
+        // Releasing a single buffer must let delivery resume, so this waits on
+        // a fresh deadline rather than the original frame deadline.
+        held_buffers.pop();
+        let resume_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let ev = tokio::time::timeout_at(deadline, event_rx.recv())
+            let ev = tokio::time::timeout_at(resume_deadline, event_rx.recv())
                 .await
                 .expect("timed out waiting for frame after pool starvation")
                 .expect("worker event channel closed");

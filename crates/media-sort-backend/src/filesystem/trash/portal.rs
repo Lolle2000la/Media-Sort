@@ -42,6 +42,9 @@ use media_sort_core::actions::reversible::ActionError;
 /// [`crate::platform::desktop_portal::in_flatpak`], which the OpenURI actions
 /// share.
 pub use crate::platform::desktop_portal::in_flatpak;
+// Drive a blocking portal request with a bounded wait, so a wedged portal
+// cannot block this (UI) thread; its timeout is what `to_io` keeps distinct.
+use crate::platform::desktop_portal::{PortalError, run_portal_call};
 
 /// How many `name.N` alternatives to try before giving up on a free trash name.
 const MAX_TRASH_NAME_ATTEMPTS: u32 = 10_000;
@@ -65,8 +68,16 @@ pub fn delete_to_trash(original_path: &Path) -> Result<Box<dyn TrashRestoreHandl
         .map_err(ActionError::Io)?;
 
     // ashpd is async-only and the delete path is synchronous; a portal round
-    // trip takes a few milliseconds, so drive it to completion here.
-    pollster::block_on(ashpd::desktop::trash::trash_file(&file.as_fd())).map_err(to_io)?;
+    // trip takes a few milliseconds, so drive it to completion here — bounded by
+    // `run_portal_call`'s deadline so a wedged portal cannot freeze the UI
+    // reducer thread that called us for the D-Bus broker's whole reply timeout.
+    // The request future and the descriptor above live on this thread, so a
+    // timeout drops them here rather than leaving a request running behind us.
+    run_portal_call(
+        "Trash.TrashFile",
+        ashpd::desktop::trash::trash_file(&file.as_fd()),
+    )
+    .map_err(to_io)?;
 
     Ok(Box::new(PortalTrashRestore {
         original_path: original_path.to_path_buf(),
@@ -74,8 +85,16 @@ pub fn delete_to_trash(original_path: &Path) -> Result<Box<dyn TrashRestoreHandl
     }))
 }
 
-fn to_io(err: impl std::error::Error + Send + Sync + 'static) -> ActionError {
-    ActionError::Io(io::Error::other(err))
+fn to_io(err: PortalError) -> ActionError {
+    // A timeout is the one failure the caller must be able to tell apart from a
+    // refusal: the `TrashFile` request may still be in flight in
+    // `xdg-desktop-portal`, so `trash.rs` must not run a second trash operation
+    // on the same path.
+    let kind = match err {
+        PortalError::Timeout { .. } => io::ErrorKind::TimedOut,
+        _ => io::ErrorKind::Other,
+    };
+    ActionError::Io(io::Error::new(kind, err))
 }
 
 /// Tighten permissions on any existing trash directories for `original_path`
@@ -253,7 +272,8 @@ fn trash_into_directory_with_recorded_path(
     info.push_str(&Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
     info.push('\n');
 
-    let (name, info_path) = create_trash_info(&base.join("info"), file_name, &info)?;
+    let (name, info_path) =
+        create_trash_info(&base.join("info"), &base.join("files"), file_name, &info)?;
 
     let trashed_path = base.join("files").join(&name);
     if let Err(err) = fs::rename(original_path, &trashed_path) {
@@ -323,8 +343,16 @@ fn move_file(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// Claim a free name in `info_dir` and write `contents` into its `.trashinfo`,
 /// creating the file exclusively so two instances cannot take the same name.
+///
+/// A candidate is only free when *both* halves are: `info/<name>.trashinfo`
+/// must not exist, and `files/<name>` must not exist either. `rename` replaces
+/// an existing destination silently, so an orphan file in `files/` (one whose
+/// `.trashinfo` was lost — by an interrupted trash, an earlier implementation,
+/// or a file manager that removed the metadata) would otherwise have its bytes
+/// overwritten by the newly trashed file.
 fn create_trash_info(
     info_dir: &Path,
+    files_dir: &Path,
     file_name: &OsStr,
     contents: &str,
 ) -> Result<(OsString, PathBuf), ActionError> {
@@ -338,6 +366,15 @@ fn create_trash_info(
             .open(&info_path)
         {
             Ok(mut file) => {
+                // `symlink_metadata` (not `metadata`) so a dangling symlink in
+                // `files/` counts as existing too — it is still an entry
+                // `rename` would replace.
+                if files_dir.join(&name).symlink_metadata().is_ok() {
+                    // Release the claim and try the next candidate name.
+                    drop(file);
+                    let _ = fs::remove_file(&info_path);
+                    continue;
+                }
                 if let Err(err) = file.write_all(contents.as_bytes()) {
                     let _ = fs::remove_file(&info_path);
                     return Err(ActionError::Io(err));
@@ -813,6 +850,90 @@ mod tests {
             b"second"
         );
         assert!(base.join("info/photo.2.jpg.trashinfo").exists());
+    }
+
+    #[test]
+    fn a_portal_timeout_is_a_timed_out_io_error() {
+        // `trash.rs` decides on this kind: a timed-out `TrashFile` may still be
+        // in flight in `xdg-desktop-portal`, so it must not be mistaken for a
+        // refusal (which would run the home-trash fallback on the same file).
+        match to_io(PortalError::Timeout {
+            call: "Trash.TrashFile",
+        }) {
+            ActionError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::TimedOut),
+            other => panic!("a portal timeout must be an io error, got {other:?}"),
+        }
+
+        // Every other portal failure stays a plain I/O error, which is what
+        // makes the caller fall back to the host trash.
+        match to_io(PortalError::Unavailable) {
+            ActionError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::Other),
+            other => panic!("a portal refusal must be an io error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_orphan_file_in_the_trash_is_not_overwritten() {
+        // `files/photo.jpg` with no `.trashinfo` (an interrupted trash, or a
+        // file manager that dropped the metadata). `rename` replaces an
+        // existing destination silently, so picking that name would destroy the
+        // orphan's bytes.
+        let temp = TempDir::new("home-trash-orphan");
+        let base = temp.path().join("Trash");
+        let original = temp.path().join("photo.jpg");
+        fs::write(&original, b"new content").expect("write file");
+        for dir in [&base, &base.join("files"), &base.join("info")] {
+            fs::create_dir_all(dir).expect("create trash dir");
+        }
+        fs::write(base.join("files/photo.jpg"), b"orphan bytes").expect("write orphan");
+
+        let _handle = trash_into_home_trash_at(&base, &original).expect("trash");
+
+        assert_eq!(
+            fs::read(base.join("files/photo.jpg")).expect("orphan still there"),
+            b"orphan bytes",
+            "the orphan file in files/ must keep its bytes"
+        );
+        assert_eq!(
+            fs::read(base.join("files/photo.2.jpg")).expect("new entry"),
+            b"new content"
+        );
+        assert!(!base.join("info/photo.jpg.trashinfo").exists());
+        assert!(base.join("info/photo.2.jpg.trashinfo").exists());
+    }
+
+    #[test]
+    fn a_dangling_symlink_in_the_trash_is_not_replaced() {
+        // The candidate check must use `symlink_metadata`: `metadata` follows the
+        // link, a dangling one reports "no such file" and the name would be
+        // reused — replacing the symlink entry with the newly trashed file.
+        let temp = TempDir::new("home-trash-dangling");
+        let base = temp.path().join("Trash");
+        let original = temp.path().join("dangling.jpg");
+        fs::write(&original, b"new content").expect("write file");
+        for dir in [&base, &base.join("files"), &base.join("info")] {
+            fs::create_dir_all(dir).expect("create trash dir");
+        }
+        std::os::unix::fs::symlink("/nonexistent/target", base.join("files/dangling.jpg"))
+            .expect("create dangling symlink");
+
+        let _handle = trash_into_home_trash_at(&base, &original).expect("trash");
+
+        let orphan = fs::symlink_metadata(base.join("files/dangling.jpg"))
+            .expect("the dangling symlink must still be there");
+        assert!(
+            orphan.file_type().is_symlink(),
+            "the orphan entry must still be the symlink, not the trashed file"
+        );
+        assert_eq!(
+            std::fs::read_link(base.join("files/dangling.jpg")).expect("read link"),
+            Path::new("/nonexistent/target")
+        );
+        assert_eq!(
+            fs::read(base.join("files/dangling.2.jpg")).expect("new entry"),
+            b"new content"
+        );
+        assert!(base.join("info/dangling.2.jpg.trashinfo").exists());
     }
 
     #[test]

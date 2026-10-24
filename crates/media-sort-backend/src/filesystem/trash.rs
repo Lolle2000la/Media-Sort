@@ -57,6 +57,16 @@ fn macos_trash_item(path: &Path) -> Result<PathBuf, ActionError> {
     }
 }
 
+/// Whether a portal failure was a *timeout* rather than a refusal.
+///
+/// `trash/portal.rs::to_io` maps `PortalError::Timeout` to
+/// `io::ErrorKind::TimedOut`; that distinction decides whether the caller may
+/// still trash the file another way.
+#[cfg(target_os = "linux")]
+fn is_portal_timeout(err: &ActionError) -> bool {
+    matches!(err, ActionError::Io(io_err) if io_err.kind() == std::io::ErrorKind::TimedOut)
+}
+
 pub fn delete_to_trash(path: &Path) -> Result<Box<dyn TrashRestoreHandle>, ActionError> {
     let original_path = path.to_path_buf();
 
@@ -97,6 +107,24 @@ pub fn delete_to_trash(path: &Path) -> Result<Box<dyn TrashRestoreHandle>, Actio
         if portal::in_flatpak() {
             match portal::delete_to_trash(&original_path) {
                 Ok(handle) => return Ok(handle),
+                // A timed-out `TrashFile` is NOT a refusal: its outcome is
+                // unknown. `xdg-desktop-portal` may still complete the request
+                // late, may never answer, or may have moved the file already —
+                // and the D-Bus call handed it the descriptor, so it can act on
+                // the file after this function returns. Running the home-trash
+                // fallback (or `trash::delete`) on the same path would race that
+                // unknown move and can corrupt the trash entry, since the two
+                // would touch one file with different metadata. Fail with the
+                // timeout instead: the user sees that the delete did not
+                // complete, and a file the portal leaves alone stays in place.
+                Err(err) if is_portal_timeout(&err) => {
+                    tracing::warn!(
+                        path = %original_path.display(),
+                        error = %err,
+                        "org.freedesktop.portal.Trash timed out; not falling back because the request may still be in flight"
+                    );
+                    return Err(err);
+                }
                 Err(err) => {
                     tracing::warn!(
                         path = %original_path.display(),

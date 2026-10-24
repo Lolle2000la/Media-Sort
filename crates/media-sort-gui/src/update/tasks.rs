@@ -396,13 +396,25 @@ pub fn load_thumbnail(
 pub fn open_externally(path: &std::path::Path) {
     // The default handler for a file is a *host* application, and inside the
     // Flatpak sandbox `xdg-open` reaches it only by accident. Hand the file to
-    // the OpenURI portal instead; outside Flatpak it reports `Unavailable` (a
-    // web address is not a file, either) and the platform handler below runs as
-    // before.
+    // the OpenURI portal instead. Only `Unavailable` — not sandboxed, or the
+    // path is a web address / not a file on disk — falls through to the
+    // platform handler below: a portal that failed or timed out must not be
+    // retried there, because `open::that` runs `xdg-open`, which re-invokes the
+    // very same (wedged) OpenURI portal with no deadline at all.
     #[cfg(target_os = "linux")]
     {
-        if media_sort_backend::platform::desktop_portal::open_externally(path).is_ok() {
-            return;
+        use media_sort_backend::platform::desktop_portal::{self, PortalError};
+        match desktop_portal::open_externally(path) {
+            Ok(()) => return,
+            Err(PortalError::Unavailable) => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "the OpenURI portal could not open the file; not retrying through xdg-open"
+                );
+                return;
+            }
         }
     }
 
@@ -422,10 +434,23 @@ pub fn reveal_in_file_manager(path: &std::path::Path) {
     // session-bus policy blocks `org.freedesktop.FileManager1` outright, so the
     // request goes through the OpenURI portal. It has no select-a-file call, so
     // this opens the containing folder rather than highlighting the entry.
+    // As above, only `Unavailable` falls back to `dbus-send`/`xdg-open`: those
+    // cannot work in the sandbox, so a portal failure is reported instead of
+    // being retried on a route the sandbox blocks.
     #[cfg(target_os = "linux")]
     {
-        if media_sort_backend::platform::desktop_portal::reveal_in_file_manager(path).is_ok() {
-            return;
+        use media_sort_backend::platform::desktop_portal::{self, PortalError};
+        match desktop_portal::reveal_in_file_manager(path) {
+            Ok(()) => return,
+            Err(PortalError::Unavailable) => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "the OpenURI portal could not reveal the file; the sandbox blocks the native routes"
+                );
+                return;
+            }
         }
     }
 

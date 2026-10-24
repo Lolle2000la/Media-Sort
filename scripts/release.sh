@@ -34,6 +34,10 @@
 # tag alone determines every version in the shipped artifacts:
 #   packaging/macos/Info.plist                 CFBundleShortVersionString + CFBundleVersion
 #   crates/media-sort-gui/media-sort-gui.rc     Windows VERSIONINFO resource
+#
+# The AppStream metadata is synced too, so Flathub's release list cannot drift
+# from the tags:
+#   packaging/linux/app.mediasort.MediaSort.metainfo.xml   <releases> entry
 
 set -euo pipefail
 
@@ -190,12 +194,16 @@ fi
 
 INFO_PLIST="packaging/macos/Info.plist"
 RC_FILE="crates/media-sort-gui/media-sort-gui.rc"
+METAINFO_XML="packaging/linux/app.mediasort.MediaSort.metainfo.xml"
 
 # Apple's CFBundleShortVersionString is 1-3 period-separated integers, so the
 # prerelease/build suffix is dropped (3.0.0-rc.1 -> 3.0.0).
 MARKETING_VERSION="${VERSION%%-*}"
 MARKETING_VERSION="${MARKETING_VERSION%%+*}"
 IFS=. read -r VER_MAJOR VER_MINOR VER_PATCH _ <<< "$MARKETING_VERSION"
+
+# The `<release date="...">` an AppStream entry needs (UTC, as Flathub shows it).
+RELEASE_DATE="$(date -u +%Y-%m-%d)"
 
 # Monotonically increasing build number for CFBundleVersion / FILEVERSION: the
 # Nth release is numbered N (1-based over every existing v* tag). Swap this for
@@ -217,6 +225,7 @@ fi
 info "version:   $CURRENT_VERSION -> $VERSION"
 info "marketing: $MARKETING_VERSION (CFBundleShortVersionString)"
 info "build:     $BUILD_NUMBER (CFBundleVersion / FILEVERSION)"
+info "appstream: <release version=\"$VERSION\" date=\"$RELEASE_DATE\"/>"
 info "branch:    $BRANCH"
 info "tag:       $TAG (signed)"
 
@@ -234,7 +243,7 @@ restore() {
   local code=$?
   if [ "$code" -ne 0 ] && [ "$COMMITTED" -eq 0 ] && [ "$BUMPED" -eq 1 ]; then
     warn "rolling back the version files"
-    git checkout -- Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" 2>/dev/null || true
+    git checkout -- Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" "$METAINFO_XML" 2>/dev/null || true
   fi
   return "$code"
 }
@@ -339,8 +348,106 @@ grep -q "VALUE \"ProductVersion\", \"$VERSION\"" "$RC_TMP" || { rm -f "$RC_TMP" 
 mv "$RC_TMP" "$RC_FILE"
 rm -f "$RC_BLOCK"
 
+# Add — or re-date — this version's entry in the AppStream metadata, so the
+# <releases> list Flathub reads from the tagged source tree always ends at the
+# tag being cut (release.yml's verify-version fails the build otherwise).
+# Idempotent: an entry that already carries $VERSION only gets its date
+# rewritten, never duplicated or reordered. A prerelease (a version with a
+# `-` suffix) is marked `type="development"`, which is how AppStream/Flathub
+# label a release that is not the stable one.
+sync_metainfo_xml() {
+  local tmp first_release release_type=""
+  case "$VERSION" in
+    *-*) release_type='type="development" ' ;;
+  esac
+  tmp="$(mktemp)"
+  if ! awk -v ver="$VERSION" -v date="$RELEASE_DATE" -v type_attr="$release_type" '
+    # Anchored tag patterns: the header comment in this file mentions
+    # <releases>/<release> in prose, which must not be mistaken for markup.
+    /^[[:space:]]*<releases>[[:space:]]*$/ { in_releases = 1; releases_line = NR }
+    /^[[:space:]]*<\/releases>[[:space:]]*$/ { in_releases = 0 }
+    in_releases && first_line == 0 && /^[[:space:]]*<release[ >]/ { first_line = NR }
+    in_releases && /^[[:space:]]*<release[ >]/ && index($0, "version=\"" ver "\"") > 0 { existing = NR }
+    { lines[NR] = $0 }
+    END {
+      if (releases_line == 0) { exit 1 }
+      if (existing > 0) {
+        insert_after = 0
+      } else if (first_line > 0) {
+        # Above the current top entry (the file keeps a "add new releases at
+        # the top" comment there, which stays where it is).
+        insert_after = first_line - 1
+      } else {
+        insert_after = releases_line
+      }
+      if (first_line > 0) {
+        match(lines[first_line], /^[[:space:]]*/)
+        indent = substr(lines[first_line], 1, RLENGTH)
+      } else {
+        match(lines[releases_line], /^[[:space:]]*/)
+        indent = substr(lines[releases_line], 1, RLENGTH) "  "
+      }
+      for (i = 1; i <= NR; i++) {
+        line = lines[i]
+        if (i == existing) {
+          # Rewrite only the date attribute: indentation, version and any other
+          # attribute (including type="development") stay exactly as they were.
+          if (line ~ /date="[^"]*"/) {
+            sub(/date="[^"]*"/, "date=\"" date "\"", line)
+          } else if (line ~ /\/>[[:space:]]*$/) {
+            # Self-closing tag: `<release .../>`.
+            sub(/\/>[[:space:]]*$/, "date=\"" date "\"/>", line)
+          } else {
+            # Tag with children: `<release ...>`.
+            sub(/>[[:space:]]*$/, " date=\"" date "\">", line)
+          }
+        }
+        print line
+        if (i == insert_after) {
+          print indent "<release " type_attr "version=\"" ver "\" date=\"" date "\"/>"
+        }
+      }
+    }
+  ' "$METAINFO_XML" > "$tmp"; then
+    rm -f "$tmp"
+    die "no <releases> block in $METAINFO_XML"
+  fi
+
+  first_release="$(grep -m1 -E '^[[:space:]]*<release[ >]' "$tmp" || true)"
+  case "$first_release" in
+    *"version=\"$VERSION\""*) ;;
+    *)
+      rm -f "$tmp"
+      die "failed to write <release version=\"$VERSION\"> as the first entry in $METAINFO_XML"
+      ;;
+  esac
+  case "$first_release" in
+    *"date=\"$RELEASE_DATE\""*) ;;
+    *)
+      rm -f "$tmp"
+      die "failed to write date=\"$RELEASE_DATE\" for version $VERSION in $METAINFO_XML"
+      ;;
+  esac
+  case "$VERSION" in
+    *-*)
+      case "$first_release" in
+        *'type="development"'*) ;;
+        *)
+          rm -f "$tmp"
+          die "failed to mark the prerelease $VERSION as type=\"development\" in $METAINFO_XML"
+          ;;
+      esac
+      ;;
+  esac
+
+  mv "$tmp" "$METAINFO_XML"
+}
+
+info "syncing AppStream metadata ($METAINFO_XML)"
+sync_metainfo_xml
+
 info "committing"
-git add Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE"
+git add Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" "$METAINFO_XML"
 git commit -m "chore: bump version to $VERSION"
 COMMITTED=1
 

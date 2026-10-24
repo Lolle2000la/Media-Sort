@@ -74,7 +74,27 @@ jobs:
             exit 1
           fi
 
-          echo "Tag $GITHUB_REF_NAME matches Cargo.toml/Cargo.lock $MANIFEST_VERSION, Info.plist $PLIST_SHORT (build $PLIST_BUILD) and media-sort-gui.rc $RC_VERSION"
+          # Flathub shows this file's <releases> list as the app's version
+          # history, and the packaged metainfo is installed from the tagged
+          # source tree — so the first (newest) entry must be this tag, with a
+          # date. Anchored to real indented tags: the file's header comment
+          # mentions <release> in prose.
+          METAINFO_FIRST="$(grep -m1 -E '^[[:space:]]*<release[ >]' packaging/linux/app.mediasort.MediaSort.metainfo.xml || true)"
+          # A prerelease entry also carries `type="development"` (written by
+          # scripts/release.sh). It is optional and ignored by the checks below:
+          # the version/date extraction does not depend on attribute order.
+          METAINFO_VERSION="$(printf '%s' "$METAINFO_FIRST" | sed -n 's/.*version="\([^"]*\)".*/\1/p')"
+          if [ "$METAINFO_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::the first <release> in packaging/linux/app.mediasort.MediaSort.metainfo.xml is '$METAINFO_VERSION' but the tag is '$TAG_VERSION'; run scripts/release.sh to sync it."
+            exit 1
+          fi
+          METAINFO_DATE="$(printf '%s' "$METAINFO_FIRST" | sed -n 's/.*date="\([^"]*\)".*/\1/p')"
+          if ! printf '%s' "$METAINFO_DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+            echo "::error::the <release version=\"$TAG_VERSION\"> entry in packaging/linux/app.mediasort.MediaSort.metainfo.xml has date='$METAINFO_DATE', which is not a YYYY-MM-DD date; run scripts/release.sh to sync it."
+            exit 1
+          fi
+
+          echo "Tag $GITHUB_REF_NAME matches Cargo.toml/Cargo.lock $MANIFEST_VERSION, Info.plist $PLIST_SHORT (build $PLIST_BUILD), media-sort-gui.rc $RC_VERSION and the metainfo release $METAINFO_VERSION ($METAINFO_DATE)"
 
   deploy:
     needs: verify-version
