@@ -5,9 +5,11 @@
   "timezone": "Europe/Berlin",
   "dependencyDashboard": true,
   "osvVulnerabilityAlerts": true,
+  "minimumReleaseAge": "14 days",
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["before 5am on monday"]
+    "schedule": ["before 5am on monday"],
+    "automerge": false
   },
   "vulnerabilityAlerts": {
     "enabled": true,
@@ -30,6 +32,18 @@
       "description": "GitHub Actions: group all updates (SHA-pinned, comment updated in place)",
       "matchManagers": ["github-actions"],
       "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Automerge non-major cargo/npm updates once their checks are green. Both ecosystems are gate-tested on every pull request: ci.yml runs fmt, clippy and the Linux/Windows/macOS nextest + doctest matrices for any Cargo.lock change, and website.yml runs npm ci --locked, eslint, prettier --check and astro build for any website/** change -- a bump that does not install, compile or pass tests fails the PR instead of reaching master. minimumReleaseAge (14 days) keeps the branch and PR from being created at all until the release is two weeks old (internalChecksFilter defaults to strict), so this only ever merges releases that have soaked that long. platformAutomerge is pinned false on purpose: this repository has allow_auto_merge disabled, so GitHub offers no native auto-merge and Renovate does the merge itself, only after evaluating the PR's status checks. Majors stay manual: they get their own PR so a human reads the changelog. Pin/digest updates stay manual too, because minimumReleaseAge explicitly does not cover pin updates, so automerging them would skip the 14-day soak.",
+      "matchManagers": ["cargo", "npm"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "platformAutomerge": false
+    },
+    {
+      "description": "Never automerge GitHub Actions updates; this overrides the rule above because later packageRules win. A PR only exercises the workflows that run on pull_request: release.yml, snap-release.yml and deploy-demos-website.yml run on tags, published releases or workflow_dispatch, so an action bump that breaks them (or that needs different inputs, or that changes what SHA-pinned code executes in the release builds) first surfaces while cutting a release. The update is also the one whose 'green' signal is the action itself running.",
+      "matchManagers": ["github-actions"],
+      "automerge": false
     },
     {
       "description": "TypeScript is held below 6.1.0 because typescript-eslint -- and @typescript-eslint/parser plus eslint-plugin, all three carry the cap -- peers it at >=4.8.4 <6.1.0 (unchanged in 8.71.2, the latest release, and in its canaries), and it refuses to run at all when handed TS 7. This is not conservatism: TypeScript 7 is the Go rewrite and 7.0 ships no JavaScript compiler API for the parser to call, so 7.0 support was closed as not planned and the target is TS 7.1+ (typescript-eslint#10940). Note the rule blocks only the uninstallable 7.x; 6.0.x is still allowed. Lift it once the peer range widens.",
