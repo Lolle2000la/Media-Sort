@@ -177,19 +177,35 @@ so the Rust AVIF decoder links the bundled library), **libass 0.17.5**,
 
 ## What is bundled, and what is not
 
-Bundled (`usr/lib`, by SONAME): `libmpv.so.2`, `libavcodec/format/util/filter/
-device/…`, `libswscale`, `libswresample`, `libavfilter`, `libdav1d`, `libass`,
-`libzimg`, `libplacebo`, `libfreetype`, `libharfbuzz`, `libfribidi`,
+Bundled (`usr/lib`, by SONAME): `libmpv.so.2`, `libavcodec/format/util/filter`,
+`libswscale`, `libswresample`, `libavfilter`, `libdav1d`, `libass`, `libzimg`,
+`libplacebo`, `libstdc++`, `libfreetype`, `libharfbuzz`, `libfribidi`,
 `libfontconfig`, `libexpat`, `libz`, `libgcc_s`, `libasound`, `libpulse`,
-`libX11`-family, `libxcb`, `libwayland-*`, `libva*` (the API library, not the
-driver), … plus `usr/bin/ffmpeg`.
+`libX11`-family (including the `libXcursor`/`libXi`/`libXinerama` libraries
+winit only *dlopens*), `libxcb`, `libwayland-*`, `libva*` (the API library, not
+the driver), `libdrm.so.2` (see below), … plus `usr/bin/ffmpeg`.
 
 Not bundled, by design (`excludelist`): glibc and the loader (`libc`,
 `ld-linux-*`, `libm`, `libdl`, `libpthread`, `librt`, `libresolv`, `libnss_*`,
 …), and the graphics/driver stack (`libGL*`, `libEGL*`, `libOpenGL*`,
-`libGLX*`, `libdrm*`, `libgbm*`, `libglapi*`, `libvulkan*`, vendor drivers,
-`*_drv_video.so`). A GPU driver has to match the running kernel and hardware;
-`libmpv` dlopens the VA-API driver at runtime, so only the API library ships.
+`libGLX*`, `libgbm*`, `libglapi*`, `libvulkan*`, `libdrm_amdgpu/intel/radeon/
+nouveau`, vendor drivers, `*_drv_video.so`). A GPU driver has to match the
+running kernel and hardware; `libmpv` dlopens the VA-API driver at runtime, so
+only the API library ships.
+
+Two entries that upstream's excludelist has, but this payload deliberately
+ships:
+
+* **`libdrm.so.2`** — a measured decision. It is not a driver but a userspace
+  ioctl wrapper, and `libmpv.so.2` → `libva-x11.so.2`/`libva-wayland.so.2` →
+  `libdrm.so.2` is a hard `DT_NEEDED` chain, so excluding it made the whole
+  AppImage refuse to start on a system without it
+  (`error while loading shared libraries: libdrm.so.2`) — the same failure
+  class this work removes. The trade-off: a *host* VA-API driver (which is
+  dlopen'd by libva) built against a newer libdrm may fail to bind and fall
+  back to software decoding. That is a degradation; not starting at all is not.
+* **`libstdc++.so.6`** — libplacebo, mpv's mandatory dependency, is C++, so the
+  alternative was another hard host dependency.
 
 `libgcc_s.so.1` *is* bundled (the upstream AppImage excludelist would skip it);
 newer distros ship a newer one and older ones can be too old for
@@ -227,7 +243,9 @@ The application is **AGPL-3.0-or-later**. The bundled components are:
 | zimg | WTFPL (zlib-style, permissive) |
 | libplacebo | LGPL-2.1-or-later |
 | wayland-protocols | MIT |
-| libgcc_s, glibc (host) | GPL-3.0-with-GCC-exception / LGPL-2.1 |
+| libgcc_s, libstdc++ (bundled) | GPL-3.0-with-GCC-exception |
+| libdrm (bundled) | MIT |
+| glibc (host) | LGPL-2.1 |
 
 The one GPL component is **mpv/libmpv**, and it is unavoidable: mpv's X11
 support (and therefore VA-API on X11 sessions) is GPL-only, so `-Dgpl=false`

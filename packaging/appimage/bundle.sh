@@ -52,7 +52,7 @@ is_excluded() {
   ' "$EXCLUDELIST" && return 0
   case "$name" in
     libGL*.so*|libEGL*.so*|libOpenGL*.so*|\
-    libdrm*.so*|libgbm*.so*|libglapi*.so*|libvulkan*.so*|\
+    libgbm*.so*|libglapi*.so*|libvulkan*.so*|\
     libnvidia*.so*|libcuda*.so*|libmali*.so*|libd3d*.so*|libwsl*.so*|\
     *_drv_video.so|*_driver_video.so)
       return 0 ;;
