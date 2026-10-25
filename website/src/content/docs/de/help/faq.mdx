@@ -15,10 +15,10 @@ import Kbd from '../../../../components/Kbd.astro';
 
 ### Videos werden nicht abgespielt (die Vorschau ist leer oder zeigt einen Platzhalter)
 
-Die Videowiedergabe erfordert, dass **libmpv** auf Ihrem System installiert ist:
+Die Videowiedergabe benötigt **libmpv**, das jedes veröffentlichte Paket selbst mitbringt:
 
-- **Linux:** Installieren Sie `libmpv-dev` oder `libmpv1` über Ihren Paketmanager (z. B. `sudo apt install libmpv2` unter Debian/Ubuntu).
-- **macOS und Windows:** mpv ist in der Anwendung enthalten. Wenn Videos dennoch nicht funktionieren, stellen Sie sicher, dass Ihre GPU-Treiber aktuell sind und Vulkan unterstützen.
+- **Linux (AppImage), macOS und Windows:** mpv, ffmpeg und dav1d sind im Paket enthalten, es muss also nichts installiert werden. Wenn Videos dennoch nicht funktionieren, liegt es meist an der GPU: aktualisieren Sie Ihre Grafiktreiber, sodass sie Vulkan unterstützen.
+- **Selbst kompilieren:** Installieren Sie `libmpv-dev` (Debian/Ubuntu) oder das Äquivalent Ihrer Distribution sowie `libdav1d-dev` für AVIF-Bilder. Ein Selbstbau linkt das System-libmpv.
 
 Sie können Bilder weiterhin anzeigen und Audio auch ohne libmpv abspielen. Verwenden Sie die Schaltfläche **„Im Systemplayer öffnen"**, um Videodateien in Ihrem Standard-Mediaplayer abzuspielen.
 
@@ -26,7 +26,7 @@ Sie können Bilder weiterhin anzeigen und Audio auch ohne libmpv abspielen. Verw
 
 - **Veraltete Konfiguration:** Versuchen Sie, Ihre `config.toml`-Datei zu löschen. Den Speicherort finden Sie auf der Seite [Konfigurationsdatei](/advanced/config-file/). Die App erstellt sie beim nächsten Start mit den Standardwerten neu.
 - **Vulkan-/GPU-Probleme:** Media Sort verwendet wgpu für das Rendering, was Vulkan-, Metal- oder DirectX-12-Unterstützung erfordert. Aktualisieren Sie Ihre GPU-Treiber und stellen Sie sicher, dass Ihr Grafik-Stack funktionsfähig ist.
-- **Fehlende Systembibliotheken:** Stellen Sie unter Linux sicher, dass `libx11`, `libwayland` und `libasound2` installiert sind.
+- **Fehlende Systembibliotheken (nur bei Selbstbau):** Das AppImage bringt seine eigenen X11-/Wayland-/ALSA-Bibliotheken mit. Nur ein selbst kompilierter Build benötigt `libx11`, `libwayland` und `libasound2` auf dem System.
 
 ### Wie setze ich alle Einstellungen auf die Standardwerte zurück?
 

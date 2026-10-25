@@ -21,7 +21,8 @@ Wählen Sie das passende Paket für Ihr Betriebssystem und Ihre Prozessorarchite
 
 ## Systemvoraussetzungen
 
-Je nach Ihrer Plattform müssen Sie eventuell die Bibliotheken des `mpv`-Medien-Frameworks installieren:
+Alle unten aufgeführten Pakete sind eigenständig: Sie müssen die Bibliotheken
+der `mpv`-Medien-Engine oder `ffmpeg` niemals selbst installieren.
 
 ### Windows & macOS
 
@@ -29,32 +30,42 @@ Je nach Ihrer Plattform müssen Sie eventuell die Bibliotheken des `mpv`-Medien-
 
 ### Linux
 
-Media Sort ist für Linux als AppImage verfügbar.
+Media Sort ist für Linux als AppImage verfügbar, das ebenso eigenständig ist.
 
 #### AppImage
 
-Die AppImage-Pakete laufen dynamisch im Host-System und setzen die Installation von `libmpv` und `libdav1d` (für die AVIF-Bilddecodierung) voraus. Das AppImage benötigt außerdem `libasound2` sowie X11-/Wayland-Bibliotheken, die auf Desktop-Linux-Distributionen üblicherweise bereits vorinstalliert sind.
+Das AppImage enthält alles, was es benötigt: `libmpv` (zusammen mit ffmpeg,
+libass, zimg und dav1d gebaut), das `ffmpeg`-Kommandozeilenwerkzeug für schnelle
+Video-Miniaturansichten sowie die ALSA-/PulseAudio- und X11-/Wayland-Bibliotheken,
+gegen die mpv gelinkt wird. **Auf dem Host muss nichts installiert werden** —
+kein `libmpv`, kein `libdav1d`, kein `ffmpeg`, keine Codec-Pakete. Dadurch hängt
+das AppImage nicht mehr von der mpv-Version Ihrer Distribution ab, und
+Videowiedergabe, AVIF-Bilder und Video-Miniaturansichten funktionieren überall
+gleich.
 
-Die Installation von `ffmpeg` ist unter Linux optional — sie ermöglicht schnellere Video-Miniaturansichten, wobei Media Sort ansonsten auf mpv zurückfällt.
+Was der Host weiterhin bereitstellen muss:
 
-#### Arch Linux / CachyOS
+- einen 64-Bit-Linux-Desktop (x86_64 oder aarch64) mit X11- oder Wayland-Sitzung,
+- **glibc 2.35 oder neuer** (Ubuntu 22.04+, Debian 12+, Fedora 36+, aktuelles Arch) —
+  das AppImage wird bewusst gegen diese Untergrenze gebaut und läuft damit auch
+  auf älteren Distributionen als der, auf der es kompiliert wurde,
+- einen funktionierenden Grafiktreiber mit Vulkan (bevorzugt) oder OpenGL, der die
+  Videobilder rendert. Treiberbibliotheken werden bewusst **nicht** mitgeliefert,
+  da sie zu Kernel und GPU passen müssen,
+- optional einen VA-API-Treiber aus Ihrer Distribution, der die
+  hardwarebeschleunigte Videodekodierung aktiviert.
 
 ```bash
-sudo pacman -S mpv dav1d
+chmod +x MediaSort-*-linux-x64.AppImage
+./MediaSort-*-linux-x64.AppImage
 ```
 
-#### Debian / Ubuntu
-
-```bash
-sudo apt install libmpv2 libasound2 libdav1d7
-```
-
-#### Fedora
-
-```bash
-sudo dnf install mpv-libs dav1d-libs
-```
+Auf Systemen ohne FUSE (etwa in einem Container) zusätzlich
+`--appimage-extract-and-run` verwenden.
 
 :::note
-Wenn `libmpv` nicht installiert ist, startet Media Sort dennoch und funktioniert für Bilder und Audio. Die interne Video- und GIF-Wiedergabe wird automatisch deaktiviert. Videodateien werden jedoch weiterhin erkannt und können durchsucht werden, allerdings ohne Miniaturansichten.
+Ohne funktionierenden Vulkan-/OpenGL-Treiber startet die Anwendung weiterhin,
+kann aber keine Videobilder in der Vorschau rendern. Hardwaredekodierung
+benötigt zusätzlich den VA-API-Treiber Ihrer GPU, der aus Ihrer Distribution
+kommt — das AppImage liefert nur die API-Bibliothek, niemals den Treiber.
 :::

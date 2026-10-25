@@ -1,0 +1,69 @@
+# Libraries that must NOT be shipped inside the AppImage.
+#
+# Vendored from https://github.com/AppImage/pkg2appimage/blob/master/excludelist
+# (snapshot taken 2026-10-25), restricted to the two categories this project
+# cares about, with deliberate local deviations documented inline.
+#
+# Format: one file name per line (matched against the SONAME / DT_NEEDED name).
+# Lines starting with '#' and blank lines are ignored. Glob patterns for
+# driver/vendor libraries live in `is_excluded()` in bundle.sh and are
+# documented there.
+#
+# ---------------------------------------------------------------------------
+# 1. glibc and its loader. A bundled libc cannot work: the dynamic loader,
+#    NSS modules, locale/gconv data and the kernel-facing bits all have to match
+#    the running system, and the AppImage's whole point is to run on a *newer*
+#    glibc than it was built against (see verify.sh, which enforces the 2.35
+#    floor this file implies).
+# ---------------------------------------------------------------------------
+ld-linux.so.2
+ld-linux-x86-64.so.2
+ld-linux-aarch64.so.1
+ld-linux-armhf.so.3
+ld64.so.2
+libanl.so.1
+libBrokenLocale.so.1
+libc.so.6
+libcidn.so.1
+libcrypt.so.1
+libdl.so.2
+libm.so.6
+libmvec.so.1
+libnsl.so.1
+libnss_compat.so.2
+libnss_db.so.2
+libnss_dns.so.2
+libnss_files.so.2
+libnss_hesiod.so.2
+libnss_nis.so.2
+libnss_nisplus.so.2
+libpthread.so.0
+libresolv.so.2
+librt.so.1
+libthread_db.so.1
+libutil.so.1
+libstdc++.so.6
+
+# ---------------------------------------------------------------------------
+# 2. Graphics stack / GPU drivers. These are loaded against the *host* kernel
+#    driver and the host's DRI/ICD configuration; a bundled copy either fails
+#    to load or renders nothing. wgpu reaches Vulkan through dlopen anyway, so
+#    none of this is a DT_NEEDED of the app (libmpv's own GL/Vulkan output is
+#    compiled out).
+#
+#    Note what is deliberately NOT here: libva.so.2 and libva-x11/wayland ARE
+#    bundled (they are the API library, a hard DT_NEEDED of libmpv once
+#    -Dvaapi is on; the vendor driver they dlopen stays on the host), and
+#    libX11/libxcb/libwayland-client are bundled too so the app never depends
+#    on the host having them at a compatible version.
+# ---------------------------------------------------------------------------
+libGL.so.1
+libEGL.so.1
+libGLX.so.0
+libGLdispatch.so.0
+libOpenGL.so.0
+libglapi.so.0
+libdrm.so.2
+libgbm.so.1
+libvulkan.so.1
+libvulkan_lvp.so

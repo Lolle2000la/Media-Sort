@@ -21,7 +21,7 @@ Media Sortはメディア再生やUI制御にネイティブのシステムAPI�
 
 ## システムの前提条件
 
-お使いのプラットフォームによっては、`mpv` メディア再生エンジンのライブラリをインストールする必要があります：
+以下に挙げるパッケージはいずれも自己完結しています。`mpv` メディア再生エンジンのライブラリや `ffmpeg` を自分でインストールする必要はありません。
 
 ### Windows & macOS
 
@@ -29,32 +29,26 @@ Media Sortはメディア再生やUI制御にネイティブのシステムAPI�
 
 ### Linux
 
-Linux版のMedia SortはAppImageで提供されています。
+Linux版のMedia Sortは、同じく自己完結したAppImageとして提供されています。
 
 #### AppImage
 
-AppImageパッケージは実行環境のシステムライブラリを利用するため、`libmpv` と `libdav1d`（AVIF画像のデコード用）がインストールされている必要があります。AppImageは `libasound2` およびX11/Waylandライブラリにも依存しますが、これらは通常デスクトップLinuxディストリビューションにプリインストールされています。
+AppImageには必要なものがすべて同梱されています：`libmpv`（ffmpeg、libass、zimg、dav1dとともにビルド）、高速な動画サムネイル用の `ffmpeg` コマンドラインツール、そしてmpvがリンクするALSA/PulseAudioおよびX11/Waylandライブラリです。**ホスト側にインストールする必要はありません** — `libmpv`、`libdav1d`、`ffmpeg`、コーデックパッケージのいずれも不要です。そのため、お使いのディストリビューションが提供するmpvのバージョンに依存しなくなり、動画再生・AVIF画像・動画サムネイルがどこでも同じように動作します。
 
-Linuxでの `ffmpeg` のインストールは任意です。動画サムネイルが高速になりますが、無くてもmpvによるフォールバックが機能します。
+ホスト側で引き続き必要なもの：
 
-#### Arch Linux / CachyOS
-
-```bash
-sudo pacman -S mpv dav1d
-```
-
-#### Debian / Ubuntu
+- X11またはWaylandセッションを持つ64ビット（x86_64またはaarch64）のLinuxデスクトップ
+- **glibc 2.35以降**（Ubuntu 22.04以降、Debian 12以降、Fedora 36以降、最新のArch）— AppImageは意図的にこの下限に対してビルドされているため、コンパイルした環境より古いディストリビューションでも動作します
+- 映像フレームを描画するための、Vulkan（推奨）またはOpenGL対応のグラフィックスドライバー。ドライバーライブラリはカーネルとGPUに一致する必要があるため、意図的に**同梱していません**
+- オプション：ディストリビューションが提供するVA-APIドライバー（ハードウェア支援による動画デコードが有効になります）
 
 ```bash
-sudo apt install libmpv2 libasound2 libdav1d7
+chmod +x MediaSort-*-linux-x64.AppImage
+./MediaSort-*-linux-x64.AppImage
 ```
 
-#### Fedora
-
-```bash
-sudo dnf install mpv-libs dav1d-libs
-```
+FUSEのない環境（コンテナなど）では `--appimage-extract-and-run` を付けて実行してください。
 
 :::note
-`libmpv` がインストールされていない場合でも、Media Sortは起動し、画像と音声に対しては機能します。アプリ内での動画とGIFの再生は自動的に無効になります。動画ファイルは引き続き検出され、ブラウズできますが、サムネイルは利用できません。
+使用可能なVulkan/OpenGLドライバーがない場合でもアプリは起動しますが、アプリ内の動画プレビューはフレームを描画できません。ハードウェアデコードにはさらにGPU用のVA-APIドライバーが必要で、これはディストリビューションから提供されます。AppImageはAPIライブラリのみを同梱し、ドライバーは決して同梱しません。
 :::

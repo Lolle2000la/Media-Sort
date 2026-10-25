@@ -18,11 +18,11 @@ Unterstützte native Bildformate (dekodiert über das reine Rust-Crate `image`):
 
 ### 2. Video & Container
 
-Unterstützte Videoformate (dynamisch verarbeitet über systemgebundenes `libmpv` und zugrunde liegende FFmpeg-Demuxer):
+Unterstützte Videoformate (dynamisch verarbeitet über `libmpv` und die zugrunde liegenden FFmpeg-Demuxer; die veröffentlichten Pakete bringen einen festgelegten Build von beidem mit):
 
 - **Kernformate:** MP4, MKV, WebM, AVI, MOV, WMV, FLV, M4V, GIF (fest kodiert, immer verfügbar).
 - **Dynamische Formate:** Die Anwendung fragt `libmpv` beim Start nach zusätzlichen Formaten über `demuxer-lavf-list` ab. Beispiele sind MPEG/MPG, TS, VOB, 3GP und OGM.
-- **Dynamische Abhängigkeit:** Die Kompatibilität von Codecs und Containerformaten hängt vollständig von der installierten Version von `libmpv` und der zugrunde liegenden FFmpeg-Kompilierung (z. B. `libavcodec`/`libavformat`) auf dem Host-System ab. Wenn `libmpv` nicht installiert ist, ist die interne Video-Wiedergabe deaktiviert. Videodateien werden jedoch weiterhin erkannt und können durchsucht werden. Video-Miniaturansichten benötigen ebenfalls mpv. Bilder und Audio sind davon nicht betroffen.
+- **Dynamische Abhängigkeit:** Die Kompatibilität von Codecs und Containerformaten hängt vollständig vom `libmpv`/FFmpeg-Build (z. B. `libavcodec`/`libavformat`) ab, den die Anwendung verwendet: Die veröffentlichten Pakete bringen einen festgelegten Build mit, sodass die Formatliste auf jedem Rechner gleich ist, während ein Selbstbau den des Host-Systems nutzt. Ohne nutzbares `libmpv` ist die interne Video-Wiedergabe deaktiviert. Videodateien werden jedoch weiterhin erkannt und können durchsucht werden. Video-Miniaturansichten nutzen das mitgelieferte `ffmpeg` (mit mpv als Rückfall). Bilder und Audio sind davon nicht betroffen.
 
 ### 3. Audio
 

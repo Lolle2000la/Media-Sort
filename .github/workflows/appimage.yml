@@ -1,0 +1,130 @@
+name: AppImage Packaging
+
+# Packaging check for the self-contained Linux AppImage (packaging/appimage/):
+# libmpv, ffmpeg and dav1d are compiled from pinned upstream sources inside an
+# Ubuntu 22.04 container together with the GUI binary, bundled into the AppDir
+# with $ORIGIN RPATHs, gated by verify.sh, and packed into a real AppImage.
+#
+# Cost control: x86_64 only (the arm64 matrix entry in release.yml runs the same
+# script, so a broken arm64 build shows up on the release tag), and it only runs
+# when the packaging itself, this workflow, or the release workflow changes.
+#
+# `vpk pack` works standalone -- it only writes local packages; the
+# `vpk download github` step in release.yml exists solely to build delta
+# updates against the previous release, so this workflow skips it and uses a
+# throwaway version.
+on:
+  pull_request:
+    paths:
+      - 'packaging/appimage/**'
+      - '.github/workflows/appimage.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'packaging/appimage/**'
+      - '.github/workflows/appimage.yml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage-linux-x64:
+    name: Build + verify AppImage (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No actions/cache: this job exists to prove that the payload can be
+      # reproduced from pinned sources alone, so it must not inherit anything
+      # from an earlier run.
+      - name: Build Payload (Ubuntu 22.04 container)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
+            -e TARGET=x86_64-unknown-linux-gnu \
+            ubuntu:22.04 \
+            bash /work/packaging/appimage/build-in-container.sh
+
+      - name: Install Packaging Tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y squashfs-tools patchelf xvfb
+
+      - name: Setup .NET SDK (For vpk CLI)
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pack AppImage (two-pass, same flow as release.yml)
+        run: |
+          set -euo pipefail
+          dotnet tool install -g vpk
+          export PATH="$PATH:$HOME/.dotnet/tools"
+
+          VERSION=0.0.1-appimage-ci
+          TARGET_DIR=target/x86_64-unknown-linux-gnu/release
+
+          mkdir -p dist/linux-staging
+          cp "$TARGET_DIR/media-sort-gui" dist/linux-staging/
+
+          vpk pack -u MediaSort -v "$VERSION" -p dist/linux-staging -e media-sort-gui \
+            --icon packaging/linux/icon.svg --channel linux-x64 --runtime linux-x64
+
+          APPIMAGE_PATH=$(ls Releases/*.AppImage | head -n 1)
+          chmod +x "$APPIMAGE_PATH"
+          "$APPIMAGE_PATH" --appimage-extract
+
+          rm -f Releases/*.AppImage
+          rm -f Releases/*.nupkg
+
+          bash packaging/appimage/bundle.sh install squashfs-root target/appimage-stage
+          bash packaging/appimage/verify.sh squashfs-root
+
+          TARGET_DESKTOP=squashfs-root/MediaSort.desktop
+          sed -i 's/^Name=.*/Name=Media Sort/' "$TARGET_DESKTOP"
+          sed -i 's/^Exec=.*/& %U/' "$TARGET_DESKTOP"
+          sed -i 's/^StartupWMClass=.*/StartupWMClass=MediaSort/' "$TARGET_DESKTOP"
+          printf '\n%s\n' "MimeType=inode/directory;" >> "$TARGET_DESKTOP"
+
+          mkdir -p squashfs-root/usr/share/applications
+          cp "$TARGET_DESKTOP" squashfs-root/usr/share/applications/MediaSort.desktop
+
+          rm -rf dist
+          mkdir -p dist
+          mv squashfs-root dist/MediaSort.AppDir
+
+          vpk pack -u MediaSort -v "$VERSION" -p dist/MediaSort.AppDir -e media-sort-gui \
+            --channel linux-x64 --runtime linux-x64
+
+      - name: Verify Packed AppImage
+        run: |
+          set -euo pipefail
+          APPIMAGE=$(ls Releases/*.AppImage | head -n 1)
+          bash packaging/appimage/verify.sh "$APPIMAGE"
+          # The payload inventory is the useful part of this job's log: it is
+          # what changes when a dependency pin or an mpv flag changes.
+          echo "--- bundled libraries ---"
+          du -sh "$APPIMAGE"
+          sha256sum "$APPIMAGE"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: appimage-linux-x64
+          path: Releases/*.AppImage
+          if-no-files-found: error
+          retention-days: 14

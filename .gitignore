@@ -41,6 +41,12 @@ ui_test_config.toml
 /dist-snap/
 *.snap
 
+# AppImage payload build cache (packaging/appimage/build-in-container.sh):
+# downloaded tarballs, unpacked sources, per-component logs, the container's
+# Rust toolchain and its cargo home. Never committed -- every pinned source is
+# re-downloaded and sha256-verified on each release.
+/.appimage-build/
+
 # Flatpak build artifacts (local `flatpak-builder`; see flatpak/README.md).
 /build-dir/
 /flatpak-repo/

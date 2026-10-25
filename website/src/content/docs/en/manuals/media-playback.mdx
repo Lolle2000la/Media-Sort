@@ -40,13 +40,13 @@ Video playback is powered by **libmpv** (via FFmpeg). The video frame is rendere
 
 ### System Requirements
 
-- **libmpv** must be installed on your system. On Linux, install the `libmpv-dev` or `libmpv1` package. On macOS and Windows, mpv is bundled with the application.
-- A **Vulkan-capable GPU** with up-to-date drivers is required for video rendering.
-- If libmpv is not found, in-app video playback is disabled but video files are still detected and browsable. Images and audio continue to work normally. Video thumbnails also require mpv; without it, a placeholder is shown instead.
+- **No mpv installation is required with the released packages:** the Linux AppImage (like the macOS and Windows packages) bundles its own pinned `libmpv`, ffmpeg and dav1d. Only a **build from source** links the system `libmpv` and therefore needs `libmpv-dev`/`libmpv` installed.
+- A **Vulkan-capable GPU** with up-to-date drivers is required for video rendering. The GPU driver itself is never bundled — it has to match your kernel and hardware and comes from your system.
+- Without a usable `libmpv` (a from-source build on a machine that lacks it), in-app video playback is disabled but video files are still detected and browsable. Images and audio continue to work normally.
 
 ### Supported Video Formats
 
-See the [Media Capabilities](/manuals/media-capabilities/) page for the full list of supported video formats. Format support depends on the installed version of libmpv and its underlying FFmpeg codecs.
+See the [Media Capabilities](/manuals/media-capabilities/) page for the full list of supported video formats. Format support depends on the `libmpv`/FFmpeg build in use: the pinned one bundled with the released packages, or the system's when building from source.
 
 ### GIF Playback
 
