@@ -1,0 +1,143 @@
+name: AppImage gate
+description: >
+  Build the self-contained Linux AppImage payload in the ubuntu:22.04 container
+  and gate it exactly the way release.yml does: two-pass `vpk pack`, then
+  `verify.sh` on the AppDir and again on the sealed AppImage.
+
+# Shared by .github/workflows/appimage.yml (the packaging check) and
+# .github/workflows/appimage-bump.yml (the weekly dependency bump), so a change
+# to the flags, the bundling or the verification cannot make one of them green
+# while the other is broken. release.yml keeps its own inline copy on purpose:
+# it runs inside a 5-platform matrix on tag pushes, and its steps are interleaved
+# with signing and uploads.
+#
+# Checkout stays in the calling workflow -- a composite action cannot use
+# actions/checkout usefully, because the workspace is resolved before the action
+# runs. Callers must therefore check out the source first, from the repository
+# root (the container build reads `packaging/appimage/` and writes `target/`,
+# `dist/` and `Releases/` there).
+
+inputs:
+  target:
+    description: Rust target triple to build for.
+    required: false
+    default: x86_64-unknown-linux-gnu
+  artifact-name:
+    description: >
+      Label for this run's log lines, so a caller can match it to the name it
+      gives the artifact it uploads (or to the PR it is gating).
+    required: false
+    default: appimage-linux-x64
+  version:
+    description: >
+      Throwaway vpk version. A gate run never publishes, so it only has to be a
+      valid, increasing version string.
+    required: false
+    default: 0.0.1-appimage-ci
+  channel:
+    description: vpk channel for this target (linux-x64, linux-arm64).
+    required: false
+    default: linux-x64
+
+outputs:
+  appimage:
+    description: Path of the sealed .AppImage this run produced.
+    value: ${{ steps.pack.outputs.appimage }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Packaging Tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        # libasound2t64/libdrm2 are host-provided by policy (see
+        # packaging/appimage/excludelist): without them the GUI check cannot get
+        # past the loader on a bare runner, and the gate fails. The ALSA runtime
+        # library is `libasound2t64` on Ubuntu 24.04+ -- `libasound2` is a
+        # virtual package there with two providers, so apt refuses it. xdotool
+        # makes verify.sh's informational window probe run.
+        sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2
+
+    - name: Setup .NET SDK (For vpk CLI)
+      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      with:
+        dotnet-version: '10.0.x'
+
+    # No actions/cache: this gate exists to prove that the payload can be
+    # reproduced from pinned sources alone, so it must not inherit anything from
+    # an earlier run.
+    - name: Build Payload (Ubuntu 22.04 container)
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        # The AppImage's glibc floor is whatever compiled it, and libmpv/ffmpeg
+        # are built from pinned upstream sources here, so everything happens in
+        # a jammy container: the binary, libmpv, ffmpeg and dav1d all end up
+        # requiring glibc <= 2.35 instead of the runner's 2.39, and the Rust link
+        # cannot pick up a host library because there is none installed on the
+        # runner. The container writes target/ and target/appimage-stage (the
+        # bundle input) back into the workspace; HOST_UID/HOST_GID give those
+        # files to the runner user.
+        docker run --rm \
+          -v "$GITHUB_WORKSPACE:/work" \
+          -w /work \
+          -e HOST_UID="$(id -u)" \
+          -e HOST_GID="$(id -g)" \
+          -e TARGET="$TARGET" \
+          ubuntu:22.04 \
+          bash /work/packaging/appimage/build-in-container.sh
+
+    - name: Pack AppImage (two-pass, same flow as release.yml)
+      id: pack
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        VERSION: ${{ inputs.version }}
+        CHANNEL: ${{ inputs.channel }}
+      run: |
+        set -euo pipefail
+        dotnet tool install -g vpk
+        export PATH="$PATH:$HOME/.dotnet/tools"
+
+        # The two-pass flow (staging -> vpk pack -> unpack -> bundle -> verify ->
+        # desktop surgery -> final vpk pack) lives in the script so it cannot
+        # drift from release.yml's copy.
+        TARGET_DIR="target/$TARGET/release" \
+          bash packaging/appimage/pack-appimage.sh "$VERSION" "$CHANNEL"
+
+        APPIMAGE=$(ls Releases/*.AppImage | head -n 1)
+        echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
+
+    - name: Verify AppDir
+      shell: bash
+      env:
+        ARTIFACT: ${{ inputs.artifact-name }}
+      # pack-appimage.sh already ran verify.sh on the unpacked AppDir before the
+      # .desktop surgery and the rename; this second pass gates the AppDir that
+      # was actually packed, so a desktop/symlink edit between the two cannot
+      # slip through.
+      run: |
+        set -euo pipefail
+        echo "--- $ARTIFACT: AppDir ---"
+        bash packaging/appimage/verify.sh dist/MediaSort.AppDir
+
+    - name: Verify Packed AppImage
+      shell: bash
+      env:
+        ARTIFACT: ${{ inputs.artifact-name }}
+        APPIMAGE: ${{ steps.pack.outputs.appimage }}
+      run: |
+        set -euo pipefail
+        # Extracts the final squashfs and runs the GUI through the AppImage
+        # runtime (--appimage-extract-and-run), so a wrong RPATH or a library
+        # that only resolved because of the build container is caught here.
+        bash packaging/appimage/verify.sh "$APPIMAGE"
+        # The payload inventory is the useful part of this job's log: it is what
+        # changes when a dependency pin or an mpv flag changes.
+        echo "--- $ARTIFACT: bundled payload ---"
+        du -sh "$APPIMAGE"
+        sha256sum "$APPIMAGE"

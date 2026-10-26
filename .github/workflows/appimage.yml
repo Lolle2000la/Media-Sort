@@ -28,6 +28,7 @@ on:
       - 'Cargo.lock'
       - '**/Cargo.toml'
       - 'crates/**'
+      - '.github/actions/appimage-gate/**'
       - '.github/workflows/appimage.yml'
       - '.github/workflows/release.yml'
   push:
@@ -51,65 +52,23 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # No actions/cache: this job exists to prove that the payload can be
-      # reproduced from pinned sources alone, so it must not inherit anything
-      # from an earlier run.
-      - name: Build Payload (Ubuntu 22.04 container)
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work \
-            -e HOST_UID="$(id -u)" \
-            -e HOST_GID="$(id -g)" \
-            -e TARGET=x86_64-unknown-linux-gnu \
-            ubuntu:22.04 \
-            bash /work/packaging/appimage/build-in-container.sh
-
-      - name: Install Packaging Tools
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          # libasound2t64/libdrm2 are host-provided by policy (see
-          # packaging/appimage/excludelist): without them the GUI check cannot
-          # get past the loader on a bare runner, and the gate fails. The ALSA
-          # runtime library is `libasound2t64` on Ubuntu 24.04+ -- `libasound2`
-          # is a virtual package there with two providers, so apt refuses it.
-          # xdotool makes verify.sh's informational window probe run.
-          sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2
-
-      - name: Setup .NET SDK (For vpk CLI)
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      # The gate itself (apt tools, the ubuntu:22.04 container build, the
+      # two-pass vpk pack, and verify.sh on both the AppDir and the sealed
+      # AppImage) lives in the composite action, so this workflow and
+      # appimage-bump.yml cannot drift apart. No actions/cache for the same
+      # reason release.yml has none: the payload has to come from pinned
+      # sources alone.
+      - name: Build + verify AppImage
+        id: gate
+        uses: ./.github/actions/appimage-gate
         with:
-          dotnet-version: '10.0.x'
-
-      - name: Pack AppImage (two-pass, same flow as release.yml)
-        run: |
-          set -euo pipefail
-          dotnet tool install -g vpk
-          export PATH="$PATH:$HOME/.dotnet/tools"
-
-          # The two-pass flow (staging -> vpk pack -> unpack -> bundle -> verify
-          # -> desktop surgery -> final vpk pack) lives in the script so it
-          # cannot drift from release.yml's copy.
-          TARGET_DIR=target/x86_64-unknown-linux-gnu/release \
-            bash packaging/appimage/pack-appimage.sh 0.0.1-appimage-ci linux-x64
-
-      - name: Verify Packed AppImage
-        run: |
-          set -euo pipefail
-          APPIMAGE=$(ls Releases/*.AppImage | head -n 1)
-          bash packaging/appimage/verify.sh "$APPIMAGE"
-          # The payload inventory is the useful part of this job's log: it is
-          # what changes when a dependency pin or an mpv flag changes.
-          echo "--- bundled libraries ---"
-          du -sh "$APPIMAGE"
-          sha256sum "$APPIMAGE"
+          target: x86_64-unknown-linux-gnu
+          artifact-name: appimage-linux-x64
 
       - name: Upload AppImage
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: appimage-linux-x64
-          path: Releases/*.AppImage
+          path: ${{ steps.gate.outputs.appimage }}
           if-no-files-found: error
           retention-days: 14
