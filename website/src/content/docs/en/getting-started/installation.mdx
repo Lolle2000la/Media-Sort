@@ -46,8 +46,13 @@ What the host still has to provide:
 
 - a 64-bit (x86_64 or aarch64) Linux desktop with an X11 or Wayland session,
 - **glibc 2.35 or newer** (Ubuntu 22.04+, Debian 12+, Fedora 36+, current Arch) —
-  the AppImage is built against that floor on purpose, so it also runs on older
-  distributions than the one it was compiled on,
+  the AppImage is compiled _inside_ Ubuntu 22.04, so it runs on that release and
+  everything **newer**; a distribution whose glibc is older than 2.35 cannot load
+  it,
+- your distribution's ALSA (`libasound`), C++ runtime (`libstdc++`) and `libdrm`
+  libraries. These are the system interfaces your distribution's own plugins and
+  GPU drivers bind to, so bundling them would break audio and video decoding
+  instead of helping; every desktop distribution ships them,
 - a working graphics driver with Vulkan (preferred) or OpenGL, which renders the
   video frames. Driver libraries are deliberately **not** bundled, because they
   must match your kernel and GPU,
@@ -55,8 +60,8 @@ What the host still has to provide:
   hardware-accelerated video decoding.
 
 ```bash
-chmod +x MediaSort-*-linux-x64.AppImage
-./MediaSort-*-linux-x64.AppImage
+chmod +x MediaSort-*-linux-*.AppImage
+./MediaSort-*-linux-*.AppImage
 ```
 
 On a system without FUSE (for example inside a container), add

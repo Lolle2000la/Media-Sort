@@ -38,13 +38,14 @@ AppImageには必要なものがすべて同梱されています：`libmpv`（f
 ホスト側で引き続き必要なもの：
 
 - X11またはWaylandセッションを持つ64ビット（x86_64またはaarch64）のLinuxデスクトップ
-- **glibc 2.35以降**（Ubuntu 22.04以降、Debian 12以降、Fedora 36以降、最新のArch）— AppImageは意図的にこの下限に対してビルドされているため、コンパイルした環境より古いディストリビューションでも動作します
+- **glibc 2.35以降**（Ubuntu 22.04以降、Debian 12以降、Fedora 36以降、最新のArch）— AppImageは意図的にUbuntu 22.04の*内部*でコンパイルされているため、そのリリース以降、つまり**より新しい**ディストリビューションで動作します。glibcが2.35より古いディストリビューションでは読み込めません
+- お使いのディストリビューションのALSA（`libasound`）、C++ランタイム（`libstdc++`）、`libdrm`ライブラリ。これらはディストリビューション自身のプラグインやGPUドライバーが結び付くシステムインターフェースであり、同梱するとオーディオや動画デコードが壊れてしまいます。デスクトップ向けディストリビューションにはすべて含まれています
 - 映像フレームを描画するための、Vulkan（推奨）またはOpenGL対応のグラフィックスドライバー。ドライバーライブラリはカーネルとGPUに一致する必要があるため、意図的に**同梱していません**
 - オプション：ディストリビューションが提供するVA-APIドライバー（ハードウェア支援による動画デコードが有効になります）
 
 ```bash
-chmod +x MediaSort-*-linux-x64.AppImage
-./MediaSort-*-linux-x64.AppImage
+chmod +x MediaSort-*-linux-*.AppImage
+./MediaSort-*-linux-*.AppImage
 ```
 
 FUSEのない環境（コンテナなど）では `--appimage-extract-and-run` を付けて実行してください。

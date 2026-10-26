@@ -47,8 +47,14 @@ Was der Host weiterhin bereitstellen muss:
 
 - einen 64-Bit-Linux-Desktop (x86_64 oder aarch64) mit X11- oder Wayland-Sitzung,
 - **glibc 2.35 oder neuer** (Ubuntu 22.04+, Debian 12+, Fedora 36+, aktuelles Arch) —
-  das AppImage wird bewusst gegen diese Untergrenze gebaut und läuft damit auch
-  auf älteren Distributionen als der, auf der es kompiliert wurde,
+  das AppImage wird bewusst _innerhalb_ von Ubuntu 22.04 kompiliert und läuft
+  damit auf dieser Version und allem, was **neuer** ist; eine Distribution mit
+  einem älteren glibc als 2.35 kann es nicht laden,
+- die ALSA- (`libasound`), C++-Laufzeit- (`libstdc++`) und `libdrm`-Bibliotheken
+  Ihrer Distribution. Das sind die Systemschnittstellen, an die die Plugins und
+  GPU-Treiber Ihrer Distribution binden — mitgeliefert würden sie Audio und
+  Videodekodierung brechen statt helfen; jede Desktop-Distribution bringt sie
+  mit,
 - einen funktionierenden Grafiktreiber mit Vulkan (bevorzugt) oder OpenGL, der die
   Videobilder rendert. Treiberbibliotheken werden bewusst **nicht** mitgeliefert,
   da sie zu Kernel und GPU passen müssen,
@@ -56,8 +62,8 @@ Was der Host weiterhin bereitstellen muss:
   hardwarebeschleunigte Videodekodierung aktiviert.
 
 ```bash
-chmod +x MediaSort-*-linux-x64.AppImage
-./MediaSort-*-linux-x64.AppImage
+chmod +x MediaSort-*-linux-*.AppImage
+./MediaSort-*-linux-*.AppImage
 ```
 
 Auf Systemen ohne FUSE (etwa in einem Container) zusätzlich
