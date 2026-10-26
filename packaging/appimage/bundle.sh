@@ -99,7 +99,9 @@ stage() {
   local queue=("$libmpv" "$prefix/bin/ffmpeg" "$@") extra missing=()
   for extra in "${dlopened[@]}"; do
     local resolved
-    resolved=$(ldconfig -p 2>/dev/null | awk -v n="$extra" '$1 == n { print $NF; exit }')
+    # No `exit` inside awk: it closes the pipe, ldconfig takes SIGPIPE, and
+    # `set -o pipefail` turns that into a 141 for the whole assignment.
+    resolved=$(ldconfig -p 2>/dev/null | awk -v n="$extra" '$1 == n { found = $NF } END { if (found != "") print found }')
     if [ -n "$resolved" ] && [ -e "$resolved" ]; then
       queue+=("$resolved")
     else
