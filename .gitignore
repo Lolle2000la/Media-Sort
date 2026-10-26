@@ -46,6 +46,13 @@ ui_test_config.toml
 # Rust toolchain and its cargo home. Never committed -- every pinned source is
 # re-downloaded and sha256-verified on each release.
 /.appimage-build/
+# Local AppImage packing leftovers (packaging/appimage/pack-appimage.sh):
+# `vpk pack` writes Releases/, `--appimage-extract` writes squashfs-root/, and
+# dist/ holds the staging + AppDir. Leaving them untracked-but-listed in
+# `git status` made scripts/release.sh refuse to cut a release.
+/squashfs-root/
+/dist/
+/Releases/
 
 # Flatpak build artifacts (local `flatpak-builder`; see flatpak/README.md).
 /build-dir/

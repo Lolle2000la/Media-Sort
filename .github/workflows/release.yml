@@ -165,8 +165,11 @@ jobs:
             # paper over a link against a host library. squashfs-tools unpacks
             # the intermediate AppImage, patchelf writes the $ORIGIN RPATHs and
             # xvfb drives the "does the GUI get past the loader" check.
+            # libasound2/libdrm2 are host-provided by policy (they are part of
+            # the documented floor, see packaging/appimage/excludelist), so the
+            # gate needs them present to start the app at all.
             sudo apt-get update
-            sudo apt-get install -y squashfs-tools patchelf xvfb
+            sudo apt-get install -y squashfs-tools patchelf xvfb libasound2 libdrm2
 
       - name: Install System Dependencies (macOS Only)
         if: startsWith(matrix.os, 'macos')
@@ -335,52 +338,13 @@ jobs:
 
             vpk pack -u MediaSort -v "$CLEAN_VERSION" -p dist -e ${{ matrix.exe_name }} --icon "dist/icon.ico" --channel ${{ matrix.platform }} --runtime ${{ matrix.platform }} --framework ${{ matrix.vcredist }}
           else
-            # Stage only the compiled binary to prevent bundling Cargo build cache
-            mkdir -p dist/linux-staging
-            cp "$TARGET_DIR/media-sort-gui" dist/linux-staging/
-
-            # Generate initial layout with default update manifests
-            vpk pack -u MediaSort -v "$CLEAN_VERSION" -p "dist/linux-staging" -e media-sort-gui --icon "packaging/linux/icon.svg" --channel ${{ matrix.platform }} --runtime ${{ matrix.platform }}
-
-            # Unpack the intermediate AppImage artifact
-            APPIMAGE_PATH=$(ls Releases/*.AppImage | head -n 1)
-            chmod +x "$APPIMAGE_PATH"
-            "$APPIMAGE_PATH" --appimage-extract
-            
-            # Purge baseline outputs to prevent circular duplication
-            rm -f Releases/*.AppImage
-            rm -f Releases/*.nupkg
-
-            # Bundle the payload. target/appimage-stage was produced by the
-            # Ubuntu 22.04 container above (build-in-container.sh): libmpv,
-            # ffmpeg, dav1d, libass, zimg, libav*, libasound, libpulse, X11 and
-            # Wayland, named by SONAME. bundle.sh installs them into
-            # usr/lib + usr/bin and writes $ORIGIN RPATHs, so nothing is
-            # resolved from the host except glibc and the GPU driver stack.
-            bash packaging/appimage/bundle.sh install squashfs-root target/appimage-stage
-
-            # Gate the payload before it is sealed into the AppImage: glibc
-            # floor, NEEDED resolution, libmpv/ffmpeg presence, ffmpeg
-            # PNG-encode/decode, and a GUI start under Xvfb.
-            bash packaging/appimage/verify.sh squashfs-root
-
-            # Surgically modify vpk-generated desktop file (preserves vendor metadata)
-            TARGET_DESKTOP="squashfs-root/MediaSort.desktop"
-            sed -i 's/^Name=.*/Name=Media Sort/' "$TARGET_DESKTOP"
-            sed -i 's/^Exec=.*/& %U/' "$TARGET_DESKTOP"
-            sed -i 's/^StartupWMClass=.*/StartupWMClass=MediaSort/' "$TARGET_DESKTOP"
-            printf '\n%s\n' "MimeType=inode/directory;" >> "$TARGET_DESKTOP"
-
-            # Mirror adjusted launcher to standard layout paths
-            mkdir -p squashfs-root/usr/share/applications
-            cp "$TARGET_DESKTOP" squashfs-root/usr/share/applications/MediaSort.desktop
-
-            # Re-stage into a clean AppDir context and execute final compilation
-            rm -rf dist
-            mkdir -p dist
-            mv squashfs-root dist/MediaSort.AppDir
-
-            vpk pack -u MediaSort -v "$CLEAN_VERSION" -p "dist/MediaSort.AppDir" -e media-sort-gui --channel ${{ matrix.platform }} --runtime ${{ matrix.platform }}
+            # Two-pass pack: vpk writes the AppDir skeleton from the bare binary,
+            # the payload is bundled into it and gated, the desktop entry is
+            # fixed up, and the finished AppDir is packed again. The whole flow
+            # lives in packaging/appimage/pack-appimage.sh so it cannot drift
+            # from .github/workflows/appimage.yml.
+            TARGET_DIR="$TARGET_DIR" \
+              bash packaging/appimage/pack-appimage.sh "$CLEAN_VERSION" "${{ matrix.platform }}"
 
             # Re-verify the sealed AppImage: this extracts the final squashfs
             # and runs the GUI through the AppImage runtime
