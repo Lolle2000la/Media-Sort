@@ -33,6 +33,17 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 die() { printf 'pack-appimage: ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf 'pack-appimage: %s\n' "$*"; }
 
+# The one AppImage in Releases/: the intermediate artifact after pass 1, the
+# shippable one after pass 2. Fails when the count is not exactly one, so a
+# stale file from an earlier run can never be picked (or shipped) by accident.
+sole_appimage() {
+  local found=()
+  mapfile -t found < <(ls Releases/*.AppImage 2>/dev/null || true)
+  [ ${#found[@]} -eq 1 ] \
+    || die "expected exactly one AppImage in Releases/, found ${#found[@]}: ${found[*]:-none}"
+  printf '%s\n' "${found[0]}"
+}
+
 usage() {
   sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 2
@@ -52,21 +63,26 @@ done
 [ -x "$TARGET_DIR/media-sort-gui" ] || die "no $TARGET_DIR/media-sort-gui (build the payload in the Ubuntu 22.04 container first)"
 [ -d "$STAGE_DIR/lib" ] || die "no staged payload in $STAGE_DIR (run packaging/appimage/build-in-container.sh first)"
 
-# Pass 1: let vpk build the AppDir skeleton from the bare binary.
-mkdir -p dist/linux-staging
+# Pass 1: let vpk build the AppDir skeleton from the bare binary. Any AppImage a
+# previous run left in Releases/ goes first: the lookup below has to find exactly
+# the one this pass produced, and `ls Releases/*.AppImage | head -n 1` would
+# otherwise silently pick a stale artifact on a documented re-run.
+mkdir -p dist/linux-staging Releases
 cp "$TARGET_DIR/media-sort-gui" dist/linux-staging/
+rm -f Releases/*.AppImage
 
 log "pass 1: vpk pack $VERSION ($CHANNEL) from the bare binary"
 vpk pack -u MediaSort -v "$VERSION" -p dist/linux-staging -e media-sort-gui \
   --icon packaging/linux/icon.svg --channel "$CHANNEL" --runtime "$CHANNEL"
 
-# Unpack the intermediate AppImage artifact.
-APPIMAGE_PATH=$(ls Releases/*.AppImage | head -n 1)
+# Unpack the intermediate AppImage artifact; exactly one must exist (sole_appimage
+# dies inside its subshell, so the `|| exit 1` propagates that here).
+APPIMAGE_PATH=$(sole_appimage) || exit 1
 chmod +x "$APPIMAGE_PATH"
 "$APPIMAGE_PATH" --appimage-extract
 
-# Purge baseline outputs to prevent circular duplication.
-rm -f Releases/*.AppImage
+# Purge the baseline packages to prevent circular duplication (the AppImages are
+# already gone, above). The second pass writes the packages that ship.
 rm -f Releases/*.nupkg
 
 # Bundle the payload: target/appimage-stage was produced inside the Ubuntu 22.04
@@ -100,4 +116,4 @@ log "pass 2: vpk pack $VERSION ($CHANNEL) from the finished AppDir"
 vpk pack -u MediaSort -v "$VERSION" -p dist/MediaSort.AppDir -e media-sort-gui \
   --channel "$CHANNEL" --runtime "$CHANNEL"
 
-log "done: $(ls Releases/*.AppImage | head -n 1)"
+log "done: $(sole_appimage)" || exit 1

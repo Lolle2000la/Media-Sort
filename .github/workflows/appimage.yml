@@ -16,9 +16,11 @@ name: AppImage Packaging
 # .github/workflows/flatpak-build.yml.
 #
 # `vpk pack` works standalone -- it only writes local packages; the
-# `vpk download github` step in release.yml exists solely to build delta
-# updates against the previous release, so this workflow skips it and uses a
-# throwaway version.
+# `vpk download github` step in release.yml pulls the previous release's
+# packages so deltas can be built against them. Only the Windows and macOS legs
+# get a delta out of that: the Linux flow (pack-appimage.sh) purges
+# Releases/*.nupkg after its first pass, so no Linux delta is ever produced. This
+# workflow therefore skips the download and uses a throwaway version.
 on:
   pull_request:
     paths: &paths
@@ -68,10 +70,13 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          # libasound2/libdrm2 are host-provided by policy (see
+          # libasound2t64/libdrm2 are host-provided by policy (see
           # packaging/appimage/excludelist): without them the GUI check cannot
-          # get past the loader on a bare runner, and the gate fails.
-          sudo apt-get install -y squashfs-tools patchelf xvfb libasound2 libdrm2
+          # get past the loader on a bare runner, and the gate fails. The ALSA
+          # runtime library is `libasound2t64` on Ubuntu 24.04+ -- `libasound2`
+          # is a virtual package there with two providers, so apt refuses it.
+          # xdotool makes verify.sh's informational window probe run.
+          sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2
 
       - name: Setup .NET SDK (For vpk CLI)
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0

@@ -164,12 +164,16 @@ jobs:
             # packaging/appimage/), so a *-dev package on the runner could only
             # paper over a link against a host library. squashfs-tools unpacks
             # the intermediate AppImage, patchelf writes the $ORIGIN RPATHs and
-            # xvfb drives the "does the GUI get past the loader" check.
-            # libasound2/libdrm2 are host-provided by policy (they are part of
-            # the documented floor, see packaging/appimage/excludelist), so the
-            # gate needs them present to start the app at all.
+            # xvfb drives the "does the GUI get past the loader" check; xdotool
+            # makes its informational window probe actually run.
+            # libasound2t64/libdrm2 are host-provided by policy (they are part
+            # of the documented floor, see packaging/appimage/excludelist), so
+            # the gate needs them present to start the app at all. The ALSA
+            # runtime library is `libasound2t64` on Ubuntu 24.04+ (`libasound2`
+            # is a virtual package there with two providers, so apt refuses to
+            # install it by that name) and `libasound2` on 22.04.
             sudo apt-get update
-            sudo apt-get install -y squashfs-tools patchelf xvfb libasound2 libdrm2
+            sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2
 
       - name: Install System Dependencies (macOS Only)
         if: startsWith(matrix.os, 'macos')
