@@ -116,4 +116,5 @@ log "pass 2: vpk pack $VERSION ($CHANNEL) from the finished AppDir"
 vpk pack -u MediaSort -v "$VERSION" -p dist/MediaSort.AppDir -e media-sort-gui \
   --channel "$CHANNEL" --runtime "$CHANNEL"
 
-log "done: $(sole_appimage)" || exit 1
+final_appimage=$(sole_appimage) || exit 1
+log "done: $final_appimage"

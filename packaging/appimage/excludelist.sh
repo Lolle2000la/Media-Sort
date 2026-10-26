@@ -65,7 +65,10 @@ is_excluded() {
 # ./excludelist entry, or the family reason for the glob patterns above.
 host_reason() {
   local name=$1 reason
-  reason=$(excludelist_entry_reason "$name")
+  # `|| true`: a name that is only covered by a driver glob has no exact entry,
+  # and excludelist_entry_reason() signals that with status 1. Under `set -e`
+  # that would abort this function instead of falling through to the globs.
+  reason=$(excludelist_entry_reason "$name") || true
   if [ -n "$reason" ]; then
     printf '%s' "$reason"
     return 0

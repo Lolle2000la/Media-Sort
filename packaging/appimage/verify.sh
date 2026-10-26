@@ -121,8 +121,20 @@ gui_exit_is_expected() {
   return 1
 }
 
-# The negative probe for gui_exit_is_expected: fake logs and exit statuses, no
-# payload needed. Fails when a case is decided the other way round.
+# Statuses that can never be an acceptable GUI exit, whatever the log says:
+# 0 (silent quit), 101 (Rust panic), 126/127 (not executable / command not
+# found) and the fatal signals. Separate from gui_exit_is_expected() so the
+# main check can pick its message and --selftest can prove every arm still
+# rejects what it used to.
+gui_status_is_hard_failure() {
+  case "$1" in
+    0|101|126|127|134|136|139) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The negative probe for the GUI exit classification: fake logs and exit
+# statuses, no payload needed. Fails when a case is decided the other way round.
 selftest() {
   local dir
   dir=$(mktemp -d "${TMPDIR:-/tmp}/appimage-selftest.XXXXXX")
@@ -153,6 +165,25 @@ selftest() {
   probe fail 1 500 "thread 'main' panicked at iced_winit-0.14.1/src/lib.rs:120:5: assertion failed"
   probe fail 1 500 ''
   probe fail 1 500 'Error: failed to read config.toml'
+  # The main check's hard-failure arms, probed directly: a regression that drops
+  # one of these statuses from the gate must fail here.
+  local status
+  for status in 0 101 126 127 134 136 139; do
+    if gui_status_is_hard_failure "$status"; then
+      ok "selftest: status $status is a hard failure"
+    else
+      printf 'verify: FAIL: selftest: status %s must be a hard failure\n' "$status" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  for status in 1 3 124; do
+    if gui_status_is_hard_failure "$status"; then
+      printf 'verify: FAIL: selftest: status %s must not be a hard failure\n' "$status" >&2
+      failures=$((failures + 1))
+    else
+      ok "selftest: status $status is decided by the log, not the code"
+    fi
+  done
   rm -rf "$dir"
   [ "$failures" -eq 0 ] || die "$failures selftest probe(s) decided the wrong way"
   ok "selftest: every probe decided as intended"
@@ -168,6 +199,11 @@ while [ $# -gt 0 ]; do
     *) [ -z "$TARGET" ] || die "more than one payload given"; TARGET=$1; shift ;;
   esac
 done
+
+# Every real run proves the exit classification still rejects panics, crashes
+# and silent quits (--selftest does only this and exits). Milliseconds, and no
+# payload needed, so there is no reason for the probe to rot unused.
+selftest
 [ -n "$TARGET" ] || die "no AppDir/AppImage given (see --help)"
 [ -e "$TARGET" ] || die "no such file: $TARGET"
 
@@ -370,8 +406,9 @@ while IFS= read -r name; do
   # the bare link-time name behind a staged SONAME ("libX11.so" -> libX11.so.6),
   # or when the mention is the fully versioned file name of a staged SONAME
   # ("libogg.so.0.8.5", "libsndfile.so.1.0" -> we stage libogg.so.0,
-  # libsndfile.so.1). The '.' in the pattern keeps "libXi.so.6" from being
-  # satisfied by an unrelated "libXi.so.6.1.2"-style neighbour.
+  # libsndfile.so.1). The trailing '.' in the pattern is what keeps
+  # "libXi.so.6" from being satisfied by "libXi.so.60"; a longer name with the
+  # same SONAME ("libXi.so.6.1.2") is the same library and does match.
   bundled_as=""
   while IFS= read -r staged; do
     [ -n "$staged" ] || continue
@@ -558,30 +595,32 @@ else
     124)
       ok "$gui_name still running after ${gui_ms} ms under Xvfb (expected for a GUI)"
       ;;
-    0)
-      cat "$WORK/gui.log" >&2
-      die "$gui_name exited 0 after ${gui_ms} ms under Xvfb: a GUI that quit immediately is a regression, not a pass"
-      ;;
-    126|127)
-      cat "$WORK/gui.log" >&2
-      die "$gui_name could not be executed under Xvfb (status $gui_status: not executable / command not found)"
-      ;;
-    134|136|139)
-      cat "$WORK/gui.log" >&2
-      case "$gui_status" in
-        134) sig=SIGABRT ;;
-        136) sig=SIGFPE ;;
-        *)   sig=SIGSEGV ;;
-      esac
-      die "$gui_name died from $sig (status $gui_status) after ${gui_ms} ms under Xvfb"
-      ;;
-    101)
-      # Rust's panic exit code. A startup panic in the window/render stack is the
-      # crash this check exists to catch, whatever the panic location is called.
-      cat "$WORK/gui.log" >&2
-      die "$gui_name exited 101 after ${gui_ms} ms under Xvfb: that is a Rust panic in the startup path, not the expected GPU-less exit"
-      ;;
     *)
+      if gui_status_is_hard_failure "$gui_status"; then
+        cat "$WORK/gui.log" >&2
+        case "$gui_status" in
+          0)
+            die "$gui_name exited 0 after ${gui_ms} ms under Xvfb: a GUI that quit immediately is a regression, not a pass"
+            ;;
+          101)
+            # Rust's panic exit code. A startup panic in the window/render stack
+            # is the crash this check exists to catch, whatever the panic
+            # location is called.
+            die "$gui_name exited 101 after ${gui_ms} ms under Xvfb: that is a Rust panic in the startup path, not the expected GPU-less exit"
+            ;;
+          126|127)
+            die "$gui_name could not be executed under Xvfb (status $gui_status: not executable / command not found)"
+            ;;
+          *)
+            case "$gui_status" in
+              134) sig=SIGABRT ;;
+              136) sig=SIGFPE ;;
+              *)   sig=SIGSEGV ;;
+            esac
+            die "$gui_name died from $sig (status $gui_status) after ${gui_ms} ms under Xvfb"
+            ;;
+        esac
+      fi
       # A GPU-less Xvfb has no Vulkan/GL device, so iced can legitimately exit;
       # that is not what this gate is about. But an *early* exit without a
       # driver/graphics complaint is not that: it is a crash or a silent quit
