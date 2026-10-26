@@ -6,28 +6,35 @@
 #      (default 2.35, the jammy glibc the payload is built against) and none
 #      carries a GLIBC_ABI_* reference (every one of those implies >= 2.36);
 #   b) every DT_NEEDED of the packaged ELFs resolves from inside the AppDir,
-#      except the host-provided allowlist in ./excludelist -- and every
-#      host-provided library the payload still needs is reported as the floor;
-#   c) every library name the shipped GUI binary mentions (its `strings`
-#      manifest, i.e. linked *and* dlopen'd dependencies) is decided: bundled
-#      in usr/lib, or on the host-provided allowlist with a reason;
+#      except the host-provided allowlist in ./excludelist -- and the floor the
+#      payload leaves for the host (glibc, libstdc++, libasound, libdrm and the
+#      GPU/driver stack) is printed on every run;
+#   c) every library name *any* payload ELF mentions (the `strings` manifest of
+#      the GUI binary, of every bundled library, plus the dlopen-only list in
+#      excludelist.sh) is decided: bundled in usr/lib, or on the host-provided
+#      allowlist with a reason;
 #   d) usr/lib/libmpv.so.2 is present;
 #   e) the bundled ffmpeg runs, encodes a PNG (video thumbnails), decodes it
 #      back, and decodes a real AV1 file with the bundled libdav1d;
 #   f) the GUI starts under a virtual X server without a single
-#      "error while loading shared libraries", without a startup crash, and
-#      without dying silently before it has had time to initialise (it may die
-#      later for lack of a GPU, which is not this check's business).
+#      "error while loading shared libraries", without a startup crash (a Rust
+#      panic exits 101 and is always fatal), and without dying silently before
+#      it has had time to initialise (it may die later for lack of a GPU, which
+#      is not this check's business).
 #
 # Usage: verify.sh <path-to-AppDir|path-to.AppImage> [--max-glibc X.Y] [--skip-gui]
+#        verify.sh --selftest
 #
 # An .AppImage argument is unpacked with `--appimage-extract` first (no FUSE
 # needed); the GUI check then runs the AppImage itself through
 # `--appimage-extract-and-run`, which also proves the FUSE-less path works.
+# `--selftest` exercises check (f)'s exit predicate against fake logs and exit
+# statuses (no payload needed): it is the negative probe for that predicate.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-EXCLUDELIST=$SCRIPT_DIR/excludelist
+# shellcheck source=excludelist.sh
+. "$SCRIPT_DIR/excludelist.sh"
 
 MAX_GLIBC=2.35
 SKIP_GUI=0
@@ -41,60 +48,6 @@ is_elf() {
   [ -f "$1" ] && [ "$(head -c 4 "$1" | od -An -c | tr -d ' \n')" = '177ELF' ]
 }
 
-is_excluded() {
-  local name=$1
-  awk -v n="$name" '
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*$/ { next }
-    { candidate = $1; sub(/:$/, "", candidate); if (candidate == n) found = 1 }
-    END { exit(found ? 0 : 1) }
-  ' "$EXCLUDELIST" && return 0
-  case "$name" in
-    libGL*.so*|libEGL*.so*|libOpenGL*.so*|\
-    libgbm*.so*|libglapi*.so*|libvulkan*.so*|\
-    libnvidia*.so*|libcuda*.so*|libmali*.so*|libd3d*.so*|libwsl*.so*|\
-    *_drv_video.so|*_driver_video.so)
-      return 0 ;;
-  esac
-  return 1
-}
-
-# One-line reason why a name is host-provided: the second field of its
-# ./excludelist entry, or the family reason for the glob patterns above.
-host_reason() {
-  local name=$1 reason
-  reason=$(awk -v n="$name" '
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*$/ { next }
-    { candidate = $1; sub(/:$/, "", candidate)
-      if (candidate != n) next
-      rest = $0
-      sub(/^[[:space:]]*[^ ]*:?[[:space:]]*/, "", rest)
-      if (rest != "") { print rest; exit }
-    }
-  ' "$EXCLUDELIST")
-  if [ -n "$reason" ]; then
-    printf '%s' "$reason"
-    return 0
-  fi
-  case "$name" in
-    libOpenGL*.so*)
-      printf 'GPU: OpenGL entry point, resolves to the host kernel driver' ;;
-    libGL*.so*)
-      printf 'GPU: GL/GLX/GLdispatch entry point, resolves to the host kernel driver' ;;
-    libEGL*.so*|libglapi*.so*|libgbm*.so*)
-      printf 'GPU: EGL/GBM/Mesa entry point, must match the host driver' ;;
-    libvulkan*.so*|*_drv_video.so|*_driver_video.so)
-      printf 'GPU: driver/ICD, must match the host kernel driver and GPU' ;;
-    ld-linux*.so.*|ld64.so.2)
-      printf 'glibc loader: must be the running system'"'"'s' ;;
-    libnvidia*.so*|libcuda*.so*|libmali*.so*|libd3d*.so*|libwsl*.so*)
-      printf 'GPU: vendor driver/userspace, must match the host kernel driver' ;;
-    *)
-      printf 'host-provided (see ./excludelist)' ;;
-  esac
-}
-
 # True when <a> is a version >= <b> (both X.Y[.Z]).
 version_ge() {
   [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
@@ -104,11 +57,113 @@ needed_of() {
   readelf -d "$1" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'
 }
 
+# Where <name> resolves on *this* host, for the floor table.
+host_lib_note() {
+  local name=$1 path
+  # `|| true`: awk exits at the first match, so ldconfig can die of SIGPIPE and
+  # pipefail would abort this script over a purely informational lookup.
+  path=$(ldconfig -p 2>/dev/null | awk -v n="$name" '$1 == n { print $NF; exit }' || true)
+  if [ -n "$path" ] && [ -e "$path" ]; then
+    printf 'present here at %s' "$path"
+  else
+    printf 'not installed on this host'
+  fi
+}
+
+floor_row() { # <label> <text>
+  printf 'verify:   %-18s %s\n' "$1" "$2"
+}
+
+# Check (f)'s exit predicate, isolated so it can be probed without a payload
+# (--selftest). Returns 0 when a GUI exit is the *expected* failure of a machine
+# without a GPU or display, 1 when it must fail the gate (a startup crash or a
+# silent quit). Arguments: <exit status> <elapsed ms> <log file>.
+gui_exit_is_expected() {
+  local status=$1 ms=$2 log=$3
+  # A Rust panic exits with 101. That is a startup crash in the window/render
+  # stack -- exactly what this check exists to catch -- even when the panic
+  # location happens to name a graphics crate. So 101 is fatal outright, and any
+  # "panicked at" line in the log is fatal too: a panic is never a GPU-less exit.
+  [ "$status" != 101 ] || return 1
+  if [ -f "$log" ] && grep -q 'panicked at' "$log"; then
+    return 1
+  fi
+  # Only an *early* exit without a diagnostic is a silent quit; a later non-zero
+  # exit is what a GPU-less Xvfb produces once the app has tried to start.
+  [ "$ms" -lt 3000 ] || return 0
+  # Deliberately narrow, specific diagnostics. Broad words ("winit", "vulkan",
+  # "adapter", "display") appear in panic locations and unrelated log lines too
+  # and excused real crashes. These are the actual messages of a start without a
+  # GPU or without a display:
+  #   iced_wgpu     "no adapter was found for the options requested: ..."
+  #   iced_graphics "a suitable graphics adapter or device could not be found"
+  #   winit         "Failed to open connection to X server" (no DISPLAY)
+  local patterns=(
+    'no adapter was found'
+    'suitable graphics adapter'
+    'unable to find a gpu|no gpu adapter'
+    'missing vulkan'
+    'vulkan (is )?not (available|found|present|supported)'
+    'unable to create .*(context|surface|device|adapter|renderer)'
+    'failed to create .*(context|surface|device|adapter|window)'
+    'failed to open connection to [xX] server'
+    '(cannot|unable to|failed to) open (the )?display'
+    'display is not set'
+    'cannot autolaunch'
+    'failed to initialize any backend'
+  )
+  local pattern
+  for pattern in "${patterns[@]}"; do
+    if grep -qiE "$pattern" "$log" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The negative probe for gui_exit_is_expected: fake logs and exit statuses, no
+# payload needed. Fails when a case is decided the other way round.
+selftest() {
+  local dir
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/appimage-selftest.XXXXXX")
+  local failures=0
+  probe() { # <expected: pass|fail> <status> <ms> <log text>
+    local expected=$1 status=$2 ms=$3 text=$4
+    printf '%s\n' "$text" >"$dir/log"
+    local got=pass
+    gui_exit_is_expected "$status" "$ms" "$dir/log" || got=fail
+    if [ "$got" = "$expected" ]; then
+      ok "selftest: status $status / ${ms} ms / ${text:-<empty log>} -> $got"
+    else
+      printf 'verify: FAIL: selftest expected %s for status %s / %s ms: %s\n' \
+        "$expected" "$status" "$ms" "${text:-<empty log>}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+  # A GPU-less adapter failure is the one exit class that may pass...
+  probe pass 1 800 'Error: no adapter was found for the options requested: RequestAdapterOptions { power_preference: None, compatible_surface: None, force_fallback_adapter: false }'
+  probe pass 1 800 'a suitable graphics adapter or device could not be found'
+  probe pass 1 800 'Failed to open connection to X server'
+  probe pass 9 5000 'some late log line'
+  # ...while a panic, a silent early exit and an unrelated error may not. The
+  # second case is the defect this predicate exists for: the crash location
+  # names a graphics crate, which the old broad pattern ("winit|adapter|gpu")
+  # treated as a GPU complaint.
+  probe fail 101 500 "thread 'main' panicked at iced_wgpu-0.14.0/src/window/compositor.rs:92:14: no adapter"
+  probe fail 1 500 "thread 'main' panicked at iced_winit-0.14.1/src/lib.rs:120:5: assertion failed"
+  probe fail 1 500 ''
+  probe fail 1 500 'Error: failed to read config.toml'
+  rm -rf "$dir"
+  [ "$failures" -eq 0 ] || die "$failures selftest probe(s) decided the wrong way"
+  ok "selftest: every probe decided as intended"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-glibc) MAX_GLIBC=$2; shift 2 ;;
     --skip-gui) SKIP_GUI=1; shift ;;
-    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --selftest) selftest; exit 0 ;;
+    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [ -z "$TARGET" ] || die "more than one payload given"; TARGET=$1; shift ;;
   esac
@@ -152,15 +207,12 @@ done)
 max_glibc=0.0
 worst=""
 abi_refs=()
+glibc_rows=()
 for elf in "${ELFS[@]}"; do
   v=$(readelf --version-info "$elf" 2>/dev/null | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
         | sed 's/^GLIBC_//' | sort -V | tail -n 1 || true)
   if [ -n "$v" ]; then
-    if [ "$(printf '%s\n%s\n' "$max_glibc" "$v" | sort -V | tail -n 1)" = "$v" ] \
-       && [ "$v" != "$max_glibc" ]; then
-      max_glibc=$v
-      worst=$elf
-    fi
+    glibc_rows+=("$v"$'\t'"${elf#"$PAYLOAD"/}")
   fi
   # A GLIBC_ABI_* requirement (e.g. GLIBC_ABI_DT_RELR, added by
   # -z pack-relative-relocs) is versioned differently and slipped past the
@@ -171,6 +223,14 @@ for elf in "${ELFS[@]}"; do
     abi_refs+=("${elf#"$PAYLOAD"/}: $abi (implies glibc >= 2.36)")
   done < <(readelf --version-info "$elf" 2>/dev/null | grep -oE 'GLIBC_ABI_[A-Za-z0-9_]+' | sort -u || true)
 done
+# Deterministic "worst file": every file that hits the maximum, sorted, so two
+# runs over the same payload always name the same one (the ELF list is a `find`
+# walk and its order is not part of any contract).
+if [ ${#glibc_rows[@]} -gt 0 ]; then
+  max_glibc=$(printf '%s\n' "${glibc_rows[@]}" | cut -f1 | sort -V | tail -n 1)
+  worst=$(printf '%s\n' "${glibc_rows[@]}" \
+    | awk -F'\t' -v m="$max_glibc" '$1 == m { print $2 }' | sort | head -n 1)
+fi
 [ "$max_glibc" != "0.0" ] || die "found no GLIBC_* version references at all -- suspicious"
 if [ ${#abi_refs[@]} -gt 0 ] && ! version_ge "$MAX_GLIBC" 2.36; then
   printf 'verify: FAIL: GLIBC_ABI_* version requirements, above the %s floor:\n' "$MAX_GLIBC" >&2
@@ -178,14 +238,14 @@ if [ ${#abi_refs[@]} -gt 0 ] && ! version_ge "$MAX_GLIBC" 2.36; then
   exit 1
 fi
 if ! version_ge "$MAX_GLIBC" "$max_glibc"; then
-  die "max GLIBC requirement is $max_glibc (in ${worst#"$PAYLOAD"/}), above the $MAX_GLIBC floor"
+  die "max GLIBC requirement is $max_glibc (in $worst), above the $MAX_GLIBC floor"
 fi
 if [ ${#abi_refs[@]} -gt 0 ]; then
   ok "${#abi_refs[@]} GLIBC_ABI_* requirement(s) present and allowed by the $MAX_GLIBC floor (they imply 2.36)"
 else
   ok "no GLIBC_ABI_* requirement (nothing needs glibc >= 2.36)"
 fi
-ok "max GLIBC_* version requirement: $max_glibc (limit $MAX_GLIBC), worst file ${worst#"$PAYLOAD"/}"
+ok "max GLIBC_* version requirement: $max_glibc (limit $MAX_GLIBC), worst file $worst"
 
 # ---------------------------------------------------------------------------
 # (b) nothing is resolved from the host
@@ -254,38 +314,80 @@ ok "dependency closure resolves inside the payload (${#ELFS[@]} ELFs checked)"
 
 if [ ${#host_required[@]} -gt 0 ]; then
   mapfile -t host_required < <(printf '%s\n' "${host_required[@]}" | sort -u)
-  log "host-provided libraries missing on this host (part of the documented floor, not a failure):"
+  log "host-provided libraries the loader could not find on this host (part of the floor below):"
   printf 'verify:   %s\n' "${host_required[@]}"
 fi
 
+# The floor is printed unconditionally: CI installs exactly these libraries, so
+# a list of what is *missing here* made the floor invisible in the very log the
+# release is built from.
+log "host floor -- provided by the host, never bundled (glibc and the GPU/driver stack):"
+floor_row "glibc + loader" ">= $MAX_GLIBC required (this payload asks for at most $max_glibc); libc/libm/libdl/librt/libpthread, the libnss_* modules and ld-linux-* are the running system's; $(host_lib_note libc.so.6)"
+floor_row "libstdc++.so.6" "$(host_reason libstdc++.so.6); $(host_lib_note libstdc++.so.6)"
+floor_row "libasound.so.2" "$(host_reason libasound.so.2); $(host_lib_note libasound.so.2)"
+floor_row "libdrm.so.2" "$(host_reason libdrm.so.2); $(host_lib_note libdrm.so.2)"
+floor_row "GPU/driver stack" "libGL*/libEGL*/libOpenGL*/libvulkan*/libdrm_* and the DRI/VA-API drivers must match the host kernel and GPU; $(host_lib_note libvulkan.so.1)"
+
 # ---------------------------------------------------------------------------
-# (c) every library name the shipped binary mentions is decided
+# (c) every library name any payload ELF mentions is decided
 # ---------------------------------------------------------------------------
 GUI_ELF=$PAYLOAD/usr/bin/media-sort-gui
 [ -f "$GUI_ELF" ] || die "usr/bin/media-sort-gui is missing, so the dlopen manifest cannot be derived"
-# Derived from the shipped ELF, not from a hand-written list: the manifest is
-# every library name the binary carries, i.e. its DT_NEEDED entries *and* the
-# names winit/iced/wgpu/x11-dl/rfd dlopen at runtime (libXcursor, libEGL,
-# libwayland-egl, libxkbcommon-x11, ...). A new dependency therefore forces a
-# decision here instead of shipping green.
+# Derived from the shipped ELFs, not from a hand-written list: the manifest is
+# every library name the payload *mentions* -- the DT_NEEDED entries and the
+# names winit/iced/wgpu/x11-dl/rfd dlopen at runtime of the GUI binary, and the
+# names bundled libraries mention internally (libva-x11 names libatiadlxx.so,
+# libva-wayland names libwayland-emgd.so.1: optional vendor drivers libva probes
+# for and tolerates when absent). Scanning only usr/bin/media-sort-gui left those
+# undecided and could not notice that bundle.sh staged a library nothing loads.
+# APPIMAGE_DLOPEN_ONLY (excludelist.sh) is unioned in because those are
+# dlopen-only by construction: no payload ELF has to mention them.
 # The base-name character class deliberately excludes '.': `strings` emits long
 # runs without separators, and a greedy `[A-Za-z0-9_+.-]+` glues "libXi.so.6"
 # and "libX11-xcb.so.1" into a single bogus name.
-manifest=$(strings "$GUI_ELF" | grep -oE 'lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*' | sort -u)
-[ -n "$manifest" ] || die "the strings manifest of usr/bin/media-sort-gui is empty -- suspicious"
+manifest_elfs=("$GUI_ELF")
+while IFS= read -r elf; do
+  is_elf "$elf" || continue
+  manifest_elfs+=("$elf")
+done < <(find "$PAYLOAD/usr/lib" "$PAYLOAD/usr/bin" -maxdepth 1 -type f | sort)
+manifest=$(
+  for elf in "${manifest_elfs[@]}"; do
+    strings "$elf" | grep -oE 'lib[A-Za-z0-9_+-]+\.so(\.[0-9]+)*' || true
+  done
+  printf '%s\n' "${APPIMAGE_DLOPEN_ONLY[@]}"
+)
+manifest=$(printf '%s\n' "$manifest" | sort -u)
+[ -n "$manifest" ] || die "the strings manifest of the payload is empty -- suspicious"
 manifest_bundled=()
 manifest_host=()
 manifest_undecided=()
+# The names the loader can satisfy from usr/lib: bundle.sh stages every library
+# under its SONAME, so the file names are exactly those names.
+staged_names=$(find "$PAYLOAD/usr/lib" -maxdepth 1 -type f -name '*.so*' -printf '%f\n' | sort)
 while IFS= read -r name; do
   [ -n "$name" ] || continue
-  if [ -e "$PAYLOAD/usr/lib/$name" ]; then
-    manifest_bundled+=("$name")
-    continue
-  fi
-  # A bare "libfoo.so" is a link-time name; it is decided when the payload
-  # carries the versioned SONAME the loader would pick for it.
-  if [ "${name%.so}" != "$name" ] && compgen -G "$PAYLOAD/usr/lib/$name".[0-9]* >/dev/null; then
-    manifest_bundled+=("$name (as $(cd "$PAYLOAD/usr/lib" && ls "$name".[0-9]* | head -n 1))")
+  # Decided as bundled when a staged name matches exactly, when the mention is
+  # the bare link-time name behind a staged SONAME ("libX11.so" -> libX11.so.6),
+  # or when the mention is the fully versioned file name of a staged SONAME
+  # ("libogg.so.0.8.5", "libsndfile.so.1.0" -> we stage libogg.so.0,
+  # libsndfile.so.1). The '.' in the pattern keeps "libXi.so.6" from being
+  # satisfied by an unrelated "libXi.so.6.1.2"-style neighbour.
+  bundled_as=""
+  while IFS= read -r staged; do
+    [ -n "$staged" ] || continue
+    case "$staged" in
+      "$name"|"$name".*) bundled_as=$staged; break ;;
+    esac
+    case "$name" in
+      "$staged".*) bundled_as=$staged; break ;;
+    esac
+  done <<<"$staged_names"
+  if [ -n "$bundled_as" ]; then
+    if [ "$bundled_as" = "$name" ]; then
+      manifest_bundled+=("$name")
+    else
+      manifest_bundled+=("$name (as $bundled_as)")
+    fi
     continue
   fi
   if is_excluded "$name"; then
@@ -295,7 +397,7 @@ while IFS= read -r name; do
   manifest_undecided+=("$name")
 done <<<"$manifest"
 
-log "dlopen manifest of usr/bin/media-sort-gui ($(printf '%s\n' "$manifest" | wc -l) names):"
+log "library-name manifest of the payload ($(printf '%s\n' "$manifest" | wc -l) names from ${#manifest_elfs[@]} ELFs plus the dlopen-only list):"
 for entry in "${manifest_bundled[@]}"; do
   printf 'verify:   bundled        %s\n' "$entry"
 done
@@ -303,12 +405,12 @@ for entry in "${manifest_host[@]}"; do
   printf 'verify:   host-provided  %s\n' "$entry"
 done
 if [ ${#manifest_undecided[@]} -gt 0 ]; then
-  printf 'verify: FAIL: library names mentioned by usr/bin/media-sort-gui are neither bundled nor on the host-provided allowlist:\n' >&2
+  printf 'verify: FAIL: library names mentioned by the payload are neither bundled nor on the host-provided allowlist:\n' >&2
   printf '  %s\n' "${manifest_undecided[@]}" >&2
   printf 'verify: bundle them (bundle.sh stage) or add them to packaging/appimage/excludelist with a one-line reason.\n' >&2
   exit 1
 fi
-ok "every library name in the strings manifest is decided (${#manifest_bundled[@]} bundled, ${#manifest_host[@]} host-provided)"
+ok "every library name in the manifest is decided (${#manifest_bundled[@]} bundled, ${#manifest_host[@]} host-provided)"
 
 # ---------------------------------------------------------------------------
 # (d) libmpv is in the payload
@@ -473,19 +575,26 @@ else
       esac
       die "$gui_name died from $sig (status $gui_status) after ${gui_ms} ms under Xvfb"
       ;;
+    101)
+      # Rust's panic exit code. A startup panic in the window/render stack is the
+      # crash this check exists to catch, whatever the panic location is called.
+      cat "$WORK/gui.log" >&2
+      die "$gui_name exited 101 after ${gui_ms} ms under Xvfb: that is a Rust panic in the startup path, not the expected GPU-less exit"
+      ;;
     *)
       # A GPU-less Xvfb has no Vulkan/GL device, so iced can legitimately exit;
       # that is not what this gate is about. But an *early* exit without a
       # driver/graphics complaint is not that: it is a crash or a silent quit
-      # that used to pass as "no loader errors".
-      if [ "$gui_ms" -lt 3000 ] \
-         && ! grep -qiE 'adapter|vulkan|gpu|surface|egl|gl context|graphics|winit|display' "$WORK/gui.log"; then
+      # that used to pass as "no loader errors". gui_exit_is_expected() holds the
+      # decision (and --selftest probes it).
+      if gui_exit_is_expected "$gui_status" "$gui_ms" "$WORK/gui.log"; then
+        log "note: $gui_name exited with status $gui_status after ${gui_ms} ms under Xvfb (no GPU);"
+        log "      no loader errors, which is what this check enforces. Last lines:"
+        sed -n '$p' "$WORK/gui.log" | sed 's/^/      /'
+      else
         cat "$WORK/gui.log" >&2
-        die "$gui_name exited with status $gui_status after ${gui_ms} ms without a GPU/graphics complaint: an early crash or silent exit, not the expected GPU-less failure"
+        die "$gui_name exited with status $gui_status after ${gui_ms} ms without an expected GPU/display diagnostic: an early crash, a panic, or a silent exit -- not the expected GPU-less failure"
       fi
-      log "note: $gui_name exited with status $gui_status after ${gui_ms} ms under Xvfb (no GPU);"
-      log "      no loader errors, which is what this check enforces. Last lines:"
-      sed -n '$p' "$WORK/gui.log" | sed 's/^/      /'
       ;;
   esac
 fi

@@ -11,7 +11,8 @@
 # SONAME / DT_NEEDED name (note: `bundle.sh` and `verify.sh` only look at the
 # first field, so the reason may contain spaces). Lines starting with '#' and
 # blank lines are ignored. Glob patterns for driver/vendor libraries live in
-# `is_excluded()` in bundle.sh and verify.sh, and are documented there.
+# `matches_driver_glob()` in excludelist.sh, which both scripts source, and are
+# documented there.
 #
 # ---------------------------------------------------------------------------
 # 1. glibc and its loader. A bundled libc cannot work: the dynamic loader,
@@ -61,11 +62,22 @@ libutil.so.1: glibc family: part of the running system's libc
 #    Note what is deliberately NOT here:
 #      * libva.so.2 and libva-x11/wayland ARE bundled (they are the API library,
 #        a hard DT_NEEDED of libmpv once -Dvaapi is on; the vendor driver they
-#        dlopen stays on the host),
+#        dlopen stays on the host). libva is the *other* library a host vendor
+#        user-space binds to: a host Mesa VA-API driver links libva.so.2, so the
+#        same symbol-drift caveat as section 3 applies to it, and it is accepted
+#        (the alternative is shipping no VA-API support at all). Watch for a host
+#        driver needing a newer VA_API_* version than our copy exports -- the
+#        plugin-host class is therefore *not* fully closed,
 #      * libX11/libxcb/libwayland-client are bundled too so the app never
 #        depends on the host having them at a compatible version,
-#      * libpulse.so.0 is bundled: it is a client library (it talks to the
-#        socket), not a plugin host, so nothing on the host binds to our copy,
+#      * libpulse.so.0 is bundled. It is *not* immune to section 3's rule: the
+#        host's ALSA pulse plugin (libasound_module_pcm_pulse.so) has a hard
+#        DT_NEEDED on libpulse.so.0, so it binds our copy. It stays bundled
+#        because it is a hard DT_NEEDED of libmpv (-Dpulse=enabled) and because
+#        loading the current distributions' plugin against it showed no symbol
+#        drift (no "version `PULSE_...' not found"). It is the one plugin-host
+#        exception being watched: if a host plugin ever asks for a newer PULSE_*
+#        version than our copy exports, it moves to section 3,
 #      * libgcc_s.so.1 is bundled (see README): libavcodec's `_Unwind_*` usage
 #        needs a recent enough one.
 #    The plugin hosts that must stay on the host are in section 3.
@@ -85,6 +97,13 @@ libdrm_radeon.so.1: driver-facing libdrm: must match the host kernel driver
 libgbm.so.1: buffer allocation: must match the host kernel driver
 libvulkan.so.1: Vulkan loader: enumerates the host's ICDs
 libvulkan_lvp.so: Mesa's lavapipe ICD: a driver, so host-provided
+
+# Optional vendor user-space the bundled libva probes for at runtime (dlopen'd,
+# absent on most systems, and libva falls back cleanly when the dlopen fails).
+# They are the vendor's own driver code, so they are host-provided like every
+# other entry in this section -- never bundled, never required.
+libatiadlxx.so: AMD ADL userspace probed by libva-x11: vendor driver, optional
+libwayland-emgd.so.1: NVIDIA EGLStream Wayland userspace probed by libva-wayland: vendor driver, optional
 
 # ---------------------------------------------------------------------------
 # 3. Plugin hosts and system interfaces. These are libraries the *host* dlopens

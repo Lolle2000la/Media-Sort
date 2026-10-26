@@ -28,11 +28,12 @@ no binaries are committed to git and nothing is downloaded at runtime.
 | File | Purpose |
 | --- | --- |
 | `versions.env` | Every upstream pin in one place (mpv, FFmpeg, dav1d, libass, zimg, wayland, libplacebo, wayland-protocols) with URL + sha256 (+ release commit where upstream publishes one, and the `RUST_VERSION` the AppImage's own compiler is pinned to). **Bump versions here and nowhere else.** |
-| `build-in-container.sh` | Runs in `ubuntu:22.04`: apt deps → dav1d → FFmpeg → libass → zimg → wayland → wayland-protocols → libplacebo → libmpv → `cargo build` → stage. Per-component logs, per-component stamps over version *and* build flags (re-runs are cheap, a flag change rebuilds). |
+| `build-in-container.sh` | Runs in `ubuntu:22.04`: apt deps → dav1d → FFmpeg → libass → zimg → wayland → wayland-protocols → libplacebo → libmpv → `cargo build` → stage. Per-component logs, per-component stamps over the version, the source pin (URL + sha256) *and* the build flags (re-runs are cheap; a flag or pin change rebuilds). |
 | `bundle.sh` | `stage` (container side) computes the closure into `target/appimage-stage`; `install` (host side) copies it into the AppDir, writes the RPATHs and fails on any unresolved `DT_NEEDED`. |
 | `excludelist` | The host-provided allowlist: what must never be bundled (glibc/loader, the GL/Vulkan/GPU-driver stack, and the plugin hosts the host's plugins bind to) with a one-line reason per entry. |
+| `excludelist.sh` | The policy *code* for that list (`is_excluded`, `host_reason`, the driver globs, the dlopen-only names), sourced by `bundle.sh` and `verify.sh` so the two cannot disagree about the same name. |
 | `pack-appimage.sh` | The two-pass `vpk pack` flow (staging → pack → unpack → bundle → verify → desktop surgery → final pack), shared by `release.yml` and `appimage.yml`. |
-| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the `strings` manifest of the shipped binary, `libmpv.so.2` presence, real `ffmpeg` encode/decode, GUI start under Xvfb. |
+| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode, GUI start under Xvfb (`--selftest` probes its exit predicate; the host floor is printed on every run). |
 
 CI wiring: `.github/workflows/release.yml` (Linux matrix entries) and
 `.github/workflows/appimage.yml` (packaging-only check, x86_64).
@@ -61,10 +62,13 @@ per-component logs, stamps and the **install prefix** — lives in
 build flags are unchanged, and always re-runs `cargo build` (cargo is
 incremental, so an unchanged tree only costs a fingerprint check — skipping it
 on mere file presence silently shipped the binary from before a source edit).
-A component stamp is keyed on the version **and** a hash of its build arguments,
-so editing a meson/configure flag in `build-in-container.sh` rebuilds exactly
-that component. The prefix deliberately sits in the workspace instead of
-`/usr/local`: every CI step is a `docker run --rm`, so `/usr/local` is empty
+A component stamp is keyed on the hash of the version, the source pin (its
+`URL` + `SHA256`, i.e. the exact bytes that get built) **and** its build
+arguments, so editing a meson/configure flag in `build-in-container.sh` -- or
+repointing `MPV_URL`/`MPV_SHA256` at different content under an unchanged
+`MPV_VERSION` -- rebuilds exactly that component. The prefix deliberately sits in
+the workspace instead of `/usr/local`: every CI step is a `docker run --rm`, so
+`/usr/local` is empty
 again on the next run while the stamps would still say "already built".
 `PKG_CONFIG_PATH`, `LIBRARY_PATH` and `LD_LIBRARY_PATH` point at it, and
 `dav1d-sys` finds it through the same `pkg-config` path.
@@ -109,8 +113,10 @@ The payload's glibc floor is the glibc of whatever compiled it. Building on
 `ubuntu-24.04` (2.39) is what broke the AppImage catalog test, so the build
 runs in `ubuntu:22.04` (2.35). The same container also means the Rust link
 cannot accidentally pick up a host `libmpv`: the release runner installs only
-`squashfs-tools`, `patchelf`, `xvfb` and the host-provided libraries the gate
-needs to start the app (`libasound2`, `libdrm2`) — no `-dev` packages at all.
+`squashfs-tools`, `patchelf`, `xvfb`, `xdotool` and the host-provided libraries
+the gate needs to start the app (`libasound2t64` — the Ubuntu 24.04 name of the
+ALSA runtime, where `libasound2` is a virtual package — and `libdrm2`) — no
+`-dev` packages at all.
 
 `patchelf` and the AppDir, however, live on the host (vpk produces the AppDir
 there), so the work is split: the container *resolves and stages* the closure
@@ -220,8 +226,10 @@ wayland-client >= 1.21, jammy ships 1.20), **libplacebo v7.360.1**,
 Bundled (`usr/lib`, by SONAME): `libmpv.so.2`, `libavcodec/format/util/filter`,
 `libswscale`, `libswresample`, `libavfilter`, `libdav1d`, `libass`, `libzimg`,
 `libplacebo`, `libfreetype`, `libharfbuzz`, `libfribidi`, `libfontconfig`,
-`libexpat`, `libz`, `libgcc_s`, `libpulse`, `libX11`-family (including the
-`libXcursor`/`libXi`/`libXinerama` libraries winit only *dlopens*), `libxcb`,
+`libexpat`, `libz`, `libgcc_s`, `libpulse`, `libX11`-family (including
+`libXcursor`/`libXi`/`libX11-xcb`/`libxkbcommon-x11`, which winit only *dlopens*,
+and `libXrandr`, which is a `DT_NEEDED` of libmpv -- nothing loads
+`libXinerama.so.1`, so it is no longer staged), `libxcb`,
 `libwayland-client`/`libwayland-cursor`, `libva*` (the API library, not the
 driver), … plus `usr/bin/ffmpeg`.
 
@@ -259,8 +267,13 @@ VA-API on Mesa systems. `libdrm.so.2` is host-provided for the same class of
 reason: a host Mesa/VA-API driver links it, and bundling only works until that
 driver needs a newer `drm*` symbol.
 
-`libpulse.so.0` stays bundled: it is a *client* library (it talks to the socket,
-nothing binds to our copy), and it is a hard `DT_NEEDED` of libmpv.
+`libpulse.so.0` stays bundled, and it is the one **plugin-host exception** being
+watched: the host's `libasound_module_pcm_pulse.so` has a hard `DT_NEEDED` on
+`libpulse.so.0`, so it binds our copy exactly like `libasound.so.2` above. It is
+bundled anyway because it is a hard `DT_NEEDED` of libmpv (`-Dpulse=enabled`) and
+because loading the current distributions' plugin against it showed no symbol
+drift (no `version 'PULSE_…' not found`). If a host plugin ever asks for a newer
+`PULSE_*` version than our copy exports, it moves to the host-provided list.
 
 The policy is reproducible in one command — with the payload's library directory
 on `LD_LIBRARY_PATH`, load a host plugin the way the app's audio/driver stack
@@ -285,8 +298,9 @@ prints the resulting decision table on every run.
 The floor that leaves for the host — glibc >= 2.35, `libstdc++.so.6`,
 `libasound.so.2`, `libdrm.so.2` and the GPU/VA-API drivers — is what every
 desktop distribution already ships; a bare `ubuntu:22.04` container has the
-first two but not `libasound2`/`libdrm2`, and `verify.sh` then reports exactly
-those as missing host-provided libraries.
+first two but not `libasound2`/`libdrm2`. `verify.sh` prints that floor on every
+run (CI installs those libraries, so a "missing here" list alone would hide it),
+noting for each entry whether it resolves on the machine running the gate.
 
 Two entries that upstream's excludelist has, but this payload deliberately
 ships:
@@ -294,8 +308,9 @@ ships:
 * **`libgcc_s.so.1`** — the upstream AppImage excludelist would skip it, but
   newer distros ship a newer one and older ones can be too old for
   `libavcodec`'s `_Unwind_*` usage.
-* **`libpulse.so.0`** — a client library, not a plugin host: nothing on the host
-  binds to our copy, and it is a hard `DT_NEEDED` of libmpv.
+* **`libpulse.so.0`** — the one plugin-host exception: the host's ALSA pulse
+  plugin binds our copy, but no symbol drift was measured and it is a hard
+  `DT_NEEDED` of libmpv. See "Plugin hosts stay on the host" above.
 
 Everything else in the upstream excludelist that is a hard `DT_NEEDED` of libmpv
 (`libX11`, `libwayland-client`, `libfontconfig`, `libfreetype`, `libharfbuzz`,
@@ -312,9 +327,14 @@ the bug this work fixes.
 * a `DT_NEEDED` that resolves neither inside `usr/lib` nor through the
   excludelist (plus an `ldd` pass with an empty environment that catches
   "present but unusable"; a host-provided library missing on the *running* host
-  is reported as the documented floor, not failed),
-* a library name in the shipped binary's `strings` manifest that is neither
-  bundled nor on the host-provided allowlist with a reason,
+  is reported as part of the floor, not failed),
+* a library name in the payload's `strings` manifest that is neither bundled nor
+  on the host-provided allowlist with a reason. The manifest is derived from
+  **every** payload ELF — the GUI binary and every bundled library — plus the
+  dlopen-only names in `excludelist.sh`, so a name that only appears *inside* a
+  bundled library (`libva-x11` mentions `libatiadlxx.so`, `libva-wayland`
+  `libwayland-emgd.so.1`) is decided too, and `bundle.sh`'s hand list cannot
+  carry a library nothing loads without the gate noticing,
 * a missing `usr/lib/libmpv.so.2`,
 * `usr/bin/ffmpeg -version` failing, a GPL build, a missing
   `h264`/`hevc`/`vp9`/`libdav1d` decoder, a failed PNG encode (the rawvideo pipe
@@ -323,12 +343,27 @@ the bug this work fixes.
   AV1 fixture,
 * the GUI dying with `error while loading shared libraries` (or a versioned
   symbol failure) under `xvfb-run`, exiting 0, failing to execute (126/127),
-  dying from SIGABRT/SIGFPE/SIGSEGV (134/136/139), or exiting before ~3 s without
-  a GPU/graphics complaint. For an AppImage it is launched with
-  `--appimage-extract-and-run`; a later non-zero exit *with* a GPU complaint is
-  only reported, since a GPU-less Xvfb cannot open a wgpu surface. When
-  `xdotool` is present the check also reports whether a window named
-  `Media Sort` appeared (informational only).
+  dying from SIGABRT/SIGFPE/SIGSEGV (134/136/139), exiting 101 (a Rust panic is
+  always fatal — a startup panic in the window/render stack is precisely what
+  this check exists to catch), or exiting early without one of the *specific*
+  GPU/display diagnostics `gui_exit_is_expected()` matches (`no adapter was
+  found`, `a suitable graphics adapter`, `Failed to open connection to X
+  server`, …).
+  Those patterns are deliberately narrow: the previous broad
+  `adapter|vulkan|gpu|surface|egl|graphics|winit|display` alternation also
+  matched panic *locations* like `panicked at iced_wgpu-…`, so an early panic
+  in the window/render stack went green. `verify.sh --selftest` probes that
+  predicate against fake logs and exit statuses without a payload. For an
+  AppImage the GUI is launched with `--appimage-extract-and-run`; a later
+  non-zero exit is only reported, since a GPU-less Xvfb cannot open a wgpu
+  surface. When `xdotool` is present the check also reports whether a window
+  named `Media Sort` appeared (informational only).
+
+The **host floor is printed on every run** — glibc (with the payload's maximum
+requirement), `libstdc++.so.6`, `libasound.so.2`, `libdrm.so.2` and the
+GPU/driver stack, each with a note on whether it resolves on the machine running
+the gate. CI installs those libraries, so a "missing here" list alone used to
+make the floor invisible in the release log.
 
 ## Licensing
 

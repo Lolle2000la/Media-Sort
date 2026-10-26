@@ -101,29 +101,32 @@ run_logged() {
 }
 
 stamped() {
-  local name=$1 version=$2
-  shift 2
+  local name=$1 version=$2 url=$3 sha=$4
+  shift 4
   case " $FORCE_COMPONENTS " in
     *" $name "*) return 1 ;;
   esac
   [ "$FORCE" != "1" ] || return 1
   local stamp=$STAMPS/$name-$version
   [ -f "$stamp" ] || return 1
-  # The stamp records the version AND a hash of the component's build arguments,
-  # so editing a meson/configure flag rebuilds that component. Keying on the
-  # version alone kept the library the *old* flags produced.
-  [ "$(args_hash "$@")" = "$(cat "$stamp" 2>/dev/null || true)" ]
+  # The stamp records the source identity -- the pinned URL and its sha256, i.e.
+  # the exact bytes that get built (where the pin is a git tag, the recorded
+  # commit is what that sha256 stands for) -- AND a hash of the component's build
+  # arguments. Keying on the version alone kept the library the *old* flags
+  # produced, and repointing MPV_URL/MPV_SHA256 at different content under an
+  # unchanged MPV_VERSION kept the old library just the same.
+  [ "$(stamp_hash "$url" "$sha" "$@")" = "$(cat "$stamp" 2>/dev/null || true)" ]
 }
 
-# Hash of a component's build arguments (see stamped).
-args_hash() {
+# Hash of a component's source pin and build arguments (see stamped).
+stamp_hash() {
   printf '%s\n' "$@" | sha256sum | cut -d' ' -f1
 }
 
 mark_stamped() {
-  local name=$1 version=$2
-  shift 2
-  args_hash "$@" >"$STAMPS/$name-$version"
+  local name=$1 version=$2 url=$3 sha=$4
+  shift 4
+  stamp_hash "$url" "$sha" "$@" >"$STAMPS/$name-$version"
 }
 
 # fetch <name> <url> <sha256> -> prints the tarball path
@@ -175,9 +178,10 @@ install_build_deps() {
     # libmpv: audio out + display back-ends (VA-API)
     libasound2-dev libpulse-dev
     libx11-dev libxext-dev libxrandr-dev libxpresent-dev libxss-dev
-    # only ever dlopen'd by winit's x11-dl, but the AppImage has to ship them
-    # (see the dlopened list in bundle.sh)
-    libxcursor-dev libxi-dev libxinerama-dev
+    # only ever dlopen'd by winit's x11-dl, but they have to be *installed* in
+    # this container for `bundle.sh stage` to find them with ldconfig -- the
+    # AppImage ships them (see APPIMAGE_DLOPEN_ONLY in excludelist.sh)
+    libxcursor-dev libxi-dev
     libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
     # building wayland itself (see build_wayland)
     libffi-dev libexpat1-dev
@@ -219,7 +223,7 @@ install_build_deps() {
 build_dav1d() {
   local opts=(--buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib
               -Denable_tools=false -Denable_tests=false -Denable_docs=false)
-  if stamped dav1d "$DAV1D_VERSION" "${opts[@]}"; then log "==> dav1d $DAV1D_VERSION (cached)"; return; fi
+  if stamped dav1d "$DAV1D_VERSION" "$DAV1D_URL" "$DAV1D_SHA256" "${opts[@]}"; then log "==> dav1d $DAV1D_VERSION (cached)"; return; fi
   local tarball src build="$SRC/dav1d-build"
   tarball=$(fetch dav1d "$DAV1D_URL" "$DAV1D_SHA256")
   src=$(unpack "$tarball" dav1d)
@@ -227,7 +231,7 @@ build_dav1d() {
   run_logged dav1d meson setup "$build" "$src" "${opts[@]}"
   run_logged dav1d ninja -C "$build" -j "$JOBS"
   run_logged dav1d meson install -C "$build"
-  mark_stamped dav1d "$DAV1D_VERSION" "${opts[@]}"
+  mark_stamped dav1d "$DAV1D_VERSION" "$DAV1D_URL" "$DAV1D_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -248,7 +252,7 @@ build_ffmpeg() {
               --disable-avdevice
               --enable-zlib
               --enable-libdav1d)
-  if stamped ffmpeg "$FFMPEG_VERSION" "${opts[@]}"; then log "==> ffmpeg $FFMPEG_VERSION (cached)"; return; fi
+  if stamped ffmpeg "$FFMPEG_VERSION" "$FFMPEG_URL" "$FFMPEG_SHA256" "${opts[@]}"; then log "==> ffmpeg $FFMPEG_VERSION (cached)"; return; fi
   local tarball src build="$SRC/ffmpeg-build"
   tarball=$(fetch ffmpeg "$FFMPEG_URL" "$FFMPEG_SHA256")
   src=$(unpack "$tarball" ffmpeg)
@@ -260,7 +264,7 @@ build_ffmpeg() {
   )
   run_logged ffmpeg make -C "$build" -j "$JOBS"
   run_logged ffmpeg make -C "$build" install
-  mark_stamped ffmpeg "$FFMPEG_VERSION" "${opts[@]}"
+  mark_stamped ffmpeg "$FFMPEG_VERSION" "$FFMPEG_URL" "$FFMPEG_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -269,7 +273,7 @@ build_ffmpeg() {
 build_libass() {
   local opts=(--prefix="$PREFIX" --disable-static --enable-shared
               --enable-fontconfig --enable-harfbuzz)
-  if stamped libass "$LIBASS_VERSION" "${opts[@]}"; then log "==> libass $LIBASS_VERSION (cached)"; return; fi
+  if stamped libass "$LIBASS_VERSION" "$LIBASS_URL" "$LIBASS_SHA256" "${opts[@]}"; then log "==> libass $LIBASS_VERSION (cached)"; return; fi
   local tarball src
   tarball=$(fetch libass "$LIBASS_URL" "$LIBASS_SHA256")
   src=$(unpack "$tarball" libass)
@@ -279,7 +283,7 @@ build_libass() {
     run_logged libass make -j "$JOBS"
     run_logged libass make install
   )
-  mark_stamped libass "$LIBASS_VERSION" "${opts[@]}"
+  mark_stamped libass "$LIBASS_VERSION" "$LIBASS_URL" "$LIBASS_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -289,7 +293,7 @@ build_libass() {
 # ---------------------------------------------------------------------------
 build_zimg() {
   local opts=(--prefix="$PREFIX" --disable-static --enable-shared)
-  if stamped zimg "$ZIMG_VERSION" "${opts[@]}"; then log "==> zimg $ZIMG_VERSION (cached)"; return; fi
+  if stamped zimg "$ZIMG_VERSION" "$ZIMG_URL" "$ZIMG_SHA256" "${opts[@]}"; then log "==> zimg $ZIMG_VERSION (cached)"; return; fi
   local tarball src
   tarball=$(fetch zimg "$ZIMG_URL" "$ZIMG_SHA256")
   src=$(unpack "$tarball" zimg)
@@ -300,7 +304,7 @@ build_zimg() {
     run_logged zimg make -j "$JOBS"
     run_logged zimg make install
   )
-  mark_stamped zimg "$ZIMG_VERSION" "${opts[@]}"
+  mark_stamped zimg "$ZIMG_VERSION" "$ZIMG_URL" "$ZIMG_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -312,7 +316,7 @@ build_zimg() {
 build_wayland() {
   local opts=(--buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib
               -Ddocumentation=false -Dtests=false -Ddtd_validation=false)
-  if stamped wayland "$WAYLAND_VERSION" "${opts[@]}"; then log "==> wayland $WAYLAND_VERSION (cached)"; return; fi
+  if stamped wayland "$WAYLAND_VERSION" "$WAYLAND_URL" "$WAYLAND_SHA256" "${opts[@]}"; then log "==> wayland $WAYLAND_VERSION (cached)"; return; fi
   local tarball src build="$SRC/wayland-build"
   tarball=$(fetch wayland "$WAYLAND_URL" "$WAYLAND_SHA256")
   src=$(unpack "$tarball" wayland)
@@ -320,7 +324,7 @@ build_wayland() {
   run_logged wayland meson setup "$build" "$src" "${opts[@]}"
   run_logged wayland ninja -C "$build" -j "$JOBS"
   run_logged wayland meson install -C "$build"
-  mark_stamped wayland "$WAYLAND_VERSION" "${opts[@]}"
+  mark_stamped wayland "$WAYLAND_VERSION" "$WAYLAND_URL" "$WAYLAND_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -329,7 +333,7 @@ build_wayland() {
 # ---------------------------------------------------------------------------
 build_wayland_protocols() {
   local opts=(--buildtype=release --prefix="$PREFIX" --libdir=lib -Dtests=false)
-  if stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION" "${opts[@]}"; then
+  if stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION" "$WAYLAND_PROTOCOLS_URL" "$WAYLAND_PROTOCOLS_SHA256" "${opts[@]}"; then
     log "==> wayland-protocols $WAYLAND_PROTOCOLS_VERSION (cached)"; return
   fi
   local tarball src build="$SRC/wayland-protocols-build"
@@ -343,7 +347,7 @@ build_wayland_protocols() {
   # >= 1.31.
   run_logged wayland-protocols meson setup "$build" "$src" "${opts[@]}"
   run_logged wayland-protocols meson install -C "$build"
-  mark_stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION" "${opts[@]}"
+  mark_stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION" "$WAYLAND_PROTOCOLS_URL" "$WAYLAND_PROTOCOLS_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -359,7 +363,7 @@ build_libplacebo() {
               -Ddemos=false -Dtests=false
               -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled
               -Dshaderc=disabled -Dglslang=disabled -Dlcms=disabled -Dxxhash=disabled)
-  if stamped libplacebo "$LIBPLACEBO_VERSION" "${opts[@]}"; then
+  if stamped libplacebo "$LIBPLACEBO_VERSION" "$LIBPLACEBO_URL" "$LIBPLACEBO_SHA256" "${opts[@]}"; then
     log "==> libplacebo $LIBPLACEBO_VERSION (cached)"; return
   fi
   local tarball src build="$SRC/libplacebo-build"
@@ -369,7 +373,7 @@ build_libplacebo() {
   run_logged libplacebo meson setup "$build" "$src" "${opts[@]}"
   run_logged libplacebo ninja -C "$build" -j "$JOBS"
   run_logged libplacebo meson install -C "$build"
-  mark_stamped libplacebo "$LIBPLACEBO_VERSION" "${opts[@]}"
+  mark_stamped libplacebo "$LIBPLACEBO_VERSION" "$LIBPLACEBO_URL" "$LIBPLACEBO_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -438,7 +442,7 @@ build_mpv() {
     -Drubberband=disabled
     -Dxv=disabled
   )
-  if stamped mpv "$MPV_VERSION" "${opts[@]}"; then log "==> mpv $MPV_VERSION (cached)"; return; fi
+  if stamped mpv "$MPV_VERSION" "$MPV_URL" "$MPV_SHA256" "${opts[@]}"; then log "==> mpv $MPV_VERSION (cached)"; return; fi
   local tarball src build="$SRC/mpv-build"
   tarball=$(fetch mpv "$MPV_URL" "$MPV_SHA256")
   src=$(unpack "$tarball" mpv)
@@ -446,7 +450,7 @@ build_mpv() {
   run_logged mpv meson setup "$build" "$src" "${opts[@]}"
   run_logged mpv ninja -C "$build" -j "$JOBS"
   run_logged mpv meson install -C "$build"
-  mark_stamped mpv "$MPV_VERSION" "${opts[@]}"
+  mark_stamped mpv "$MPV_VERSION" "$MPV_URL" "$MPV_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------

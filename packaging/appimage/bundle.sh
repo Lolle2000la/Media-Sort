@@ -31,34 +31,14 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-EXCLUDELIST=$SCRIPT_DIR/excludelist
+# shellcheck source=excludelist.sh
+. "$SCRIPT_DIR/excludelist.sh"
 
 die() { printf 'bundle: ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf 'bundle: %s\n' "$*"; }
 
 is_elf() {
   [ -f "$1" ] && [ "$(head -c 4 "$1" | od -An -c | tr -d ' \n')" = '177ELF' ]
-}
-
-# Excluded from the payload: see ./excludelist for the reasoning. The glob
-# patterns below are the driver/vendor libraries that must never be shipped,
-# even though a NEEDED walk would never reach most of them (they are dlopen'd).
-is_excluded() {
-  local name=$1
-  awk -v n="$name" '
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*$/ { next }
-    { candidate = $1; sub(/:$/, "", candidate); if (candidate == n) found = 1 }
-    END { exit(found ? 0 : 1) }
-  ' "$EXCLUDELIST" && return 0
-  case "$name" in
-    libGL*.so*|libEGL*.so*|libOpenGL*.so*|\
-    libgbm*.so*|libglapi*.so*|libvulkan*.so*|\
-    libnvidia*.so*|libcuda*.so*|libmali*.so*|libd3d*.so*|libwsl*.so*|\
-    *_drv_video.so|*_driver_video.so)
-      return 0 ;;
-  esac
-  return 1
 }
 
 # DT_NEEDED entries of an ELF, one per line.
@@ -108,19 +88,14 @@ stage() {
   [ -n "${libmpv:-}" ] || die "stage: no libmpv under $prefix/lib (did the mpv build fail?)"
 
   # Libraries the GUI dlopens at runtime instead of linking against, so a
-  # DT_NEEDED walk never sees them: winit's x11-dl loads these X11 libraries
-  # lazily on X11 sessions. Without them the AppImage dies on startup with
-  # "libXcursor.so.1: cannot open shared object file" on a system that does not
-  # happen to have them installed (verify.sh's GUI check found exactly that),
-  # which is the same class of bug as the missing libmpv. This list is the union
-  # of the dlopen-only names the payload must carry and is cross-checked by
-  # verify.sh's `strings` manifest: that check names every library the shipped
-  # binary mentions and fails on a name it cannot decide, so a new winit/iced
-  # dependency shows up there instead of shipping green. A name that cannot be
-  # resolved on this system is a hard error, never a warning -- the AppImage it
-  # produced would only break at runtime.
-  local dlopened=(libXcursor.so.1 libXi.so.6 libXinerama.so.1 libXrandr.so.2
-                  libX11-xcb.so.1 libxkbcommon-x11.so.0)
+  # DT_NEEDED walk never sees them: APPIMAGE_DLOPEN_ONLY in excludelist.sh. This
+  # list is the union of the dlopen-only names the payload must carry and is
+  # cross-checked by verify.sh, which derives its manifest from every payload
+  # ELF plus this list: that check names every library the shipped binaries
+  # mention, so a new winit/iced dependency shows up there instead of shipping
+  # green. A name that cannot be resolved on this system is a hard error, never
+  # a warning -- the AppImage it produced would only break at runtime.
+  local dlopened=("${APPIMAGE_DLOPEN_ONLY[@]}")
   local queue=("$libmpv" "$prefix/bin/ffmpeg" "$@") extra missing=()
   for extra in "${dlopened[@]}"; do
     local resolved
