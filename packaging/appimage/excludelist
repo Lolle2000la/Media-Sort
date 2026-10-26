@@ -1,13 +1,17 @@
-# Libraries that must NOT be shipped inside the AppImage.
+# Libraries that must NOT be shipped inside the AppImage: the host-provided
+# allowlist. `verify.sh` also uses the reason column to print its decision table
+# for the names the shipped binary mentions, so an entry here is a documented
+# decision, not just a copy rule.
 #
 # Vendored from https://github.com/AppImage/pkg2appimage/blob/master/excludelist
-# (snapshot taken 2026-10-25), restricted to the two categories this project
-# cares about, with deliberate local deviations documented inline.
+# (snapshot taken 2026-10-25), restricted to the categories this project cares
+# about, with deliberate local deviations documented inline.
 #
-# Format: one file name per line (matched against the SONAME / DT_NEEDED name).
-# Lines starting with '#' and blank lines are ignored. Glob patterns for
-# driver/vendor libraries live in `is_excluded()` in bundle.sh and are
-# documented there.
+# Format: `<file name>[: <reason>]`, one entry per line, matched against the
+# SONAME / DT_NEEDED name (note: `bundle.sh` and `verify.sh` only look at the
+# first field, so the reason may contain spaces). Lines starting with '#' and
+# blank lines are ignored. Glob patterns for driver/vendor libraries live in
+# `is_excluded()` in bundle.sh and verify.sh, and are documented there.
 #
 # ---------------------------------------------------------------------------
 # 1. glibc and its loader. A bundled libc cannot work: the dynamic loader,
@@ -16,32 +20,32 @@
 #    glibc than it was built against (see verify.sh, which enforces the 2.35
 #    floor this file implies).
 # ---------------------------------------------------------------------------
-ld-linux.so.2
-ld-linux-x86-64.so.2
-ld-linux-aarch64.so.1
-ld-linux-armhf.so.3
-ld64.so.2
-libanl.so.1
-libBrokenLocale.so.1
-libc.so.6
-libcidn.so.1
-libcrypt.so.1
-libdl.so.2
-libm.so.6
-libmvec.so.1
-libnsl.so.1
-libnss_compat.so.2
-libnss_db.so.2
-libnss_dns.so.2
-libnss_files.so.2
-libnss_hesiod.so.2
-libnss_nis.so.2
-libnss_nisplus.so.2
-libpthread.so.0
-libresolv.so.2
-librt.so.1
-libthread_db.so.1
-libutil.so.1
+ld-linux.so.2: glibc loader: must be the running system's, never ours
+ld-linux-x86-64.so.2: glibc loader: must be the running system's, never ours
+ld-linux-aarch64.so.1: glibc loader: must be the running system's, never ours
+ld-linux-armhf.so.3: glibc loader: must be the running system's, never ours
+ld64.so.2: glibc loader: must be the running system's, never ours
+libanl.so.1: glibc family: NSS/resolver state must match the running system
+libBrokenLocale.so.1: glibc family: locale/gconv data must match the running system
+libc.so.6: glibc: the core of the running system's C library
+libcidn.so.1: glibc family: locale/gconv data must match the running system
+libcrypt.so.1: glibc family: tied to the running system's libc
+libdl.so.2: glibc family: part of the running system's libc
+libm.so.6: glibc family: part of the running system's libc
+libmvec.so.1: glibc family: part of the running system's libc
+libnsl.so.1: glibc family: NSS/resolver state must match the running system
+libnss_compat.so.2: glibc family: NSS modules must match the running system
+libnss_db.so.2: glibc family: NSS modules must match the running system
+libnss_dns.so.2: glibc family: NSS modules must match the running system
+libnss_files.so.2: glibc family: NSS modules must match the running system
+libnss_hesiod.so.2: glibc family: NSS modules must match the running system
+libnss_nis.so.2: glibc family: NSS modules must match the running system
+libnss_nisplus.so.2: glibc family: NSS modules must match the running system
+libpthread.so.0: glibc family: part of the running system's libc
+libresolv.so.2: glibc family: part of the running system's libc
+librt.so.1: glibc family: part of the running system's libc
+libthread_db.so.1: glibc family: part of the running system's libc
+libutil.so.1: glibc family: part of the running system's libc
 
 # ---------------------------------------------------------------------------
 # 2. Graphics stack / GPU drivers. These are loaded against the *host* kernel
@@ -50,34 +54,56 @@ libutil.so.1
 #    none of this is a DT_NEEDED of the app (libmpv's own GL/Vulkan output is
 #    compiled out).
 #
+#    libwayland-egl.so.1 belongs to this group even though it is not a driver:
+#    it is the `wl_egl_window` glue shipped by Mesa, and it has to match the
+#    EGL implementation the host resolves, so it is host-provided like libEGL.
+#
 #    Note what is deliberately NOT here:
 #      * libva.so.2 and libva-x11/wayland ARE bundled (they are the API library,
 #        a hard DT_NEEDED of libmpv once -Dvaapi is on; the vendor driver they
 #        dlopen stays on the host),
 #      * libX11/libxcb/libwayland-client are bundled too so the app never
 #        depends on the host having them at a compatible version,
-#      * **libdrm.so.2 is bundled**, although upstream lists it: it is a stable
-#        userspace ioctl wrapper, not a driver, and it is a hard NEEDED of
-#        libva-x11/libva-wayland, which libmpv links. Leaving it out made the
-#        whole AppImage refuse to start on a system without it
-#        (`error while loading shared libraries: libdrm.so.2`) -- measured, not
-#        assumed. The driver-only siblings (libdrm_amdgpu/intel/radeon/nouveau)
-#        stay excluded,
-#      * libstdc++.so.6 is bundled because libplacebo (mpv's mandatory
-#        dependency) is C++; the alternative was another hard host dependency.
+#      * libpulse.so.0 is bundled: it is a client library (it talks to the
+#        socket), not a plugin host, so nothing on the host binds to our copy,
+#      * libgcc_s.so.1 is bundled (see README): libavcodec's `_Unwind_*` usage
+#        needs a recent enough one.
+#    The plugin hosts that must stay on the host are in section 3.
 # ---------------------------------------------------------------------------
-libGL.so.1
-libEGL.so.1
-libGLX.so.0
-libGLdispatch.so.0
-libOpenGL.so.0
-libglapi.so.0
-# libdrm.so.2 itself is bundled on purpose (see the note above); only the
-# driver-facing parts of libdrm are excluded.
-libdrm_amdgpu.so.1
-libdrm_intel.so.1
-libdrm_nouveau.so.2
-libdrm_radeon.so.1
-libgbm.so.1
-libvulkan.so.1
-libvulkan_lvp.so
+libGL.so.1: GPU driver entry point: must match the host kernel driver and GPU
+libEGL.so.1: EGL entry point: must match the host's EGL implementation
+libGLX.so.0: GLVND: dispatches to the host driver
+libGLdispatch.so.0: GLVND: dispatches to the host driver
+libOpenGL.so.0: GLVND: dispatches to the host driver
+libglapi.so.0: Mesa internal: must match the host Mesa
+libwayland-egl.so.1: Mesa's wl_egl_window glue: must match the host EGL
+libwayland-egl.so: dev-link name of libwayland-egl.so.1 (host-provided, see above)
+libdrm_amdgpu.so.1: driver-facing libdrm: must match the host kernel driver
+libdrm_intel.so.1: driver-facing libdrm: must match the host kernel driver
+libdrm_nouveau.so.2: driver-facing libdrm: must match the host kernel driver
+libdrm_radeon.so.1: driver-facing libdrm: must match the host kernel driver
+libgbm.so.1: buffer allocation: must match the host kernel driver
+libvulkan.so.1: Vulkan loader: enumerates the host's ICDs
+libvulkan_lvp.so: Mesa's lavapipe ICD: a driver, so host-provided
+
+# ---------------------------------------------------------------------------
+# 3. Plugin hosts and system interfaces. These are libraries the *host* dlopens
+#    plugins into our process for, and a plugin binds to them BY SONAME. Once
+#    the bundled (older) copy is loaded under that SONAME, the host plugin
+#    binds to it and dies on a versioned symbol it needs. Measured against the
+#    real payload of this branch:
+#
+#      /usr/lib/alsa-lib/libasound_module_pcm_pulse.so
+#        -> /tmp/fa/usr/lib/libasound.so.2: version `ALSA_1.2.15' not found
+#      /usr/lib/dri/radeonsi_drv_video.so
+#        -> /tmp/fa/usr/lib/libstdc++.so.6: version `GLIBCXX_3.4.32' not found
+#           (required by /usr/lib/libSPIRV-Tools.so)
+#
+#    Consequence: rodio -> cpal -> ALSA "default" -> the host's pulse/pipewire
+#    plugin failed to load, so audio was silently dead on current distributions,
+#    and VA-API drivers degenerated or failed. Both were bundled before that
+#    measurement; they are host-provided now.
+# ---------------------------------------------------------------------------
+libasound.so.2: ALSA plugin host: host plugins (module_pcm_pulse) bind ALSA_* from the host copy
+libstdc++.so.6: C++ plugin host: stacked plugins (libSPIRV-Tools) need the host's GLIBCXX_*
+libdrm.so.2: system interface: host Mesa/VA-API drivers link it and may need newer drm* symbols

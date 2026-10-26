@@ -2,8 +2,9 @@
 #
 # Assemble the AppImage payload: copy the runtime dependency closure of libmpv
 # and ffmpeg into the AppDir and point everything at it with an $ORIGIN-relative
-# RPATH, so nothing is resolved from the host except glibc itself and the GPU
-# driver stack (see ./excludelist).
+# RPATH, so nothing is resolved from the host except the host-provided system
+# libraries in ./excludelist (glibc, the GPU stack, and the plugin hosts the
+# host's own plugins bind to).
 #
 # Two modes, because the compilation happens inside an Ubuntu 22.04 container
 # while patchelf and the AppDir live on the host:
@@ -47,7 +48,7 @@ is_excluded() {
   awk -v n="$name" '
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*$/ { next }
-    $1 == n { found = 1 }
+    { candidate = $1; sub(/:$/, "", candidate); if (candidate == n) found = 1 }
     END { exit(found ? 0 : 1) }
   ' "$EXCLUDELIST" && return 0
   case "$name" in
@@ -107,11 +108,17 @@ stage() {
   [ -n "${libmpv:-}" ] || die "stage: no libmpv under $prefix/lib (did the mpv build fail?)"
 
   # Libraries the GUI dlopens at runtime instead of linking against, so a
-  # DT_NEEDED walk never sees them: winit's x11-dl loads Xcursor/Xi/Xinerama/
-  # Xrandr/xkbcommon-x11 lazily on X11. Without them the AppImage dies on
-  # startup with "libXcursor.so.1: cannot open shared object file" on a system
-  # that does not happen to have them installed (verify.sh's GUI check found
-  # exactly that), which is the same class of bug as the missing libmpv.
+  # DT_NEEDED walk never sees them: winit's x11-dl loads these X11 libraries
+  # lazily on X11 sessions. Without them the AppImage dies on startup with
+  # "libXcursor.so.1: cannot open shared object file" on a system that does not
+  # happen to have them installed (verify.sh's GUI check found exactly that),
+  # which is the same class of bug as the missing libmpv. This list is the union
+  # of the dlopen-only names the payload must carry and is cross-checked by
+  # verify.sh's `strings` manifest: that check names every library the shipped
+  # binary mentions and fails on a name it cannot decide, so a new winit/iced
+  # dependency shows up there instead of shipping green. A name that cannot be
+  # resolved on this system is a hard error, never a warning -- the AppImage it
+  # produced would only break at runtime.
   local dlopened=(libXcursor.so.1 libXi.so.6 libXinerama.so.1 libXrandr.so.2
                   libX11-xcb.so.1 libxkbcommon-x11.so.0)
   local queue=("$libmpv" "$prefix/bin/ffmpeg" "$@") extra missing=()
@@ -125,7 +132,7 @@ stage() {
     fi
   done
   if [ ${#missing[@]} -gt 0 ]; then
-    log "WARNING: dlopen-only libraries not found on this system: ${missing[*]}"
+    die "stage: dlopen-only libraries not found on this system: ${missing[*]} (they have to be in the payload; install the matching runtime packages)"
   fi
 
   local idx=0
