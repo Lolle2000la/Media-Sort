@@ -36,7 +36,10 @@ no binaries are committed to git and nothing is downloaded at runtime.
 | `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode, GUI start under Xvfb (`--selftest` probes its exit predicate; the host floor is printed on every run). |
 
 CI wiring: `.github/workflows/release.yml` (Linux matrix entries) and
-`.github/workflows/appimage.yml` (packaging-only check, x86_64).
+`.github/workflows/appimage.yml` (packaging-only check, x86_64). Both run the
+build/verify steps through the composite action
+`.github/actions/appimage-gate`, so the packaging check and the weekly dependency
+bump (below) cannot disagree about what "passes".
 
 ## Rebuilding locally
 
@@ -197,21 +200,95 @@ Also note: mpv 0.41 renamed `meson_options.txt` to `meson.options` and dropped
 options older recipes pass (`-Dmanpage-build`, `-Dencoding`); passing one is a
 hard meson error.
 
-## Version bumps
+## Bumping versions
 
-Everything lives in [`versions.env`](versions.env):
+Everything lives in [`versions.env`](versions.env). Bumping is automated by
+[`scripts/bump-appimage.sh`](../../scripts/bump-appimage.sh), which queries every
+upstream, downloads the exact archive each new pin would point at, and computes
+the sha256 from those bytes — the part Renovate cannot do (it can find a new
+version, not a hash for an archive it never downloads).
 
-1. Change the version **and** the URL/sha256 (and the commit, where upstream
-   publishes a tarball from a tag whose commit we can record). `curl -fL <url> |
-   sha256sum` gives the value.
-2. Run `.github/workflows/appimage.yml` (or the docker command above).
-3. If a component's build fails, move to the previous release of that component
-   rather than patching its sources. Keep the combination that the release
-   actually ships; FFmpeg's major version is the most likely to break mpv.
+```bash
+scripts/bump-appimage.sh                # dry run: report table, downloads nothing
+scripts/bump-appimage.sh --check        # exit 2 when a pin is behind, 0 when not
+scripts/bump-appimage.sh --apply        # rewrite versions.env (temp file + mv)
+scripts/bump-appimage.sh --component mpv --min-age-days 0 --apply
+```
+
+It covers `mpv`, `ffmpeg`, `dav1d`, `libass`, `zimg`, `wayland`,
+`wayland-protocols`, `libplacebo` and `rust`, keeps each component's existing
+URL shape (tag archive vs. release asset), updates the paired `*_COMMIT` where
+`versions.env` records one, refuses prereleases unless `--allow-prerelease`, and
+orders versions with `sort -V` (`1.5.4` is older than `1.5.10`). Comments,
+ordering and formatting in `versions.env` are preserved. If **any** query, commit
+lookup, download or hash fails, nothing is written at all — the file stays
+byte-identical and the run exits non-zero. A component whose upstream cannot be
+reached is reported as `unknown` and does not abort the others (in a dry run);
+`--apply` refuses to write while any selected component is unknown.
+
+### The 14-day soak
+
+`--min-age-days` (default **14**) skips anything younger than that, matching the
+repository's Renovate policy (`minimumReleaseAge` in `renovate.json`, see
+AGENTS.md "Dependency updates (Renovate)"): a malicious or broken publish gets
+the same two weeks to be caught before it can reach a pin. The date comes from
+`published_at` for a GitHub release, the tag commit's `committer.date` for a
+GitHub tag (the tags API has no date of its own), `commit.committed_date` for a
+GitLab tag, the release tarball's `Last-Modified` for FFmpeg (ffmpeg.org's index
+has no dates), and the stable channel manifest's `date` for Rust.
+`--min-age-days 0` disables the soak for a deliberate same-day bump.
+
+### The scheduled workflow
+
+[`.github/workflows/appimage-bump.yml`](../../.github/workflows/appimage-bump.yml)
+runs `--check` weekly (Mondays 06:00 UTC) and, when something is behind,
+re-runs `--apply`, commits the result on `chore/appimage-bump`, runs the same
+build + verify gate as [`appimage.yml`](../../.github/workflows/appimage.yml)
+(the shared composite action `.github/actions/appimage-gate`), and then opens a
+**draft** PR — or, when a PR with that head branch is still open, force-pushes
+the branch (`--force-with-lease`) and rewrites that PR's body instead of opening
+a second one. The job fails when the gate fails, but the PR is still created:
+the failing pin combination is then visible instead of silently retried.
+
+**`APPIMAGE_BUMP_TOKEN`.** A branch pushed with the workflow's own
+`GITHUB_TOKEN` does not trigger other workflows, so the PR would arrive with no
+status checks at all and the in-job gate would be the only thing that ever tested
+it. Add a repository secret `APPIMAGE_BUMP_TOKEN` (a fine-grained PAT with
+`Contents: read/write` and `Pull requests: read/write` on this repository) to push
+and open the PR as a real user, so the normal workflows fire on it. Without the
+secret everything still works — the in-job gate is authoritative — the PR just
+carries no CI.
+
+### Manual fallback
+
+The script is a convenience, not a gate: `build-in-container.sh` only ever reads
+`versions.env` and verifies the sha256 it finds there, so editing the file by hand
+is still fully supported and is the right answer when a bump needs a combination
+the script would not pick. Change the version **and** the URL/sha256 (and the
+commit, where upstream publishes a tarball from a tag whose commit we can record)
+— `curl -fL <url> | sha256sum` gives the value — then run
+`.github/workflows/appimage.yml` (or the docker command above). If a component's
+build fails, move to the previous release of that component rather than patching
+its sources; keep the combination that the release actually ships. FFmpeg's major
+version is the most likely to break mpv.
 
 `RUST_VERSION` follows the same rule: bump it deliberately (and only after
 checking the workspace still builds with that compiler), because the AppImage's
-ABI surface is whatever that release produces.
+ABI surface is whatever that release produces. That pin governs the Linux
+AppImage only; Windows, macOS and the test matrices keep using
+`dtolnay/rust-toolchain@stable`.
+
+### Flatpak drift
+
+[`flatpak/app.mediasort.MediaSort.yml`](../../flatpak/app.mediasort.MediaSort.yml)
+pins **the same projects separately**, and `bump-appimage.sh` deliberately does
+not touch it: it is a separate Flathub submission built against a different
+runtime (`org.freedesktop.Platform`, not Ubuntu 22.04), with its own tag/commit
+pair per module. Bumping both from one query would propose a combination neither
+was tested with, so the Flatpak manifest is bumped by hand and gated by
+`.github/workflows/flatpak-build.yml`. The two pin sets are expected to drift;
+when they do, the AppImage's `versions.env` is the one that defines what the
+Linux release artifact contains.
 
 Choices as of the initial version: **mpv v0.41.0** (the newest stable release),
 **FFmpeg 9.0.2** (newest stable release, and mpv 0.41 builds against it),
