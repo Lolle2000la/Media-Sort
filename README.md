@@ -117,14 +117,17 @@ Pre-compiled standalone binaries with automatic updates are provided for Linux, 
 ### Requirements
 
 The precompiled packages bundle everything they need: **libmpv**, **ffmpeg** and
-**dav1d** (AVIF decoding) ship inside the package on every platform, so nothing
-has to be installed to run Media Sort. Building from source is the only case
-that needs these libraries on your system (see [Requirements](#requirements)).
+**dav1d** (AVIF decoding) ship inside the package on every platform, so no media
+library has to be installed to run Media Sort. Building from source is the only
+case that needs these libraries on your system (see [Requirements](#requirements)).
 
 On Linux the AppImage additionally expects a 64-bit X11 or Wayland desktop,
 **glibc 2.35 or newer** (Ubuntu 22.04+, Debian 12+, Fedora 36+, current Arch),
-and a graphics driver with Vulkan or OpenGL; GPU drivers are never bundled,
-because they have to match your kernel and hardware.
+your distribution's **ALSA** (`libasound`), **C++ runtime** (`libstdc++`) and
+**`libdrm`** libraries — the system interfaces the distribution's own audio
+plugins and GPU drivers bind to — and a graphics driver with Vulkan or OpenGL;
+GPU drivers are never bundled, because they have to match your kernel and
+hardware.
 
 ### Platform Setup Instructions
 
