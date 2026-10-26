@@ -102,16 +102,28 @@ run_logged() {
 
 stamped() {
   local name=$1 version=$2
+  shift 2
   case " $FORCE_COMPONENTS " in
     *" $name "*) return 1 ;;
   esac
   [ "$FORCE" != "1" ] || return 1
-  [ -f "$STAMPS/$name-$version" ]
+  local stamp=$STAMPS/$name-$version
+  [ -f "$stamp" ] || return 1
+  # The stamp records the version AND a hash of the component's build arguments,
+  # so editing a meson/configure flag rebuilds that component. Keying on the
+  # version alone kept the library the *old* flags produced.
+  [ "$(args_hash "$@")" = "$(cat "$stamp" 2>/dev/null || true)" ]
+}
+
+# Hash of a component's build arguments (see stamped).
+args_hash() {
+  printf '%s\n' "$@" | sha256sum | cut -d' ' -f1
 }
 
 mark_stamped() {
   local name=$1 version=$2
-  touch "$STAMPS/$name-$version"
+  shift 2
+  args_hash "$@" >"$STAMPS/$name-$version"
 }
 
 # fetch <name> <url> <sha256> -> prints the tarball path
@@ -205,17 +217,17 @@ install_build_deps() {
 # `dav1d-sys` crate (AVIF image decoding).
 # ---------------------------------------------------------------------------
 build_dav1d() {
-  if stamped dav1d "$DAV1D_VERSION"; then log "==> dav1d $DAV1D_VERSION (cached)"; return; fi
+  local opts=(--buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib
+              -Denable_tools=false -Denable_tests=false -Denable_docs=false)
+  if stamped dav1d "$DAV1D_VERSION" "${opts[@]}"; then log "==> dav1d $DAV1D_VERSION (cached)"; return; fi
   local tarball src build="$SRC/dav1d-build"
   tarball=$(fetch dav1d "$DAV1D_URL" "$DAV1D_SHA256")
   src=$(unpack "$tarball" dav1d)
   rm -rf "$build"
-  run_logged dav1d meson setup "$build" "$src" \
-    --buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib \
-    -Denable_tools=false -Denable_tests=false -Denable_docs=false
+  run_logged dav1d meson setup "$build" "$src" "${opts[@]}"
   run_logged dav1d ninja -C "$build" -j "$JOBS"
   run_logged dav1d meson install -C "$build"
-  mark_stamped dav1d "$DAV1D_VERSION"
+  mark_stamped dav1d "$DAV1D_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -228,7 +240,15 @@ build_dav1d() {
 # installed (libva, libx264, ...): everything external is named explicitly.
 # ---------------------------------------------------------------------------
 build_ffmpeg() {
-  if stamped ffmpeg "$FFMPEG_VERSION"; then log "==> ffmpeg $FFMPEG_VERSION (cached)"; return; fi
+  local opts=(--prefix="$PREFIX" --libdir="$PREFIX/lib"
+              --enable-shared --disable-static --enable-pic
+              --disable-doc --disable-debug
+              --disable-ffplay --disable-ffprobe
+              --disable-autodetect
+              --disable-avdevice
+              --enable-zlib
+              --enable-libdav1d)
+  if stamped ffmpeg "$FFMPEG_VERSION" "${opts[@]}"; then log "==> ffmpeg $FFMPEG_VERSION (cached)"; return; fi
   local tarball src build="$SRC/ffmpeg-build"
   tarball=$(fetch ffmpeg "$FFMPEG_URL" "$FFMPEG_SHA256")
   src=$(unpack "$tarball" ffmpeg)
@@ -236,38 +256,30 @@ build_ffmpeg() {
   mkdir -p "$build"
   (
     cd "$build"
-    run_logged ffmpeg "$src/configure" \
-      --prefix="$PREFIX" --libdir="$PREFIX/lib" \
-      --enable-shared --disable-static --enable-pic \
-      --disable-doc --disable-debug \
-      --disable-ffplay --disable-ffprobe \
-      --disable-autodetect \
-      --disable-avdevice \
-      --enable-zlib \
-      --enable-libdav1d
+    run_logged ffmpeg "$src/configure" "${opts[@]}"
   )
   run_logged ffmpeg make -C "$build" -j "$JOBS"
   run_logged ffmpeg make -C "$build" install
-  mark_stamped ffmpeg "$FFMPEG_VERSION"
+  mark_stamped ffmpeg "$FFMPEG_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
 # libass: unconditional mpv dependency (PGS/ASS subtitle rendering).
 # ---------------------------------------------------------------------------
 build_libass() {
-  if stamped libass "$LIBASS_VERSION"; then log "==> libass $LIBASS_VERSION (cached)"; return; fi
+  local opts=(--prefix="$PREFIX" --disable-static --enable-shared
+              --enable-fontconfig --enable-harfbuzz)
+  if stamped libass "$LIBASS_VERSION" "${opts[@]}"; then log "==> libass $LIBASS_VERSION (cached)"; return; fi
   local tarball src
   tarball=$(fetch libass "$LIBASS_URL" "$LIBASS_SHA256")
   src=$(unpack "$tarball" libass)
   (
     cd "$src"
-    run_logged libass ./configure \
-      --prefix="$PREFIX" --disable-static --enable-shared \
-      --enable-fontconfig --enable-harfbuzz
+    run_logged libass ./configure "${opts[@]}"
     run_logged libass make -j "$JOBS"
     run_logged libass make install
   )
-  mark_stamped libass "$LIBASS_VERSION"
+  mark_stamped libass "$LIBASS_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -276,18 +288,19 @@ build_libass() {
 # with hardware decoding), which makes phone/camera footage unwatchable.
 # ---------------------------------------------------------------------------
 build_zimg() {
-  if stamped zimg "$ZIMG_VERSION"; then log "==> zimg $ZIMG_VERSION (cached)"; return; fi
+  local opts=(--prefix="$PREFIX" --disable-static --enable-shared)
+  if stamped zimg "$ZIMG_VERSION" "${opts[@]}"; then log "==> zimg $ZIMG_VERSION (cached)"; return; fi
   local tarball src
   tarball=$(fetch zimg "$ZIMG_URL" "$ZIMG_SHA256")
   src=$(unpack "$tarball" zimg)
   (
     cd "$src"
     run_logged zimg ./autogen.sh
-    run_logged zimg ./configure --prefix="$PREFIX" --disable-static --enable-shared
+    run_logged zimg ./configure "${opts[@]}"
     run_logged zimg make -j "$JOBS"
     run_logged zimg make install
   )
-  mark_stamped zimg "$ZIMG_VERSION"
+  mark_stamped zimg "$ZIMG_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -297,17 +310,17 @@ build_zimg() {
 # cover XWayland), so the library is built here.
 # ---------------------------------------------------------------------------
 build_wayland() {
-  if stamped wayland "$WAYLAND_VERSION"; then log "==> wayland $WAYLAND_VERSION (cached)"; return; fi
+  local opts=(--buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib
+              -Ddocumentation=false -Dtests=false -Ddtd_validation=false)
+  if stamped wayland "$WAYLAND_VERSION" "${opts[@]}"; then log "==> wayland $WAYLAND_VERSION (cached)"; return; fi
   local tarball src build="$SRC/wayland-build"
   tarball=$(fetch wayland "$WAYLAND_URL" "$WAYLAND_SHA256")
   src=$(unpack "$tarball" wayland)
   rm -rf "$build"
-  run_logged wayland meson setup "$build" "$src" \
-    --buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib \
-    -Ddocumentation=false -Dtests=false -Ddtd_validation=false
+  run_logged wayland meson setup "$build" "$src" "${opts[@]}"
   run_logged wayland ninja -C "$build" -j "$JOBS"
   run_logged wayland meson install -C "$build"
-  mark_stamped wayland "$WAYLAND_VERSION"
+  mark_stamped wayland "$WAYLAND_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -315,7 +328,8 @@ build_wayland() {
 # and it is what unlocks VA-API hardware decoding on Wayland sessions.
 # ---------------------------------------------------------------------------
 build_wayland_protocols() {
-  if stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION"; then
+  local opts=(--buildtype=release --prefix="$PREFIX" --libdir=lib -Dtests=false)
+  if stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION" "${opts[@]}"; then
     log "==> wayland-protocols $WAYLAND_PROTOCOLS_VERSION (cached)"; return
   fi
   local tarball src build="$SRC/wayland-protocols-build"
@@ -327,11 +341,9 @@ build_wayland_protocols() {
   # want >= 1.25, and mpv only needs the protocol XML/pc files. Building the
   # protocols (instead of using jammy's 1.25) is required because mpv asks for
   # >= 1.31.
-  run_logged wayland-protocols meson setup "$build" "$src" \
-    --buildtype=release --prefix="$PREFIX" --libdir=lib \
-    -Dtests=false
+  run_logged wayland-protocols meson setup "$build" "$src" "${opts[@]}"
   run_logged wayland-protocols meson install -C "$build"
-  mark_stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION"
+  mark_stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -343,21 +355,21 @@ build_wayland_protocols() {
 # shaderc/glslang dependency and libplacebo's Vulkan requirement).
 # ---------------------------------------------------------------------------
 build_libplacebo() {
-  if stamped libplacebo "$LIBPLACEBO_VERSION"; then
+  local opts=(--buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib
+              -Ddemos=false -Dtests=false
+              -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled
+              -Dshaderc=disabled -Dglslang=disabled -Dlcms=disabled -Dxxhash=disabled)
+  if stamped libplacebo "$LIBPLACEBO_VERSION" "${opts[@]}"; then
     log "==> libplacebo $LIBPLACEBO_VERSION (cached)"; return
   fi
   local tarball src build="$SRC/libplacebo-build"
   tarball=$(fetch libplacebo "$LIBPLACEBO_URL" "$LIBPLACEBO_SHA256")
   src=$(unpack "$tarball" libplacebo)
   rm -rf "$build"
-  run_logged libplacebo meson setup "$build" "$src" \
-    --buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib \
-    -Ddemos=false -Dtests=false \
-    -Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled \
-    -Dshaderc=disabled -Dglslang=disabled -Dlcms=disabled -Dxxhash=disabled
+  run_logged libplacebo meson setup "$build" "$src" "${opts[@]}"
   run_logged libplacebo ninja -C "$build" -j "$JOBS"
   run_logged libplacebo meson install -C "$build"
-  mark_stamped libplacebo "$LIBPLACEBO_VERSION"
+  mark_stamped libplacebo "$LIBPLACEBO_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -376,63 +388,65 @@ build_libplacebo() {
 # `-Dencoding`); unknown options are a hard meson error, so they are gone here.
 # ---------------------------------------------------------------------------
 build_mpv() {
-  if stamped mpv "$MPV_VERSION"; then log "==> mpv $MPV_VERSION (cached)"; return; fi
+  local opts=(
+    --buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib
+    -Dlibmpv=true
+    -Dcplayer=false
+    -Dbuild-date=false
+    -Dtests=false
+    -Dfuzzers=false
+    -Dzimg=enabled
+    -Dx11=enabled
+    -Dwayland=enabled
+    -Dvaapi=enabled
+    -Dvaapi-x11=enabled
+    -Dvaapi-wayland=enabled
+    -Dvaapi-drm=disabled
+    -Ddmabuf-wayland=disabled
+    -Dgl=disabled
+    -Degl=disabled
+    -Dvulkan=disabled
+    -Dshaderc=disabled
+    -Dspirv-cross=disabled
+    -Dplain-gl=disabled
+    -Dgbm=disabled
+    -Ddrm=disabled
+    -Dvdpau=disabled
+    -Djpeg=disabled
+    -Dlcms2=disabled
+    -Dlibarchive=disabled
+    -Duchardet=disabled
+    -Dlibavdevice=disabled
+    -Dlibbluray=disabled
+    -Ddvdnav=disabled
+    -Dcdda=disabled
+    -Ddvbin=disabled
+    -Dcaca=disabled
+    -Dsixel=disabled
+    -Dsdl2-video=disabled
+    -Dsdl2-audio=disabled
+    -Dlua=disabled
+    -Djavascript=disabled
+    -Dvapoursynth=disabled
+    -Dx11-clipboard=disabled
+    -Dalsa=enabled
+    -Dpulse=enabled
+    -Dpipewire=disabled
+    -Djack=disabled
+    -Dsndio=disabled
+    -Doss-audio=disabled
+    -Drubberband=disabled
+    -Dxv=disabled
+  )
+  if stamped mpv "$MPV_VERSION" "${opts[@]}"; then log "==> mpv $MPV_VERSION (cached)"; return; fi
   local tarball src build="$SRC/mpv-build"
   tarball=$(fetch mpv "$MPV_URL" "$MPV_SHA256")
   src=$(unpack "$tarball" mpv)
   rm -rf "$build"
-  run_logged mpv meson setup "$build" "$src" \
-    --buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib \
-    -Dlibmpv=true \
-    -Dcplayer=false \
-    -Dbuild-date=false \
-    -Dtests=false \
-    -Dfuzzers=false \
-    -Dzimg=enabled \
-    -Dx11=enabled \
-    -Dwayland=enabled \
-    -Dvaapi=enabled \
-    -Dvaapi-x11=enabled \
-    -Dvaapi-wayland=enabled \
-    -Dvaapi-drm=disabled \
-    -Ddmabuf-wayland=disabled \
-    -Dgl=disabled \
-    -Degl=disabled \
-    -Dvulkan=disabled \
-    -Dshaderc=disabled \
-    -Dspirv-cross=disabled \
-    -Dplain-gl=disabled \
-    -Dgbm=disabled \
-    -Ddrm=disabled \
-    -Dvdpau=disabled \
-    -Djpeg=disabled \
-    -Dlcms2=disabled \
-    -Dlibarchive=disabled \
-    -Duchardet=disabled \
-    -Dlibavdevice=disabled \
-    -Dlibbluray=disabled \
-    -Ddvdnav=disabled \
-    -Dcdda=disabled \
-    -Ddvbin=disabled \
-    -Dcaca=disabled \
-    -Dsixel=disabled \
-    -Dsdl2-video=disabled \
-    -Dsdl2-audio=disabled \
-    -Dlua=disabled \
-    -Djavascript=disabled \
-    -Dvapoursynth=disabled \
-    -Dx11-clipboard=disabled \
-    -Dalsa=enabled \
-    -Dpulse=enabled \
-    -Dpipewire=disabled \
-    -Djack=disabled \
-    -Dsndio=disabled \
-    -Doss-audio=disabled \
-    -Drubberband=disabled \
-    -Dxv=disabled
+  run_logged mpv meson setup "$build" "$src" "${opts[@]}"
   run_logged mpv ninja -C "$build" -j "$JOBS"
   run_logged mpv meson install -C "$build"
-  mark_stamped mpv "$MPV_VERSION"
+  mark_stamped mpv "$MPV_VERSION" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -446,23 +460,24 @@ build_rust() {
   mkdir -p "$HOME"
   export PATH="$CARGO_HOME/bin:$PATH"
 
-  if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
+  if [ ! -x "$CARGO_HOME/bin/cargo" ] \
+     || ! "$CARGO_HOME/bin/rustup" toolchain list 2>/dev/null | grep -q "^$RUST_VERSION-"; then
     CURRENT_COMPONENT=rustup
     CURRENT_LOG=$LOGS/rustup.log
-    log "==> installing Rust toolchain (stable, minimal profile)"
+    log "==> installing Rust $RUST_VERSION (minimal profile)"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$BUILD_ROOT/rustup-init.sh" \
       >>"$LOGS/rustup.log" 2>&1 || die "downloading rustup-init failed"
-    if ! sh "$BUILD_ROOT/rustup-init.sh" -y --profile minimal --default-toolchain stable \
+    if ! sh "$BUILD_ROOT/rustup-init.sh" -y --profile minimal --default-toolchain "$RUST_VERSION" \
         --no-modify-path >>"$LOGS/rustup.log" 2>&1; then
       die "rustup install failed"
     fi
   fi
 
+  # Always run cargo. It is incremental, so an unchanged tree costs a
+  # fingerprint check -- while skipping the build on mere file presence silently
+  # shipped whatever binary was there before a source edit (the documented
+  # `docker run` recipe keeps both target/ and .appimage-build/ between runs).
   local out="$REPO_ROOT/target/$TARGET/release/media-sort-gui"
-  if [ "$FORCE" != "1" ] && [ -x "$out" ]; then
-    log "==> media-sort-gui (cached: $out)"
-    return
-  fi
 
   # libmpv-sys links a bare `-lmpv` (no pkg-config), so the linker has to be
   # pointed at our prefix explicitly (LIBRARY_PATH/PKG_CONFIG_PATH are exported
@@ -472,11 +487,12 @@ build_rust() {
 
   CURRENT_COMPONENT=cargo
   CURRENT_LOG=$LOGS/cargo.log
-  log "==> cargo build --release --target $TARGET -p media-sort-gui --features velopack"
+  log "==> cargo build --release --target $TARGET -p media-sort-gui --features velopack ($("$CARGO_HOME/bin/rustc" --version))"
   (
     cd "$REPO_ROOT"
     cargo build --release --target "$TARGET" -p media-sort-gui --features velopack
   ) >>"$CURRENT_LOG" 2>&1 || die "cargo build failed"
+  [ -x "$out" ] || die "cargo build reported success but $out is missing"
   log "    $(ls -lh "$out" | awk '{print $5}') $out"
 }
 
@@ -503,6 +519,7 @@ summary() {
   printf '%-18s %s\n' "container glibc" "$(ldd --version | head -n 1 | awk '{print $NF}')"
   printf '%-18s %s\n' "gcc" "$(gcc -dumpversion)"
   printf '%-18s %s\n' "meson" "$(meson --version)"
+  printf '%-18s %s\n' "rustc" "$(rustc --version | awk '{print $2}') (pinned RUST_VERSION=$RUST_VERSION)"
   for pair in "dav1d:$DAV1D_VERSION" "ffmpeg:$FFMPEG_VERSION" "libass:$LIBASS_VERSION" \
               "zimg:$ZIMG_VERSION" "wayland:$WAYLAND_VERSION" \
               "wayland-protocols:$WAYLAND_PROTOCOLS_VERSION" \
