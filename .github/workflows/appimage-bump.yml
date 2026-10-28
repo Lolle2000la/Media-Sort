@@ -1,0 +1,237 @@
+name: AppImage Dependency Bump
+
+# Weekly proposal of upstream version bumps for the self-contained Linux
+# AppImage payload (packaging/appimage/versions.env).
+#
+# Renovate cannot maintain that file: every entry is a version + URL + sha256,
+# and Renovate can compute a new version but not a new hash for an archive it
+# never downloads. `scripts/bump-appimage.sh` does that part, and this workflow
+# runs it on a schedule:
+#
+#   1. `check` queries every upstream (12 s, no docker) and reports whether any
+#      pin is behind, honouring the 14-day soak the repository's Renovate policy
+#      uses (AGENTS.md "Dependency updates (Renovate)").
+#   2. `bump` re-runs it with `--apply`, commits the rewritten versions.env on
+#      `chore/appimage-bump`, runs the same build + verify gate as
+#      .github/workflows/appimage.yml (the shared composite action), and then
+#      creates -- or force-updates -- the pull request. "Create, or replace if
+#      the last one is still open": an open PR with that head branch is updated
+#      in place instead of a second PR being opened.
+#
+# The job fails if the gate fails, even though the PR is still opened/updated
+# (with the failure recorded in its body), so the scheduled run shows red.
+#
+# TOKEN CAVEAT: a branch pushed with the workflow's own GITHUB_TOKEN does not
+# trigger other workflows, so the PR's own CI would never run and the gate
+# inside the bump job would be the only thing that ever tested the bump. Set a
+# repository secret `APPIMAGE_BUMP_TOKEN` (a fine-grained PAT with
+# `Contents: read/write` and `Pull requests: read/write` on this repository) to
+# make the push/PR run as a real user and let the normal workflows fire. Without
+# it everything still works -- the in-job gate is authoritative -- but the PR
+# will sit with no status checks.
+#
+# This workflow only runs from the default branch: a `schedule` trigger always
+# executes the default branch's copy, so changes here take effect once merged.
+on:
+  schedule:
+    # Mondays 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      min_age_days:
+        description: 'Soak period in days before an upstream release is eligible (0 disables it)'
+        required: false
+        default: '14'
+      dry_run:
+        description: 'Only report; never push a branch or open a pull request'
+        type: boolean
+        default: false
+
+# A branch push and a PR both need write access; the workflow never touches
+# anything else.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: appimage-bump
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check upstream pins
+    # Forks must never open PRs against themselves.
+    if: github.repository == 'Lolle2000la/Media-Sort'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.probe.outputs.changed }}
+    env:
+      # `gh api` inside bump-appimage.sh uses this; the curl fallback uses
+      # GITHUB_TOKEN, which is only set below where it matters.
+      GH_TOKEN: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          token: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+
+      - name: Query upstream pins
+        id: probe
+        env:
+          MIN_AGE_DAYS: ${{ github.event.inputs.min_age_days }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          MIN_AGE_DAYS="${MIN_AGE_DAYS:-14}"
+
+          # A manual dry run also shows the full report table; the scheduled run
+          # only needs the delta lines.
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "--- report (min-age ${MIN_AGE_DAYS}d) ---"
+            bash scripts/bump-appimage.sh --min-age-days "$MIN_AGE_DAYS"
+          fi
+
+          # --check exits 2 when at least one pin is behind, 0 when not, and 1
+          # when an upstream could not be queried at all (an incomplete answer
+          # must not look like "nothing to do").
+          set +e
+          OUTPUT=$(bash scripts/bump-appimage.sh --check --min-age-days "$MIN_AGE_DAYS" 2>&1)
+          STATUS=$?
+          set -e
+
+          printf '%s\n' "$OUTPUT"
+          {
+            echo "### AppImage upstream pins"
+            echo
+            echo "Soak period: ${MIN_AGE_DAYS} days."
+            echo
+            echo '```'
+            printf '%s\n' "$OUTPUT"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          case "$STATUS" in
+            2) echo "changed=1" >>"$GITHUB_OUTPUT" ;;
+            0) echo "changed=0" >>"$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::scripts/bump-appimage.sh --check failed with exit $STATUS"
+              exit "$STATUS"
+              ;;
+          esac
+
+  bump:
+    name: Open or update the bump PR
+    needs: check
+    if: >-
+      needs.check.outputs.changed == '1' &&
+      github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+      BRANCH: chore/appimage-bump
+      TITLE: 'chore(appimage): bump bundled upstream versions'
+      MIN_AGE_DAYS: ${{ github.event.inputs.min_age_days }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          # The bump branch is force-updated, which needs the full history and
+          # the remote-tracking ref to lease against.
+          fetch-depth: 0
+          # With a PAT the push is attributed to a real user, so the PR's own
+          # workflows fire (see the TOKEN CAVEAT in the header). Without one this
+          # is github.token and the in-job gate below is the only verification.
+          token: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+
+      - name: Apply the bumps
+        run: |
+          set -euo pipefail
+          MIN_AGE_DAYS="${MIN_AGE_DAYS:-14}"
+          bash scripts/bump-appimage.sh --apply --min-age-days "$MIN_AGE_DAYS" | tee apply.log
+          if git diff --quiet -- packaging/appimage/versions.env; then
+            echo "::error::--check reported pending updates but --apply changed nothing in packaging/appimage/versions.env"
+            exit 1
+          fi
+          git diff -- packaging/appimage/versions.env
+
+      - name: Commit and push the bump branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$BRANCH"
+          # Only the pins: the apply step writes nothing else, and a stray file
+          # must not ride along into the PR.
+          git add packaging/appimage/versions.env
+          git commit -m "$TITLE"
+
+          # --force-with-lease needs the remote side of the lease to exist
+          # locally, both for a branch this run is replacing and for the very
+          # first push (where the fetch fails harmlessly).
+          git fetch --force origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || true
+          git push --force-with-lease origin "$BRANCH"
+
+      # The authoritative verification when no PAT is configured, and a second
+      # opinion even when there is one: the same ubuntu:22.04 build and the same
+      # verify.sh gate the packaging check runs.
+      - name: Gate (build + verify the AppImage)
+        id: gate
+        continue-on-error: true
+        uses: ./.github/actions/appimage-gate
+        with:
+          target: x86_64-unknown-linux-gnu
+          artifact-name: appimage-bump-linux-x64
+
+      - name: Open or update the pull request
+        env:
+          GATE: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GATE" = "success" ]; then
+            GATE_LINE="**AppImage gate: passed.** \`build-in-container.sh\` in the ubuntu:22.04 container, \`pack-appimage.sh\`, then \`verify.sh\` on the AppDir and on the sealed AppImage — the same gate \`.github/workflows/appimage.yml\` runs."
+          else
+            GATE_LINE="**AppImage gate: FAILED.** The pin combination in this PR does not build or does not pass \`verify.sh\` (see the *Gate (build + verify the AppImage)* step of [this run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})). Do not merge it; pin the previous release of the offending component in \`packaging/appimage/versions.env\` instead."
+          fi
+
+          {
+            echo '## AppImage upstream bump'
+            echo
+            echo 'Every pin in `packaging/appimage/versions.env` was re-checked against its upstream by `scripts/bump-appimage.sh`. Each new entry was downloaded and its sha256 recomputed from those exact bytes, so version, URL, commit and hash all agree.'
+            echo
+            printf '```\n'
+            cat apply.log
+            printf '```\n'
+            echo
+            echo "$GATE_LINE"
+            echo
+            echo '---'
+            echo
+            echo '### Before merging'
+            echo
+            echo '- [ ] The gate above is green (or the failing component is rolled back to its previous release).'
+            echo '- [ ] Nothing here needs a *deliberate* pin instead of "newest": `scripts/release.sh`-style judgement still applies to FFmpeg, whose major version is the most likely to break mpv.'
+            echo
+            echo '### Flatpak'
+            echo
+            echo 'The Flatpak manifest (`flatpak/app.mediasort.MediaSort.yml`) pins **the same projects separately** and is deliberately not touched here: it is a different runtime and a different tag/commit pair per module, and bumping both from one query would ship a combination neither was tested with. Bump it by hand; `.github/workflows/flatpak-build.yml` gates that PR.'
+            echo
+            echo '> Automated by `.github/workflows/appimage-bump.yml`. Without an `APPIMAGE_BUMP_TOKEN` secret this branch was pushed with the workflow token, so no other workflow ran on it: the gate above is then the only verification.'
+          } >pr-body.md
+
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "updating open PR #$EXISTING"
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file pr-body.md
+          else
+            echo "no open PR for $BRANCH; opening a draft"
+            gh pr create --draft --base master --head "$BRANCH" --title "$TITLE" --body-file pr-body.md
+          fi
+
+      - name: Fail when the gate failed
+        if: steps.gate.outcome != 'success'
+        run: |
+          echo "::error::the AppImage gate failed for this bump; the PR records the failure, and this run is red on purpose"
+          exit 1

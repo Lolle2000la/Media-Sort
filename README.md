@@ -67,9 +67,16 @@ No data is willingly collected. If you turn on "Check for updates on startup" in
 
 - Linux, macOS, or Windows
 - Rust 1.98 or later (if building from source)
+
+The precompiled packages bundle everything they need at runtime: `libmpv`,
+`libdav1d` (AVIF image decoding) and `ffmpeg` (fast video thumbnails) are all
+shipped inside the package on every platform, Linux AppImage included.
+
+**Building from source** still needs these system libraries:
+
 - libmpv (needed for video and audio playback)
 - libdav1d (needed for AVIF image decoding)
-- ffmpeg (bundled on Windows and macOS for fast video thumbnails; optional on Linux — falls back to mpv)
+- ffmpeg (optional; enables faster video thumbnails, falls back to mpv)
 
 Install libmpv through your package manager:
 - Ubuntu/Debian: `libmpv-dev`
@@ -109,7 +116,18 @@ Pre-compiled standalone binaries with automatic updates are provided for Linux, 
 
 ### Requirements
 
-All platforms require **libmpv** to be installed on your system to manage video and audio playback pipelines. Linux additionally requires **libdav1d** for AVIF image decoding.
+The precompiled packages bundle everything they need: **libmpv**, **ffmpeg** and
+**dav1d** (AVIF decoding) ship inside the package on every platform, so no media
+library has to be installed to run Media Sort. Building from source is the only
+case that needs these libraries on your system (see [Requirements](#requirements)).
+
+On Linux the AppImage additionally expects a 64-bit X11 or Wayland desktop,
+**glibc 2.35 or newer** (Ubuntu 22.04+, Debian 12+, Fedora 36+, current Arch),
+your distribution's **ALSA** (`libasound`), **C++ runtime** (`libstdc++`) and
+**`libdrm`** libraries — the system interfaces the distribution's own audio
+plugins and GPU drivers bind to — and a graphics driver with Vulkan or OpenGL;
+GPU drivers are never bundled, because they have to match your kernel and
+hardware.
 
 ### Platform Setup Instructions
 

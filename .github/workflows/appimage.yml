@@ -1,0 +1,74 @@
+name: AppImage Packaging
+
+# Packaging check for the self-contained Linux AppImage (packaging/appimage/):
+# libmpv, ffmpeg and dav1d are compiled from pinned upstream sources inside an
+# Ubuntu 22.04 container together with the GUI binary, bundled into the AppDir
+# with $ORIGIN RPATHs, gated by verify.sh, and packed into a real AppImage.
+#
+# Cost control: x86_64 only (the arm64 matrix entry in release.yml runs the same
+# script, so a broken arm64 build shows up on the release tag), and it only runs
+# when the packaging itself, this workflow, the release workflow, or anything
+# that can change the bundled dependency closure changes. The Cargo.lock /
+# Cargo.toml / crates globs matter because Renovate automerges non-major cargo
+# bumps: a new dependency (or a new dlopen'd library inside an existing one)
+# reaches `master` without a label, and would otherwise reach a release tag
+# without this gate ever having run against it. Mirrors
+# .github/workflows/flatpak-build.yml.
+#
+# `vpk pack` works standalone -- it only writes local packages; the
+# `vpk download github` step in release.yml pulls the previous release's
+# packages so deltas can be built against them. Only the Windows and macOS legs
+# get a delta out of that: the Linux flow (pack-appimage.sh) purges
+# Releases/*.nupkg after its first pass, so no Linux delta is ever produced. This
+# workflow therefore skips the download and uses a throwaway version.
+on:
+  pull_request:
+    paths: &paths
+      - 'packaging/appimage/**'
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - 'crates/**'
+      - '.github/actions/appimage-gate/**'
+      - '.github/workflows/appimage.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches:
+      - master
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage-linux-x64:
+    name: Build + verify AppImage (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The gate itself (apt tools, the ubuntu:22.04 container build, the
+      # two-pass vpk pack, and verify.sh on both the AppDir and the sealed
+      # AppImage) lives in the composite action, so this workflow and
+      # appimage-bump.yml cannot drift apart. No actions/cache for the same
+      # reason release.yml has none: the payload has to come from pinned
+      # sources alone.
+      - name: Build + verify AppImage
+        id: gate
+        uses: ./.github/actions/appimage-gate
+        with:
+          target: x86_64-unknown-linux-gnu
+          artifact-name: appimage-linux-x64
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: appimage-linux-x64
+          path: ${{ steps.gate.outputs.appimage }}
+          if-no-files-found: error
+          retention-days: 14

@@ -158,11 +158,22 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
+            # Deliberately NO libmpv-dev / libdav1d-dev / libasound2-dev: the
+            # Linux payload (libmpv, ffmpeg, dav1d, ...) is compiled from pinned
+            # sources inside an Ubuntu 22.04 container (see
+            # packaging/appimage/), so a *-dev package on the runner could only
+            # paper over a link against a host library. squashfs-tools unpacks
+            # the intermediate AppImage, patchelf writes the $ORIGIN RPATHs and
+            # xvfb drives the "does the GUI get past the loader" check; xdotool
+            # makes its informational window probe actually run.
+            # libasound2t64/libdrm2 are host-provided by policy (they are part
+            # of the documented floor, see packaging/appimage/excludelist), so
+            # the gate needs them present to start the app at all. The ALSA
+            # runtime library is `libasound2t64` on Ubuntu 24.04+ (`libasound2`
+            # is a virtual package there with two providers, so apt refuses to
+            # install it by that name) and `libasound2` on 22.04.
             sudo apt-get update
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev squashfs-tools
-            if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
-              sudo apt-get install -y nasm
-            fi
+            sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2
 
       - name: Install System Dependencies (macOS Only)
         if: startsWith(matrix.os, 'macos')
@@ -255,7 +266,32 @@ jobs:
       # Releases are always built from the checked-out source with no cache in
       # the loop. Non-release CI caches live in ci.yml under a trusted-write
       # policy.
+      - name: Build Standalone Binary (Linux, inside Ubuntu 22.04)
+        if: startsWith(matrix.os, 'ubuntu')
+        # The AppImage's glibc floor is whatever compiled it, and libmpv/ffmpeg
+        # are built from pinned upstream sources here too (see
+        # packaging/appimage/). Everything therefore happens in a jammy
+        # container: the binary, libmpv, ffmpeg and dav1d all end up requiring
+        # glibc <= 2.35 instead of the runner's 2.39, and the Rust link cannot
+        # pick up a host library because there is none installed on the runner.
+        # The container writes target/ (where later steps expect the binary)
+        # and target/appimage-stage (the bundle input) back into the workspace;
+        # HOST_UID/HOST_GID give those files back to the runner user.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
+            -e TARGET="${{ matrix.target }}" \
+            ubuntu:22.04 \
+            bash /work/packaging/appimage/build-in-container.sh
+
+          ls -l "target/${{ matrix.target }}/release/media-sort-gui"
+
       - name: Build Standalone Binary
+        if: ${{ !startsWith(matrix.os, 'ubuntu') }}
         env:
           LIBRARY_PATH: ${{ startsWith(matrix.os, 'macos') && format('{0}/lib', matrix.brew_prefix) || '' }}
           # The NODEFAULTLIB flags mirror .cargo/config.toml (see there for
@@ -306,39 +342,19 @@ jobs:
 
             vpk pack -u MediaSort -v "$CLEAN_VERSION" -p dist -e ${{ matrix.exe_name }} --icon "dist/icon.ico" --channel ${{ matrix.platform }} --runtime ${{ matrix.platform }} --framework ${{ matrix.vcredist }}
           else
-            # Stage only the compiled binary to prevent bundling Cargo build cache
-            mkdir -p dist/linux-staging
-            cp "$TARGET_DIR/media-sort-gui" dist/linux-staging/
+            # Two-pass pack: vpk writes the AppDir skeleton from the bare binary,
+            # the payload is bundled into it and gated, the desktop entry is
+            # fixed up, and the finished AppDir is packed again. The whole flow
+            # lives in packaging/appimage/pack-appimage.sh so it cannot drift
+            # from .github/workflows/appimage.yml.
+            TARGET_DIR="$TARGET_DIR" \
+              bash packaging/appimage/pack-appimage.sh "$CLEAN_VERSION" "${{ matrix.platform }}"
 
-            # Generate initial layout with default update manifests
-            vpk pack -u MediaSort -v "$CLEAN_VERSION" -p "dist/linux-staging" -e media-sort-gui --icon "packaging/linux/icon.svg" --channel ${{ matrix.platform }} --runtime ${{ matrix.platform }}
-
-            # Unpack the intermediate AppImage artifact
-            APPIMAGE_PATH=$(ls Releases/*.AppImage | head -n 1)
-            chmod +x "$APPIMAGE_PATH"
-            "$APPIMAGE_PATH" --appimage-extract
-            
-            # Purge baseline outputs to prevent circular duplication
-            rm -f Releases/*.AppImage
-            rm -f Releases/*.nupkg
-
-            # Surgically modify vpk-generated desktop file (preserves vendor metadata)
-            TARGET_DESKTOP="squashfs-root/MediaSort.desktop"
-            sed -i 's/^Name=.*/Name=Media Sort/' "$TARGET_DESKTOP"
-            sed -i 's/^Exec=.*/& %U/' "$TARGET_DESKTOP"
-            sed -i 's/^StartupWMClass=.*/StartupWMClass=MediaSort/' "$TARGET_DESKTOP"
-            printf '\n%s\n' "MimeType=inode/directory;" >> "$TARGET_DESKTOP"
-
-            # Mirror adjusted launcher to standard layout paths
-            mkdir -p squashfs-root/usr/share/applications
-            cp "$TARGET_DESKTOP" squashfs-root/usr/share/applications/MediaSort.desktop
-
-            # Re-stage into a clean AppDir context and execute final compilation
-            rm -rf dist
-            mkdir -p dist
-            mv squashfs-root dist/MediaSort.AppDir
-
-            vpk pack -u MediaSort -v "$CLEAN_VERSION" -p "dist/MediaSort.AppDir" -e media-sort-gui --channel ${{ matrix.platform }} --runtime ${{ matrix.platform }}
+            # Re-verify the sealed AppImage: this extracts the final squashfs
+            # and runs the GUI through the AppImage runtime
+            # (--appimage-extract-and-run), so a wrong RPATH or a library that
+            # only resolved because of the build container is caught here.
+            bash packaging/appimage/verify.sh "$(ls Releases/*.AppImage | head -n 1)"
           fi
 
       - name: Ensure GnuPG is installed
