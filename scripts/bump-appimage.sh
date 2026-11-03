@@ -511,10 +511,14 @@ rust_eligible() { # <component> <pinned>
   # appeared in the first bump PR's body). sed prints every match cheaply, so
   # take the first line without breaking the upstream writer.
   date=$(printf '%s\n' "$toml" | sed -n 's/^date = "\(.*\)"$/\1/p' | sed -n '1p')
+  # No `exit` inside awk: it closes the pipe while printf is still writing,
+  # and the race surfaces as "printf: write error: Broken pipe" (the TOML is
+  # small enough that it usually wins, which is why it only showed up in CI).
+  # Read to EOF and print the first match instead.
   version=$(printf '%s\n' "$toml" |
     awk '/^\[pkg\.rust\]/ { in_rust = 1; next }
          /^\[/ { in_rust = 0 }
-         in_rust && /^version = "/ { print; exit }' |
+         in_rust && /^version = "/ && !seen { print; seen = 1 }' |
     sed -n 's/^version = "\([^ "]*\).*$/\1/p')
   [ -n "$version" ] && [ -n "$date" ] || return 1
   version_gt "$version" "$pinned" || return 0
