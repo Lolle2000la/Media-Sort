@@ -21,7 +21,8 @@ Select the package appropriate for your operating system and processor architect
 
 ## System Prerequisites
 
-Depending on your platform, you may need to install the `mpv` media playback engine libraries:
+Every package below is self-contained: you never have to install the `mpv`
+media playback engine libraries or `ffmpeg` yourself.
 
 ### Windows & macOS
 
@@ -29,32 +30,46 @@ Depending on your platform, you may need to install the `mpv` media playback eng
 
 ### Linux
 
-Media Sort for Linux ships as an AppImage.
+Media Sort for Linux ships as an AppImage that is equally self-contained.
 
 #### AppImage
 
-The AppImage packages run dynamically on the host environment and require `libmpv` and `libdav1d` (for AVIF image decoding) to be installed on your system. The AppImage also depends on `libasound2` and X11/Wayland libraries which are typically pre-installed on desktop Linux distributions.
+The AppImage bundles everything it needs: `libmpv` (built together with ffmpeg,
+libass, zimg and dav1d), the `ffmpeg` command line tool used for fast video
+thumbnails, and the PulseAudio client plus the X11/Wayland libraries mpv links
+against. **No media library has to be installed on the host** — no `libmpv`, no
+`libdav1d`, no `ffmpeg`, no codec packages. Because of that, the AppImage no
+longer depends on the mpv version your distribution happens to ship, and video
+playback, AVIF images and video thumbnails work the same everywhere.
 
-Installing `ffmpeg` is optional on Linux — it enables faster video thumbnails, but Media Sort falls back to mpv when it is not present.
+What the host still has to provide:
 
-#### Arch Linux / CachyOS
+- a 64-bit (x86_64 or aarch64) Linux desktop with an X11 or Wayland session,
+- **glibc 2.35 or newer** (Ubuntu 22.04+, Debian 12+, Fedora 36+, current Arch) —
+  the AppImage is compiled _inside_ Ubuntu 22.04, so it runs on that release and
+  everything **newer**; a distribution whose glibc is older than 2.35 cannot load
+  it,
+- your distribution's ALSA (`libasound`), C++ runtime (`libstdc++`) and `libdrm`
+  libraries. These are the system interfaces your distribution's own plugins and
+  GPU drivers bind to, so bundling them would break audio and video decoding
+  instead of helping; every desktop distribution ships them,
+- a working graphics driver with Vulkan (preferred) or OpenGL, which renders the
+  video frames. Driver libraries are deliberately **not** bundled, because they
+  must match your kernel and GPU,
+- optionally a VA-API driver from your distribution, which enables
+  hardware-accelerated video decoding.
 
 ```bash
-sudo pacman -S mpv dav1d
+chmod +x MediaSort-*-linux-*.AppImage
+./MediaSort-*-linux-*.AppImage
 ```
 
-#### Debian / Ubuntu
-
-```bash
-sudo apt install libmpv2 libasound2 libdav1d7
-```
-
-#### Fedora
-
-```bash
-sudo dnf install mpv-libs dav1d-libs
-```
+On a system without FUSE (for example inside a container), add
+`--appimage-extract-and-run`.
 
 :::note
-If `libmpv` is not installed, Media Sort will still launch and function for images and audio. In-app video and GIF playback will be automatically disabled. Video files are still detected and browsable, though thumbnails will not be available for them.
+Without a usable Vulkan/OpenGL driver the app still launches, but in-app video
+preview cannot render frames. Hardware decoding additionally needs the VA-API
+driver for your GPU, which comes from your distribution — the AppImage only
+ships the API library, never the driver.
 :::

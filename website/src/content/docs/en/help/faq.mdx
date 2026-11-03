@@ -15,10 +15,10 @@ import Kbd from '../../../../components/Kbd.astro';
 
 ### Videos don't play (preview is blank or shows a placeholder)
 
-Video playback requires **libmpv** to be installed on your system:
+Video playback needs **libmpv**, which every released package bundles:
 
-- **Linux:** Install `libmpv-dev` or `libmpv1` via your package manager (e.g., `sudo apt install libmpv2` on Debian/Ubuntu).
-- **macOS and Windows:** mpv is bundled with the application. If video still doesn't work, ensure your GPU drivers are up to date and support Vulkan.
+- **Linux (AppImage), macOS and Windows:** mpv, ffmpeg and dav1d ship inside the package, so no media library has to be installed. The AppImage still uses the base system libraries your desktop already has (on Linux: ALSA `libasound`, the C++ runtime `libstdc++`, `libdrm` and the GPU drivers). If video still doesn't work, the cause is usually the GPU: update your graphics drivers so they support Vulkan.
+- **Building from source:** install `libmpv-dev` (Debian/Ubuntu) or the equivalent for your distribution, plus `libdav1d-dev` for AVIF images. A from-source build links the system libmpv.
 
 You can still view images and play audio without libmpv. Use the **"Open in system player"** button to play video files in your default media player.
 
@@ -26,7 +26,7 @@ You can still view images and play audio without libmpv. Use the **"Open in syst
 
 - **Stale configuration:** Try deleting your `config.toml` file. Its location depends on your OS; see the [Configuration File](/advanced/config-file/) page. The app will recreate it with defaults on next launch.
 - **Vulkan / GPU issues:** Media Sort uses wgpu for rendering, which requires Vulkan, Metal, or DirectX 12 support. Update your GPU drivers and ensure your graphics stack is functional.
-- **Missing system libraries:** On Linux, ensure `libx11`, `libwayland`, and `libasound2` are installed.
+- **Missing system libraries:** The AppImage bundles its own X11/Wayland libraries, but it deliberately uses the host's ALSA (`libasound`), C++ runtime (`libstdc++`), `libdrm` and GPU drivers — every desktop distribution ships those, so a missing one means the desktop itself is incomplete. A self-compiled build additionally needs `libmpv-dev` (and the equivalent of `libx11`/`libwayland`/`libasound2` when they are not installed).
 
 ### How do I reset all settings to defaults?
 

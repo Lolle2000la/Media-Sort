@@ -40,13 +40,13 @@ Die Videowiedergabe wird von **libmpv** (via FFmpeg) angetrieben. Das Videobild 
 
 ### Systemvoraussetzungen
 
-- **libmpv** muss auf Ihrem System installiert sein. Unter Linux installieren Sie das Paket `libmpv-dev` oder `libmpv1`. Unter macOS und Windows ist mpv in der Anwendung enthalten.
-- Eine **Vulkan-fähige GPU** mit aktuellen Treibern ist für die Videodarstellung erforderlich.
-- Wenn libmpv nicht gefunden wird, ist die interne Videowiedergabe deaktiviert. Videodateien werden jedoch weiterhin erkannt und können durchsucht werden. Bilder und Audio funktionieren weiterhin normal. Video-Miniaturansichten benötigen ebenfalls mpv; ohne wird stattdessen ein Platzhalter angezeigt.
+- **Bei den veröffentlichten Paketen ist keine mpv-Installation nötig:** Das Linux-AppImage (wie auch die macOS- und Windows-Pakete) bringt ein festgelegtes `libmpv`, ffmpeg und dav1d selbst mit. Nur ein **Selbstbau** linkt das System-`libmpv` und benötigt daher installierte `libmpv-dev`/`libmpv`-Pakete.
+- Eine **Vulkan-fähige GPU** mit aktuellen Treibern ist für die Videodarstellung erforderlich. Der GPU-Treiber selbst wird nie mitgeliefert — er muss zu Kernel und Hardware passen und kommt vom System.
+- Ohne nutzbares `libmpv` (Selbstbau auf einem System ohne libmpv) ist die interne Videowiedergabe deaktiviert. Videodateien werden jedoch weiterhin erkannt und können durchsucht werden. Bilder und Audio funktionieren weiterhin normal.
 
 ### Unterstützte Videoformate
 
-Eine vollständige Liste der unterstützten Videoformate finden Sie auf der Seite [Medienfunktionen](/manuals/media-capabilities/). Die Formatunterstützung hängt von der installierten Version von libmpv und den zugrunde liegenden FFmpeg-Codecs ab.
+Eine vollständige Liste der unterstützten Videoformate finden Sie auf der Seite [Medienfunktionen](/manuals/media-capabilities/). Die Formatunterstützung hängt vom verwendeten `libmpv`/FFmpeg-Build ab: dem festgelegten Build der veröffentlichten Pakete oder dem des Systems bei einem Selbstbau.
 
 ### GIF-Wiedergabe
 
