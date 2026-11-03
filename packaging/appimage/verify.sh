@@ -15,7 +15,8 @@
 #      allowlist with a reason;
 #   d) usr/lib/libmpv.so.2 is present;
 #   e) the bundled ffmpeg runs, encodes a PNG (video thumbnails), decodes it
-#      back, decodes a real AV1 file with the bundled libdav1d, and is licensed
+#      back, decodes real h264, hevc, vp9 and AV1 files (the AV1 one explicitly
+#      through libdav1d), and is licensed
 #      AGPL-compatibly (a GPL build only when it is GPLv3, i.e. configured with
 #      --enable-version3; a GPLv2-only build cannot combine with this
 #      AGPL-3.0-or-later application);
@@ -241,7 +242,7 @@ while [ $# -gt 0 ]; do
     --max-glibc) MAX_GLIBC=$2; shift 2 ;;
     --skip-gui) SKIP_GUI=1; shift ;;
     --selftest) selftest; exit 0 ;;
-    -h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [ -z "$TARGET" ] || die "more than one payload given"; TARGET=$1; shift ;;
   esac
@@ -578,6 +579,37 @@ if [ -s "$WORK/ffmpeg-fixture-decode.log" ]; then
   die "ffmpeg reported errors while decoding $FIXTURE"
 fi
 ok "ffmpeg decodes a real $fixture_codec fixture with libdav1d ($(basename "$FIXTURE"), $(stat -c %s "$FIXTURE") bytes)"
+
+# The same question for the codecs that carry nearly all real-world video.
+# `-decoders` above only proves the decoder symbols are compiled in; these clips
+# prove they decode an actual bitstream, which is what "does preview work?" asks.
+# The fixtures are committed under testdata/ (its README has the exact generating
+# commands): they are produced on a host with libx264/libx265/libvpx-vp9 and the
+# bundled FFmpeg only ever decodes them, so the payload still needs no encoder
+# library (see build_ffmpeg()).
+FIXTURE_DIR="$SCRIPT_DIR/testdata"
+decode_fixture() { # <file> <expected codec_name>
+  local file=$1 want=$2 codec banner log
+  [ -f "$file" ] || die "missing decode fixture: $file"
+  # ffprobe is deliberately not built (--disable-ffprobe), so the codec has to
+  # come out of `ffmpeg -i`'s stream banner.
+  banner=$(run_ffmpeg -i "$file" 2>&1 || true)
+  codec=$(printf '%s\n' "$banner" \
+    | sed -n 's/.*Stream .*Video: \([a-zA-Z0-9]*\).*/\1/p' | head -n 1)
+  [ "$codec" = "$want" ] \
+    || die "$file reports codec '${codec:-unknown}', not the expected '$want'"
+  log=$WORK/decode-$(basename "$file").log
+  run_ffmpeg -v error -i "$file" -f null - >"$log" 2>&1 \
+    || { cat "$log" >&2; die "the bundled ffmpeg could not decode $file ($want)"; }
+  if [ -s "$log" ]; then
+    cat "$log" >&2
+    die "the bundled ffmpeg reported errors while decoding $file ($want)"
+  fi
+  ok "ffmpeg decodes $want ($(basename "$file"), $(stat -c %s "$file") bytes)"
+}
+decode_fixture "$FIXTURE_DIR/h264.mp4" h264
+decode_fixture "$FIXTURE_DIR/hevc.mp4" hevc
+decode_fixture "$FIXTURE_DIR/vp9.webm" vp9
 
 # ---------------------------------------------------------------------------
 # (f) the GUI gets past the dynamic loader, and does not crash or exit silently

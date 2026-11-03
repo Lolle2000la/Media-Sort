@@ -33,7 +33,8 @@ no binaries are committed to git and nothing is downloaded at runtime.
 | `excludelist` | The host-provided allowlist: what must never be bundled (glibc/loader, the GL/Vulkan/GPU-driver stack, and the plugin hosts the host's plugins bind to) with a one-line reason per entry. |
 | `excludelist.sh` | The policy *code* for that list (`is_excluded`, `host_reason`, the driver globs, the dlopen-only names), sourced by `bundle.sh` and `verify.sh` so the two cannot disagree about the same name. |
 | `pack-appimage.sh` | The two-pass `vpk pack` flow (staging → pack → unpack → bundle → verify → desktop surgery → final pack), shared by `release.yml` and `appimage.yml`. |
-| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode plus its licence rule, GUI start under Xvfb (`--selftest` probes the exit and licence predicates; the host floor is printed on every run). |
+| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode (h264, hevc, vp9 and AV1 through libdav1d) plus its licence rule, GUI start under Xvfb (`--selftest` probes the exit and licence predicates; the host floor is printed on every run). |
+| `testdata/` | Committed decode fixtures (`h264.mp4`, `hevc.mp4`, `vp9.webm`, ~24 KB total) that `verify.sh` decodes with the bundled `ffmpeg`; its `README.md` has the exact regenerating commands. |
 
 CI wiring: `.github/workflows/appimage.yml` (packaging-only check, **x64 and
 arm64**) and the weekly bump (`.github/workflows/appimage-bump.yml`, below) run
@@ -464,8 +465,9 @@ the bug this work fixes.
   `--enable-version3`, which cannot combine with this AGPL application), a
   missing `h264`/`hevc`/`vp9`/`libdav1d` decoder, a failed PNG encode (the
   rawvideo pipe is used because `--disable-avdevice` removes the lavfi *input*), a failed
-  mpeg4 decode round-trip, or a failed `libdav1d` decode of the repository's real
-  AV1 fixture,
+  mpeg4 decode round-trip, a failed `libdav1d` decode of the repository's real
+  AV1 fixture, or a failed decode of any committed fixture in `testdata/`
+  (h264, hevc, vp9 — one `ok:` line per codec),
 * the GUI dying with `error while loading shared libraries` (or a versioned
   symbol failure) under `xvfb-run`, exiting 0, failing to execute (126/127),
   dying from SIGABRT/SIGFPE/SIGSEGV (134/136/139), exiting 101 (a Rust panic is
@@ -483,6 +485,27 @@ the bug this work fixes.
   non-zero exit is only reported, since a GPU-less Xvfb cannot open a wgpu
   surface. When `xdotool` is present the check also reports whether a window
   named `Media Sort` appeared (informational only).
+
+**What "decode works" means here.** The gate proves it with the payload's own
+`ffmpeg`, not the host's: four real bitstreams are decoded end to end
+(`-v error -i <file> -f null -`, failing on a non-zero exit *or* any stderr
+line), each after asserting the file's reported `codec_name`:
+
+| Codec | Fixture | Proof |
+| --- | --- | --- |
+| AV1 | `resources/MockState/mock 3.mp4` | decoded with an explicit `-c:v libdav1d`, so the bundled dav1d is exercised rather than FFmpeg's native AV1 decoder |
+| H.264 | `testdata/h264.mp4` | native decoder |
+| HEVC | `testdata/hevc.mp4` | native decoder |
+| VP9 | `testdata/vp9.webm` | native decoder |
+
+The three `testdata/` clips are generated *outside* the payload (the bundled
+FFmpeg is built without x264/x265/vp9 encoders — nothing in the app encodes
+video) and committed, because `crates/media-sort-backend/tests/fixtures/` holds
+only images and audio and the AV1 clip alone says nothing about the other three
+decoders. Regenerate them with the exact commands in
+[`testdata/README.md`](testdata/README.md); they are ~24 KB in total. `ffprobe`
+is not part of the payload (`--disable-ffprobe`), so the gate reads the codec from
+`ffmpeg -i`'s stream banner — do not add ffprobe to make this easier.
 
 The **host floor is printed on every run** — glibc (with the payload's maximum
 requirement), `libstdc++.so.6`, `libasound.so.2`, `libdrm.so.2` and the
