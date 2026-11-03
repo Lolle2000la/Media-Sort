@@ -33,13 +33,22 @@ no binaries are committed to git and nothing is downloaded at runtime.
 | `excludelist` | The host-provided allowlist: what must never be bundled (glibc/loader, the GL/Vulkan/GPU-driver stack, and the plugin hosts the host's plugins bind to) with a one-line reason per entry. |
 | `excludelist.sh` | The policy *code* for that list (`is_excluded`, `host_reason`, the driver globs, the dlopen-only names), sourced by `bundle.sh` and `verify.sh` so the two cannot disagree about the same name. |
 | `pack-appimage.sh` | The two-pass `vpk pack` flow (staging → pack → unpack → bundle → verify → desktop surgery → final pack), shared by `release.yml` and `appimage.yml`. |
-| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode, GUI start under Xvfb (`--selftest` probes its exit predicate; the host floor is printed on every run). |
+| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode plus its licence rule, GUI start under Xvfb (`--selftest` probes the exit and licence predicates; the host floor is printed on every run). |
 
-CI wiring: `.github/workflows/release.yml` (Linux matrix entries) and
-`.github/workflows/appimage.yml` (packaging-only check, x86_64). Both run the
-build/verify steps through the composite action
-`.github/actions/appimage-gate`, so the packaging check and the weekly dependency
-bump (below) cannot disagree about what "passes".
+CI wiring: `.github/workflows/appimage.yml` (packaging-only check, x86_64) and
+the weekly bump (`.github/workflows/appimage-bump.yml`, below) run the
+build/verify steps through the composite action `.github/actions/appimage-gate`,
+so the two cannot disagree about what "passes".
+
+`.github/workflows/release.yml` (Linux matrix entries) deliberately keeps its
+own **inline** copy of those steps instead: it runs inside a 5-platform matrix on
+tag pushes, with the build interleaved with signing and uploads (see the note in
+`.github/actions/appimage-gate/action.yml`). It calls the same
+`pack-appimage.sh`, and it runs the same `verify.sh` — on the packed
+`dist/MediaSort.AppDir` and again on the sealed `.AppImage` — so the tag build is
+gated identically; only the wiring differs. Keep it that way: a change to the
+flags or the gate belongs in `packaging/appimage/` and the composite action, not
+in a fifth copy of the logic.
 
 ## Rebuilding locally
 
@@ -134,13 +143,24 @@ versioned symlinks and `.so` development links stay in the prefix.
 ## Build flags, and why
 
 FFmpeg (`--enable-shared --disable-static --enable-pic --disable-doc
---disable-debug --disable-ffplay --disable-ffprobe --disable-autodetect
---disable-avdevice --enable-zlib --enable-libdav1d`):
+--disable-debug --disable-ffplay --disable-ffprobe --enable-gpl
+--enable-version3 --disable-autodetect --disable-avdevice --enable-zlib
+--enable-libdav1d`):
 
-* **LGPL only** – `--enable-gpl` is never passed, so no x264/x265. The app never
-  encodes video (and mpv, which is GPL for its X11 support, still cannot gain
-  GPL codecs this way); `verify.sh` fails the build if a future flag change
-  drags GPL code into FFmpeg.
+* **GPLv3** – `--enable-gpl --enable-version3`. Media-Sort is
+  AGPL-3.0-or-later, and GPLv3 §13 explicitly permits combining GPLv3 code with
+  AGPLv3 code (the same reason mpv's GPL build is fine, below); mpv's own
+  `-Dx11=enabled` already forces `-Dgpl=true` anyway, so the payload has been
+  GPL for its X11 support from the start. `--enable-version3` is the part that
+  matters: it upgrades the GPL parts from "v2 or later" to GPLv3, which combines
+  unambiguously with AGPLv3. `verify.sh` enforces the pair — `--enable-gpl`
+  without `--enable-version3` (a GPLv2-only codec stack, incompatible with
+  AGPLv3) fails the gate.
+* **No GPL encoder library is linked** – no x264, x265 or libxvid. Nothing in
+  the app encodes video: `extract_frame` pipes a PNG out, and that is the native
+  PNG encoder. x265 alone would add ~8 MB to the payload for no use. This is a
+  size decision, not a licensing wall: the GPL build already ships, so enabling
+  an encoder later needs a deliberate payload-size decision and nothing else.
 * `--enable-zlib` is what makes the **PNG encoder** exist, which is what video
   thumbnails need (`ffmpeg -frames:v 1 out.png`).
 * `--disable-autodetect` stops the build from linking whatever `-dev` package
@@ -162,9 +182,9 @@ mpv (`-Dlibmpv=true -Dcplayer=false -Dgl=disabled -Degl=disabled
   second copy of everything.
 * `-Dgpl` stays at its default (`true`): **mpv's X11 support is GPL-only** and
   `-Dgpl=false -Dx11=enabled` is a hard meson error. X11 (and with it VA-API on
-  X11 sessions) is worth more than an LGPL mpv, and GPL-2.0-or-later libmpv
-  links into an AGPL-3.0-or-later application without a licensing conflict —
-  see "Licensing" below.
+  X11 sessions) is worth more than an LGPL mpv, and a GPL libmpv links into an
+  AGPL-3.0-or-later application without a licensing conflict — see "Licensing"
+  below. It is also why the FFmpeg build being GPLv3 costs nothing new.
 * `-Dgl/-Degl/-Dvulkan/-Dshaderc=disabled`: the app drives libmpv's **software**
   render API (`MPV_RENDER_API_TYPE_SW`), so mpv needs no display output of its
   own. This is also what keeps libplacebo's Vulkan and shaderc dependencies out.
@@ -219,7 +239,14 @@ It covers `mpv`, `ffmpeg`, `dav1d`, `libass`, `zimg`, `wayland`,
 `wayland-protocols`, `libplacebo` and `rust`, keeps each component's existing
 URL shape (tag archive vs. release asset), updates the paired `*_COMMIT` where
 `versions.env` records one, refuses prereleases unless `--allow-prerelease`, and
-orders versions with `sort -V` (`1.5.4` is older than `1.5.10`). Comments,
+orders versions with `sort -V` (`1.5.4` is older than `1.5.10`), and never
+stops a tag scan on a non-version tag (`main`, `latest`, `nightly` sorts above
+every release, so it is skipped rather than mistaken for the end of the list).
+`--json` prints exactly one JSON document — also with `--check`, where the exit
+status carries the verdict — so its output pipes straight into `jq`. Timestamps
+are parsed with GNU `date -d` (`gdate` is used when it is on `PATH`, i.e. macOS
+with coreutils); a BSD `date` is refused up front, because it would silently make
+every candidate look too young and report "0 updates". Comments,
 ordering and formatting in `versions.env` are preserved. If **any** query, commit
 lookup, download or hash fails, nothing is written at all — the file stays
 byte-identical and the run exits non-zero. A component whose upstream cannot be
@@ -246,9 +273,27 @@ re-runs `--apply`, commits the result on `chore/appimage-bump`, runs the same
 build + verify gate as [`appimage.yml`](../../.github/workflows/appimage.yml)
 (the shared composite action `.github/actions/appimage-gate`), and then opens a
 **draft** PR — or, when a PR with that head branch is still open, force-pushes
-the branch (`--force-with-lease`) and rewrites that PR's body instead of opening
-a second one. The job fails when the gate fails, but the PR is still created:
-the failing pin combination is then visible instead of silently retried.
+the branch and rewrites that PR's body instead of opening a second one. The job
+fails when the gate fails, but the PR is still created: the failing pin
+combination is then visible instead of silently retried.
+
+Two details of that job are deliberate:
+
+* the force-push takes its lease against the branch tip **read at job start**,
+  not against a ref re-fetched right before the push (`--force-with-lease=<ref>:
+  <tip>`), so a commit a maintainer pushed to `chore/appimage-bump` while the
+  gate was running fails the push instead of being silently overwritten; with no
+  bump branch at all it does a plain non-force push, which creates the branch
+  and still refuses to overwrite one that appeared since;
+* `--apply` with nothing left to write (a bump PR merged between `check` and
+  `bump`, or a release that aged past the soak in between) is a **green no-op**
+  with a notice, not a red run: `.github/workflows/appimage-bump.yml` only fails
+  when apply claims updates it did not write.
+
+`workflow_dispatch` checks out the ref it was dispatched on, so dispatching a
+PR's branch runs that branch's scripts and workflow through the real gate before
+merge; only a dispatch from `master` (like the schedule) commits, pushes or
+touches the PR.
 
 **`APPIMAGE_BUMP_TOKEN`.** A branch pushed with the workflow's own
 `GITHUB_TOKEN` does not trigger other workflows, so the PR would arrive with no
@@ -413,9 +458,10 @@ the bug this work fixes.
   `libwayland-emgd.so.1`) is decided too, and `bundle.sh`'s hand list cannot
   carry a library nothing loads without the gate noticing,
 * a missing `usr/lib/libmpv.so.2`,
-* `usr/bin/ffmpeg -version` failing, a GPL build, a missing
-  `h264`/`hevc`/`vp9`/`libdav1d` decoder, a failed PNG encode (the rawvideo pipe
-  is used because `--disable-avdevice` removes the lavfi *input*), a failed
+* `usr/bin/ffmpeg -version` failing, a GPLv2-only build (`--enable-gpl` without
+  `--enable-version3`, which cannot combine with this AGPL application), a
+  missing `h264`/`hevc`/`vp9`/`libdav1d` decoder, a failed PNG encode (the
+  rawvideo pipe is used because `--disable-avdevice` removes the lavfi *input*), a failed
   mpeg4 decode round-trip, or a failed `libdav1d` decode of the repository's real
   AV1 fixture,
 * the GUI dying with `error while loading shared libraries` (or a versioned
@@ -448,7 +494,7 @@ The application is **AGPL-3.0-or-later**. The bundled components are:
 
 | Component | License |
 | --- | --- |
-| FFmpeg (built without `--enable-gpl`) | **LGPL-2.1-or-later** |
+| FFmpeg (`--enable-gpl --enable-version3`) | **GPL-3.0-or-later** |
 | mpv / libmpv (`-Dgpl=true`, mpv's default: its X11 code is GPL-only) | **GPL-2.0-or-later** (LGPL-2.1-or-later for the non-GPL parts) |
 | dav1d | BSD-2-Clause |
 | libass | ISC |
@@ -461,19 +507,34 @@ The application is **AGPL-3.0-or-later**. The bundled components are:
 | libasound, libdrm (host-provided) | LGPL-2.1-or-later / MIT |
 | glibc (host) | LGPL-2.1 |
 
-The one GPL component is **mpv/libmpv**, and it is unavoidable: mpv's X11
-support (and therefore VA-API on X11 sessions) is GPL-only, so `-Dgpl=false`
-together with `-Dx11=enabled` fails the meson configure. That is compatible
-with shipping the app: mpv is GPL-2.0-or-**later**, the `or later` clause
-allows treating it as GPL-3.0, and AGPL-3.0 explicitly permits combining with
-GPL-3.0 code — the application's own license, AGPL-3.0-or-later, is the
-stronger one for the combined work.
+**The two GPL components are FFmpeg and mpv/libmpv, and both are fine.**
+Media Sort is AGPL-3.0-or-later, and GPLv3 §13 explicitly permits combining
+GPLv3 code with AGPLv3 code, so a GPLv3 FFmpeg and a GPL libmpv link into this
+application without a licensing conflict — the application's own AGPL is the
+stronger license of the combined work.
 
-FFmpeg deliberately stays **LGPL** (`--enable-gpl` is never passed, so no
-x264/x265): the app never encodes video, and keeping the *codec stack* LGPL
-means a future change of heart about the app's license does not require
-rebuilding it. The AppImage is a mere aggregation of these libraries with the
-AGPL application, and their licenses only ask for attribution and the
-availability of their sources — which `versions.env` pins exactly. Keep that
-property when adding dependencies: anything GPL-only needs a licensing decision
-before it may be bundled.
+* **mpv** is GPL unavoidably in practice: its X11 support (and therefore VA-API
+  on X11 sessions) is GPL-only, so `-Dgpl=false -Dx11=enabled` fails the meson
+  configure. It is GPL-2.0-or-**later**, so the `or later` clause already allows
+  treating it as GPLv3.
+* **FFmpeg** is built `--enable-gpl --enable-version3`, i.e. GPLv3, which is the
+  combination GPLv3 §13 blesses outright. Nothing here needs a GPL codec —
+  FFmpeg got no GPL *encoder* (no x264/x265/libxvid; the app never encodes
+  video) — so the GPL part is the codec stack itself, and the flag is a
+  deliberate decision, not an accident: `--enable-version3` is what makes it
+  v3 rather than v2-only. An LGPL-only build was the earlier policy and it was
+  wrong: it encoded a constraint the application's own license does not impose.
+  Do not "restore" it. `verify.sh` now enforces the *correct* rule: a build
+  configured with `--enable-gpl` must also have `--enable-version3` (a
+  GPLv2-only stack cannot combine with AGPLv3); an LGPL build still passes.
+
+**What the GPL obligation amounts to in practice:** unmodified upstream
+sources, already pinned by URL + sha256 in [`versions.env`](versions.env) (and
+by the flags in `build-in-container.sh`, which is itself AGPL-licensed
+repository source). No patches are applied to FFmpeg or mpv; no GPL code of ours
+is produced. So there is no distribution obligation beyond the one AGPL already
+imposes — making the corresponding source available — and it is satisfied by the
+same pinned sources this build reads. Keep that property when adding
+dependencies: anything GPL-only needs a licensing decision before it may be
+bundled, and if it ever stops being true that a component is unmodified
+upstream, that component's patches have to be published with it.
