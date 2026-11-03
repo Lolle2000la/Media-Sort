@@ -89,6 +89,7 @@
   <releases>
     <!-- Add each new release at the top (scripts/release.sh does this for the
          version it tags, including the release.yml version check). -->
+    <release version="3.0.1" date="2026-11-03"/>
     <release version="3.0.0" date="2026-10-13"/>
   </releases>
 </component>

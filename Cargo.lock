@@ -564,7 +564,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "benchmarks"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "bytemuck",
  "divan",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "iced-automation"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "iced",
  "iced-automation-macros",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "iced-automation-macros"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "iced-mpv"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "bytemuck",
  "iced",
@@ -3818,7 +3818,7 @@ dependencies = [
 
 [[package]]
 name = "media-sort-backend"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "ashpd",
  "chrono",
@@ -3849,7 +3849,7 @@ dependencies = [
 
 [[package]]
 name = "media-sort-core"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "dirs",
  "fluent",
@@ -3866,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "media-sort-gui"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "bytemuck",
  "clap",
@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "mpv-utils"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "kamadak-exif",
  "libmpv-sys",
