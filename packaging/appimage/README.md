@@ -35,10 +35,12 @@ no binaries are committed to git and nothing is downloaded at runtime.
 | `pack-appimage.sh` | The two-pass `vpk pack` flow (staging → pack → unpack → bundle → verify → desktop surgery → final pack), shared by `release.yml` and `appimage.yml`. |
 | `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode plus its licence rule, GUI start under Xvfb (`--selftest` probes the exit and licence predicates; the host floor is printed on every run). |
 
-CI wiring: `.github/workflows/appimage.yml` (packaging-only check, x86_64) and
-the weekly bump (`.github/workflows/appimage-bump.yml`, below) run the
-build/verify steps through the composite action `.github/actions/appimage-gate`,
-so the two cannot disagree about what "passes".
+CI wiring: `.github/workflows/appimage.yml` (packaging-only check, **x64 and
+arm64**) and the weekly bump (`.github/workflows/appimage-bump.yml`, below) run
+the build/verify steps through the composite action
+`.github/actions/appimage-gate`, so the two cannot disagree about what "passes".
+The gate covers both shipped Linux arches: an arm64 build that only fails on the
+release tag would block `publish` for every platform, so it is built here.
 
 `.github/workflows/release.yml` (Linux matrix entries) deliberately keeps its
 own **inline** copy of those steps instead: it runs inside a 5-platform matrix on

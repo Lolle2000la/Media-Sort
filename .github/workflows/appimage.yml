@@ -5,14 +5,19 @@ name: AppImage Packaging
 # Ubuntu 22.04 container together with the GUI binary, bundled into the AppDir
 # with $ORIGIN RPATHs, gated by verify.sh, and packed into a real AppImage.
 #
-# Cost control: x86_64 only (the arm64 matrix entry in release.yml runs the same
-# script, so a broken arm64 build shows up on the release tag), and it only runs
-# when the packaging itself, this workflow, the release workflow, or anything
-# that can change the bundled dependency closure changes. The Cargo.lock /
-# Cargo.toml / crates globs matter because Renovate automerges non-major cargo
-# bumps: a new dependency (or a new dlopen'd library inside an existing one)
-# reaches `master` without a label, and would otherwise reach a release tag
-# without this gate ever having run against it. Mirrors
+# Both release arches are gated here. The arm64 leg used to be left to
+# release.yml's matrix entry ("a broken arm64 build shows up on the release
+# tag"), but `publish` waits on every platform leg, so an arm64 failure there
+# blocks the whole release -- including the x64 AppImage and the Windows/macOS
+# artifacts. Building both arches in the PR is the only place that failure is
+# still cheap.
+#
+# It only runs when the packaging itself, this workflow, the release workflow,
+# or anything that can change the bundled dependency closure changes. The
+# Cargo.lock / Cargo.toml / crates globs matter because Renovate automerges
+# non-major cargo bumps: a new dependency (or a new dlopen'd library inside an
+# existing one) reaches `master` without a label, and would otherwise reach a
+# release tag without this gate ever having run against it. Mirrors
 # .github/workflows/flatpak-build.yml.
 #
 # `vpk pack` works standalone -- it only writes local packages; the
@@ -45,9 +50,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  appimage-linux-x64:
-    name: Build + verify AppImage (linux-x64)
-    runs-on: ubuntu-latest
+  appimage:
+    name: Build + verify AppImage (${{ matrix.channel }})
+    runs-on: ${{ matrix.os }}
+    # One architecture failing says nothing about the other: finish both so a
+    # single run shows the whole matrix state.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact-name: appimage-linux-x64
+            channel: linux-x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact-name: appimage-linux-arm64
+            channel: linux-arm64
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,13 +81,14 @@ jobs:
         id: gate
         uses: ./.github/actions/appimage-gate
         with:
-          target: x86_64-unknown-linux-gnu
-          artifact-name: appimage-linux-x64
+          target: ${{ matrix.target }}
+          artifact-name: ${{ matrix.artifact-name }}
+          channel: ${{ matrix.channel }}
 
       - name: Upload AppImage
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: appimage-linux-x64
+          name: ${{ matrix.artifact-name }}
           path: ${{ steps.gate.outputs.appimage }}
           if-no-files-found: error
           retention-days: 14
