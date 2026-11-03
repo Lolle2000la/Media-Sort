@@ -50,10 +50,6 @@ die() { printf 'verify: FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf 'verify: %s\n' "$*"; }
 ok()  { printf 'verify: ok: %s\n' "$*"; }
 
-is_elf() {
-  [ -f "$1" ] && [ "$(head -c 4 "$1" | od -An -c | tr -d ' \n')" = '177ELF' ]
-}
-
 # True when <a> is a version >= <b> (both X.Y[.Z]).
 version_ge() {
   [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
@@ -431,7 +427,9 @@ GUI_ELF=$PAYLOAD/usr/bin/media-sort-gui
 # and "libX11-xcb.so.1" into a single bogus name.
 manifest_elfs=("$GUI_ELF")
 while IFS= read -r elf; do
-  is_elf "$elf" || continue
+  # Static ELFs are skipped: they cannot load a shared library, and their
+  # embedded strings are not a dlopen manifest (vpk's arm64 UpdateNix stub).
+  is_dynamic_elf "$elf" || continue
   manifest_elfs+=("$elf")
 done < <(find "$PAYLOAD/usr/lib" "$PAYLOAD/usr/bin" -maxdepth 1 -type f | sort)
 manifest=$(

@@ -37,10 +37,6 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 die() { printf 'bundle: ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf 'bundle: %s\n' "$*"; }
 
-is_elf() {
-  [ -f "$1" ] && [ "$(head -c 4 "$1" | od -An -c | tr -d ' \n')" = '177ELF' ]
-}
-
 # DT_NEEDED entries of an ELF, one per line.
 needed_of() {
   readelf -d "$1" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'
@@ -179,13 +175,23 @@ install_payload() {
   chmod 0755 "$bin_dir"/* 2>/dev/null || true
   log "copied $(find "$lib_dir" -name '*.so*' | wc -l) libraries into $lib_dir"
 
+  # Static ELFs have no .dynamic section, so there is no library search path to
+  # rewrite and patchelf would abort with "cannot find section '.dynamic'". The
+  # arm64 build of vpk's UpdateNix stub is statically linked (the x64 one is
+  # not), which broke the first arm64 gate run; skipping is correct for any
+  # such helper, present or future.
   local elf
   while IFS= read -r elf; do
+    is_dynamic_elf "$elf" || continue
     patchelf --force-rpath --set-rpath '$ORIGIN' "$elf"
   done < <(find "$lib_dir" -maxdepth 1 -name '*.so*' -type f)
 
   while IFS= read -r elf; do
     is_elf "$elf" || continue
+    if ! is_dynamic_elf "$elf"; then
+      log "bin: $(basename "$elf") is statically linked; no RPATH to set"
+      continue
+    fi
     patchelf --force-rpath --set-rpath '$ORIGIN/../lib' "$elf"
   done < <(find "$bin_dir" -maxdepth 1 -type f)
   log "set \$ORIGIN RPATHs"

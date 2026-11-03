@@ -455,7 +455,10 @@ the bug this work fixes.
   is reported as part of the floor, not failed),
 * a library name in the payload's `strings` manifest that is neither bundled nor
   on the host-provided allowlist with a reason. The manifest is derived from
-  **every** payload ELF — the GUI binary and every bundled library — plus the
+  **every dynamic** payload ELF — the GUI binary and every bundled library;
+  statically linked helpers (vpk's arm64 `UpdateNix` stub is static, the x64 one
+  is not) have no loader and no RPATH, so they are skipped by both the manifest
+  and the patchelf pass — plus the
   dlopen-only names in `excludelist.sh`, so a name that only appears *inside* a
   bundled library (`libva-x11` mentions `libatiadlxx.so`, `libva-wayland`
   `libwayland-emgd.so.1`) is decided too, and `bundle.sh`'s hand list cannot

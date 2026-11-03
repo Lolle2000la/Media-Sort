@@ -10,6 +10,20 @@
 APPIMAGE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 EXCLUDELIST=${EXCLUDELIST:-$APPIMAGE_DIR/excludelist}
 
+# ELF helpers shared by the two sourcing scripts.
+is_elf() {
+  [ -f "$1" ] && [ "$(head -c 4 "$1" | od -An -c | tr -d ' \n')" = '177ELF' ]
+}
+
+# A dynamic ELF has a .dynamic section; a static one does not, so patchelf has
+# no RPATH to rewrite there and the payload's dlopen manifest does not apply to
+# it either (vpk's arm64 UpdateNix stub is static, the x64 one is not).
+# `readelf -d` is *not* a test for this: GNU readelf exits 0 with only a
+# "no dynamic section" message, so the section header is what we check.
+is_dynamic_elf() {
+  is_elf "$1" && LC_ALL=C readelf -S -W "$1" 2>/dev/null | grep -qE '(^|[[:space:]])\.dynamic([[:space:]]|$)'
+}
+
 # Libraries the payload has to carry that nothing links against: they are
 # dlopen'd at runtime, so a DT_NEEDED walk never reaches them. winit's x11-dl
 # loads the X11 ones lazily on X11 sessions (and xkbcommon-x11 for keymaps), and
