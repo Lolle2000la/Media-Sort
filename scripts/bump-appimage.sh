@@ -506,7 +506,11 @@ rust_eligible() { # <component> <pinned>
   local pinned=$2 toml version date
   toml=$(curl -fsSL --retry 3 --max-time "$API_TIMEOUT" \
     https://static.rust-lang.org/dist/channel-rust-stable.toml) || return 1
-  date=$(printf '%s\n' "$toml" | sed -n 's/^date = "\(.*\)"$/\1/p' | head -n 1)
+  # `head -n 1` closes the pipe early, and the resulting SIGPIPE surfaces as
+  # "printf: write error: Broken pipe" in the caller's captured output (it
+  # appeared in the first bump PR's body). sed prints every match cheaply, so
+  # take the first line without breaking the upstream writer.
+  date=$(printf '%s\n' "$toml" | sed -n 's/^date = "\(.*\)"$/\1/p' | sed -n '1p')
   version=$(printf '%s\n' "$toml" |
     awk '/^\[pkg\.rust\]/ { in_rust = 1; next }
          /^\[/ { in_rust = 0 }
