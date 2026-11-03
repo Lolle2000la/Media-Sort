@@ -28,6 +28,11 @@
 # authenticated), otherwise `curl` + `jq` with `GITHUB_TOKEN` when that is set.
 # GitLab and the FFmpeg index are plain `curl`; GitLab needs `jq`.
 #
+# Timestamps are parsed with GNU `date -d` (`gdate` is used when it is on PATH,
+# which is how macOS gets there through coreutils); a BSD `date` is refused up
+# front, because it would silently make every candidate look "too young" and
+# report 0 updates.
+#
 # Soak period: every candidate carries a date and anything younger than
 # --min-age-days (default 14, the same soak Renovate applies to this
 # repository -- see AGENTS.md "Dependency updates (Renovate)") is skipped, so a
@@ -51,7 +56,10 @@
 #                        wayland-protocols libplacebo rust
 #   --min-age-days N     soak period in days (0 disables it; default 14)
 #   --allow-prerelease   also consider -rc/-beta/-alpha/-pre/dev tags
-#   --json               machine-readable report instead of the table
+#   --json               machine-readable report instead of the table: exactly
+#                        one JSON document on stdout, in report mode and with
+#                        --check, and never the delta lines (diagnostics go to
+#                        stderr; --check's verdict is the exit status)
 #   --versions-file P    operate on P instead of packaging/appimage/versions.env
 #                        (for testing this script, not for real bumps)
 #   --help
@@ -166,6 +174,19 @@ fi
 
 HAVE_GH=0
 command -v gh >/dev/null 2>&1 && HAVE_GH=1
+
+# Upstream timestamps arrive as ISO-8601, or as RFC-1123 for the FFmpeg
+# tarball's Last-Modified, and only GNU date parses those with `date -d`.
+# macOS/BSD date fails on every one of them -- and the old code swallowed that
+# (`date -u -d ... || return 1` in age_ok), so every candidate looked "too
+# young" and the run reported 0 updates with exit 0: a silent no-op on exactly
+# the platform a human would run it on. Prove the capability once, up front, and
+# fail loudly instead. (`gdate` is coreutils' name on macOS.)
+DATE_CMD=$(command -v gdate || command -v date || true)
+if [ -z "$DATE_CMD" ] ||
+  ! "$DATE_CMD" -u -d '1970-01-01T00:00:00Z' +%s >/dev/null 2>&1; then
+  die "GNU date required: upstream timestamps are parsed with 'date -d', which the date on this system does not support (on macOS install coreutils so 'gdate' is on PATH; on Linux this should never happen)"
+fi
 
 TAB=$(printf '\t')
 
@@ -286,6 +307,14 @@ sort_candidates() {
   sort -t "$TAB" -k1,1 -Vr
 }
 
+# is_version_tag <tag> -- false for tags that carry no version at all (`main`,
+# `latest`, `nightly`). Those sort above every release under `sort -V`, so a
+# resolver must skip them instead of stopping at them: stopping reported `keep`
+# for a component that had a genuine newer release.
+is_version_tag() {
+  [ -n "$(version_core "$1")" ]
+}
+
 # is_prerelease <component> <tag>
 is_prerelease() {
   local component=$1 version=$2 micro
@@ -312,8 +341,8 @@ age_ok() {
   local published=$1 epoch now
   [ "$MIN_AGE_DAYS" -eq 0 ] && return 0
   [ -n "$published" ] || return 1
-  epoch=$(date -u -d "$published" +%s 2>/dev/null) || return 1
-  now=$(date -u +%s)
+  epoch=$("$DATE_CMD" -u -d "$published" +%s 2>/dev/null) || return 1
+  now=$("$DATE_CMD" -u +%s)
   [ $((now - epoch)) -ge $((MIN_AGE_DAYS * 86400)) ]
 }
 
@@ -325,7 +354,9 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
 fi
 
 # api_get <path> <jq filter> -- GitHub REST through gh when possible, curl+jq
-# otherwise (authenticated when GITHUB_TOKEN is set).
+# otherwise (authenticated when GITHUB_TOKEN is set). Returns non-zero when the
+# answer could not be had, which the caller reports as `unknown`; it only ever
+# dies for a jq that the run genuinely cannot do without.
 api_get() {
   local path=$1 filter=$2 out
   if [ "$HAVE_GH" = 1 ]; then
@@ -333,8 +364,14 @@ api_get() {
       printf '%s' "$out"
       return 0
     fi
+    # gh is there but this one call failed. The curl fallback needs jq; without
+    # it the honest answer is "unknown" for this component, so return instead of
+    # dying -- one flaky upstream call must not turn the weekly run red with a
+    # message about a jq this run does not actually need.
+    command -v jq >/dev/null 2>&1 || return 1
+  else
+    command -v jq >/dev/null 2>&1 || die "jq is required to query the GitHub API without gh"
   fi
-  command -v jq >/dev/null 2>&1 || die "jq is required to query the GitHub API without gh"
   if out=$(curl -fsSL --retry 3 --max-time "$API_TIMEOUT" \
     -H 'Accept: application/vnd.github+json' \
     ${api_auth[@]+"${api_auth[@]}"} \
@@ -365,7 +402,7 @@ http_last_modified() {
   lm=$(curl -fsIL --retry 3 --max-time "$API_TIMEOUT" "$1" 2>/dev/null |
     sed -n 's/^[Ll]ast-[Mm]odified: *//p' | tail -n 1 | tr -d '\r')
   [ -n "$lm" ] || return 1
-  date -u -d "$lm" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+  "$DATE_CMD" -u -d "$lm" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
 }
 
 # --- candidate resolution ----------------------------------------------------
@@ -395,14 +432,18 @@ gh_release_eligible() { # <component> <pinned>
   fi
   list=$(api_get "repos/$repo/releases?per_page=30" \
     '.[] | select(.draft | not) | select(.prerelease | not) | [.tag_name, .published_at] | @tsv') || return 1
+  # The list arrives in API order (newest *created*, not newest version), so a
+  # backport published after a release would be proposed first. Sort by version,
+  # exactly like the tag resolvers below.
   while IFS="$TAB" read -r version date; do
     [ -n "$version" ] || continue
     is_prerelease "$component" "$version" && continue
+    is_version_tag "$version" || continue
     version_gt "$version" "$pinned" || continue
     age_ok "$date" || continue
     printf '%s\t%s\n' "$version" "$date"
     return 0
-  done <<<"$list"
+  done <<<"$(printf '%s\n' "$list" | sort_candidates)"
 }
 
 gh_tag_eligible() { # <component> <pinned>
@@ -413,6 +454,9 @@ gh_tag_eligible() { # <component> <pinned>
   while IFS="$TAB" read -r name sha; do
     [ -n "$name" ] || continue
     is_prerelease "$component" "$name" && continue
+    # A non-version tag (`main`, `nightly`) is skipped, not treated as the end
+    # of the scan: only the pin itself or something older ends it.
+    is_version_tag "$name" || continue
     version_gt "$name" "$pinned" || break
     date=$(api_get "repos/$repo/commits/$sha" '.commit.committer.date') || return 1
     age_ok "$date" || continue
@@ -430,6 +474,8 @@ gitlab_tag_eligible() { # <component> <pinned>
   while IFS="$TAB" read -r name date sha; do
     [ -n "$name" ] || continue
     is_prerelease "$component" "$name" && continue
+    # Same rule as gh_tag_eligible: a non-version tag above the pin is skipped.
+    is_version_tag "$name" || continue
     version_gt "$name" "$pinned" || break
     age_ok "$date" || continue
     found="$name$TAB$date$TAB$sha"
@@ -614,9 +660,15 @@ print_deltas() {
 }
 
 if [ "$MODE" = check ]; then
-  # No table and no downloads: whether anything is pending is the whole answer.
-  print_deltas
-  printf 'updates available: %d\n' "$updates"
+  # No table and no downloads: whether anything is pending is the whole answer,
+  # and the exit status carries it. --json still emits exactly one JSON
+  # document and nothing else on stdout.
+  if [ "$JSON" = 1 ]; then
+    print_json
+  else
+    print_deltas
+    printf 'updates available: %d\n' "$updates"
+  fi
   if [ "$unknowns" -gt 0 ]; then
     die "$unknowns component(s) could not be queried; the answer is incomplete"
   fi
@@ -624,10 +676,19 @@ if [ "$MODE" = check ]; then
   exit 0
 fi
 
-if [ "$JSON" = 1 ]; then print_json; else print_report; fi
+# Machine-readable means machine-readable: --json prints exactly one JSON
+# document and never the delta/table/diagnostic lines around it, so the output
+# can be piped straight into jq.
+if [ "$JSON" = 1 ]; then
+  print_json
+else
+  print_report
+fi
 
 if [ "$MODE" = report ]; then
-  print_deltas
+  if [ "$JSON" != 1 ]; then
+    print_deltas
+  fi
   exit 0
 fi
 

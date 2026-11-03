@@ -30,8 +30,14 @@ name: AppImage Dependency Bump
 # it everything still works -- the in-job gate is authoritative -- but the PR
 # will sit with no status checks.
 #
-# This workflow only runs from the default branch: a `schedule` trigger always
-# executes the default branch's copy, so changes here take effect once merged.
+# BRANCHES: a `schedule` trigger always executes the *default branch's* copy, so
+# changes here only take effect once merged. A `workflow_dispatch` therefore
+# checks out the ref it was dispatched on (`github.ref_name`) rather than master,
+# so dispatching a PR's branch validates that branch's scripts and workflow
+# before merge -- and, because a dispatch from a branch must never write, the
+# commit/push and PR steps are skipped unless that ref is `master`. Everything
+# else (the apply, the build + verify gate) runs, which is the whole point: the
+# gate is the real pre-merge validation.
 on:
   schedule:
     # Mondays 06:00 UTC.
@@ -47,12 +53,8 @@ on:
         type: boolean
         default: false
 
-# A branch push and a PR both need write access; the workflow never touches
-# anything else.
-permissions:
-  contents: write
-  pull-requests: write
-
+# Permissions are scoped per job: `check` only reads, and only `bump` may write
+# (a branch push and a PR). Nothing else is touched.
 concurrency:
   group: appimage-bump
   cancel-in-progress: false
@@ -63,6 +65,8 @@ jobs:
     # Forks must never open PRs against themselves.
     if: github.repository == 'Lolle2000la/Media-Sort'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       changed: ${{ steps.probe.outputs.changed }}
     env:
@@ -73,7 +77,9 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: master
+          # A dispatch from a branch validates *that* branch's scripts; the
+          # schedule (and any dispatch from master) runs master.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'master' }}
           token: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
 
       - name: Query upstream pins
@@ -123,10 +129,16 @@ jobs:
   bump:
     name: Open or update the bump PR
     needs: check
+    # Same fork guard as `check`: this is the job that writes.
     if: >-
+      github.repository == 'Lolle2000la/Media-Sort' &&
       needs.check.outputs.changed == '1' &&
       github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    # Only this job writes (a branch push and a PR).
+    permissions:
+      contents: write
+      pull-requests: write
     env:
       GH_TOKEN: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
       BRANCH: chore/appimage-bump
@@ -136,27 +148,65 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: master
-          # The bump branch is force-updated, which needs the full history and
-          # the remote-tracking ref to lease against.
+          # A dispatch from a branch applies that branch's script (the gate still
+          # runs; the push/PR steps are skipped below because the ref is not
+          # master). The schedule runs master.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'master' }}
+          # The bump branch is force-updated, which needs the full history.
           fetch-depth: 0
           # With a PAT the push is attributed to a real user, so the PR's own
           # workflows fire (see the TOKEN CAVEAT in the header). Without one this
           # is github.token and the in-job gate below is the only verification.
           token: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
 
+      # The lease for the force-push is taken HERE, at job start, and passed to
+      # the push below as an explicit expected value. The earlier version
+      # refreshed the remote-tracking ref immediately before pushing
+      # (`git fetch origin +refs/heads/$BRANCH:refs/remotes/origin/$BRANCH`),
+      # which reset the lease baseline to the remote's *current* tip -- so a
+      # commit a maintainer pushed to the bump branch while this job was running
+      # was silently discarded. Mechanism: an explicit
+      # `--force-with-lease=refs/heads/<branch>:<tip>` taken before the work
+      # starts, plus a plain (non-force) push when no branch existed at all.
+      - name: Record the bump branch's current tip (the push lease)
+        id: lease
+        run: |
+          set -euo pipefail
+          TIP=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
+          echo "tip=$TIP" >>"$GITHUB_OUTPUT"
+          echo "bump branch tip at job start: ${TIP:-<does not exist yet>}"
+
       - name: Apply the bumps
+        id: apply
         run: |
           set -euo pipefail
           MIN_AGE_DAYS="${MIN_AGE_DAYS:-14}"
-          bash scripts/bump-appimage.sh --apply --min-age-days "$MIN_AGE_DAYS" | tee apply.log
+          # 2>&1: the script logs "nothing to apply" / "updated N component(s)"
+          # on stderr, and the no-op decision below reads them.
+          bash scripts/bump-appimage.sh --apply --min-age-days "$MIN_AGE_DAYS" 2>&1 | tee apply.log
           if git diff --quiet -- packaging/appimage/versions.env; then
-            echo "::error::--check reported pending updates but --apply changed nothing in packaging/appimage/versions.env"
+            # `check` and `bump` are separate jobs and master moves between them:
+            # if a bump PR was merged (or the newest release aged past the soak)
+            # in between, --apply legitimately has nothing left to write. That is
+            # a green no-op, not a failed run -- there is just no branch or PR to
+            # update. Only an apply that *claims* updates it did not write fails.
+            if grep -q 'nothing to apply' apply.log; then
+              echo "::notice::nothing to apply -- every pin is already current, so there is no branch or PR to update"
+              echo "changed=0" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::--apply reported updates but changed nothing in packaging/appimage/versions.env"
             exit 1
           fi
+          echo "changed=1" >>"$GITHUB_OUTPUT"
           git diff -- packaging/appimage/versions.env
 
+      # Everything that writes is skipped unless this runs from master, so a
+      # dispatch on a PR branch is a real (writable-nothing) pre-merge check.
       - name: Commit and push the bump branch
+        if: steps.apply.outputs.changed == '1' && github.ref_name == 'master'
+        env:
+          LEASE: ${{ steps.lease.outputs.tip }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -167,17 +217,26 @@ jobs:
           git add packaging/appimage/versions.env
           git commit -m "$TITLE"
 
-          # --force-with-lease needs the remote side of the lease to exist
-          # locally, both for a branch this run is replacing and for the very
-          # first push (where the fetch fails harmlessly).
-          git fetch --force origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || true
-          git push --force-with-lease origin "$BRANCH"
+          if [ -n "$LEASE" ]; then
+            # The lease is the tip this job saw when it started, so the force
+            # only lands if nobody pushed to the bump branch since; a maintainer
+            # commit made in the meantime fails the push (re-run, and the next
+            # run's lease includes it) instead of being overwritten.
+            git push --force-with-lease="refs/heads/$BRANCH:$LEASE" origin "$BRANCH"
+          else
+            # No bump branch existed at job start: a plain, non-force push. It
+            # creates the branch, and still refuses to overwrite one that
+            # appeared in the meantime (non-fast-forward is the same protection).
+            git push origin "$BRANCH"
+          fi
 
       # The authoritative verification when no PAT is configured, and a second
       # opinion even when there is one: the same ubuntu:22.04 build and the same
-      # verify.sh gate the packaging check runs.
+      # verify.sh gate the packaging check runs. Runs on a branch dispatch too --
+      # that is what makes a dispatch a real pre-merge validation.
       - name: Gate (build + verify the AppImage)
         id: gate
+        if: steps.apply.outputs.changed == '1'
         continue-on-error: true
         uses: ./.github/actions/appimage-gate
         with:
@@ -185,6 +244,7 @@ jobs:
           artifact-name: appimage-bump-linux-x64
 
       - name: Open or update the pull request
+        if: steps.apply.outputs.changed == '1' && github.ref_name == 'master'
         env:
           GATE: ${{ steps.gate.outcome }}
         run: |
@@ -231,7 +291,7 @@ jobs:
           fi
 
       - name: Fail when the gate failed
-        if: steps.gate.outcome != 'success'
+        if: steps.apply.outputs.changed == '1' && steps.gate.outcome != 'success'
         run: |
           echo "::error::the AppImage gate failed for this bump; the PR records the failure, and this run is red on purpose"
           exit 1

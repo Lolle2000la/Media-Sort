@@ -350,6 +350,11 @@ jobs:
             TARGET_DIR="$TARGET_DIR" \
               bash packaging/appimage/pack-appimage.sh "$CLEAN_VERSION" "${{ matrix.platform }}"
 
+            # Re-verify the AppDir that was actually packed, exactly as the
+            # composite action does: pack-appimage.sh already gated the pre-surgery
+            # AppDir, this gates the one the sealed AppImage was built from.
+            bash packaging/appimage/verify.sh dist/MediaSort.AppDir
+
             # Re-verify the sealed AppImage: this extracts the final squashfs
             # and runs the GUI through the AppImage runtime
             # (--appimage-extract-and-run), so a wrong RPATH or a library that
