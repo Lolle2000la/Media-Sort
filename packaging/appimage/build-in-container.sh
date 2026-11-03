@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Build the entire Linux AppImage payload inside an Ubuntu 22.04 container:
-# dav1d -> FFmpeg (shared, LGPL) -> libass -> zimg -> type wayland-protocols ->
-# libplacebo -> libmpv, and then the Rust GUI binary itself.
+# dav1d -> FFmpeg (shared, GPLv3) -> libass -> zimg -> type wayland-protocols ->
+# libplacebo -> libmpv (GPL), and then the Rust GUI binary itself.
 #
 # Everything is compiled here on purpose:
 #
@@ -235,19 +235,33 @@ build_dav1d() {
 }
 
 # ---------------------------------------------------------------------------
-# FFmpeg, LGPL (no --enable-gpl => no x264/x265), shared.
+# FFmpeg, GPLv3 (`--enable-gpl --enable-version3`), shared.
 #
 # Only the `ffmpeg` CLI is shipped: the app spawns it for video thumbnails, so
 # it needs the lavfi source, the PNG encoder (zlib) and the image2 muxer, and
 # real decoding of the container formats it is handed. `--disable-autodetect`
 # keeps the build from silently linking whatever -dev package happens to be
 # installed (libva, libx264, ...): everything external is named explicitly.
+#
+# `--enable-gpl` is allowed here because the app is AGPL-3.0-or-later and GPLv3
+# section 13 explicitly permits combining GPLv3 code with AGPLv3 code; mpv in
+# this same payload is already a GPL build (its X11 support is GPL-only).
+# `--enable-version3` is what makes that unambiguous: it upgrades the GPL parts
+# from "GPLv2 or later" to GPLv3, so the whole payload is GPLv3-compatible
+# rather than relying on the `or later` clause. verify.sh enforces the pair --
+# `--enable-gpl` without `--enable-version3` fails the gate.
+#
+# No GPL *encoder* library is linked (no x264/x265/xvid): nothing in the app
+# encodes video, `extract_frame` only needs the native PNG encoder, and x265
+# alone would be ~8 MB of payload for no use. Enabling one later is a licensing
+# non-issue (GPLv3 already ships) and a deliberate size decision, not a wall.
 # ---------------------------------------------------------------------------
 build_ffmpeg() {
   local opts=(--prefix="$PREFIX" --libdir="$PREFIX/lib"
               --enable-shared --disable-static --enable-pic
               --disable-doc --disable-debug
               --disable-ffplay --disable-ffprobe
+              --enable-gpl --enable-version3
               --disable-autodetect
               --disable-avdevice
               --enable-zlib
@@ -383,9 +397,10 @@ build_libplacebo() {
 #
 # -Dgpl is left at its default (true) on purpose: mpv's X11 support is
 # GPL-only, and `-Dgpl=false -Dx11=enabled` is a hard meson error. X11 (and its
-# VA-API backend) matters, and a GPL-2.0-or-later libmpv links into this
-# AGPL-3.0-or-later app without a licensing problem, so mpv stays a GPL build
-# while FFmpeg is LGPL (see README "Licensing").
+# VA-API backend) matters, and a GPL libmpv links into this AGPL-3.0-or-later
+# app without a licensing problem (GPLv3 section 13), which is the same reason
+# FFmpeg is built with `--enable-gpl --enable-version3` (see build_ffmpeg and
+# README "Licensing").
 #
 # Note: mpv 0.41 dropped `meson_options.txt` (renamed to `meson.options`) and
 # with it several options older recipes pass (`-Dmanpage-build`,

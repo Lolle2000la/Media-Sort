@@ -15,7 +15,10 @@
 #      allowlist with a reason;
 #   d) usr/lib/libmpv.so.2 is present;
 #   e) the bundled ffmpeg runs, encodes a PNG (video thumbnails), decodes it
-#      back, and decodes a real AV1 file with the bundled libdav1d;
+#      back, decodes a real AV1 file with the bundled libdav1d, and is licensed
+#      AGPL-compatibly (a GPL build only when it is GPLv3, i.e. configured with
+#      --enable-version3; a GPLv2-only build cannot combine with this
+#      AGPL-3.0-or-later application);
 #   f) the GUI starts under a virtual X server without a single
 #      "error while loading shared libraries", without a startup crash (a Rust
 #      panic exits 101 and is always fatal), and without dying silently before
@@ -28,8 +31,10 @@
 # An .AppImage argument is unpacked with `--appimage-extract` first (no FUSE
 # needed); the GUI check then runs the AppImage itself through
 # `--appimage-extract-and-run`, which also proves the FUSE-less path works.
-# `--selftest` exercises check (f)'s exit predicate against fake logs and exit
-# statuses (no payload needed): it is the negative probe for that predicate.
+# `--selftest` exercises the predicates the gate is built on -- check (f)'s GUI
+# exit classification and check (e)'s FFmpeg licence rule -- against fake
+# logs/statuses/configuration lines (no payload needed): it is their negative
+# probe.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -133,8 +138,29 @@ gui_status_is_hard_failure() {
   esac
 }
 
-# The negative probe for the GUI exit classification: fake logs and exit
-# statuses, no payload needed. Fails when a case is decided the other way round.
+# True when an FFmpeg `configuration:` line is AGPL-compatible. The application
+# is AGPL-3.0-or-later, so a GPL build is allowed -- GPLv3 section 13 explicitly
+# permits combining GPLv3 with AGPLv3, and mpv in this payload is a GPL build
+# anyway -- but only a *version 3* one: `--enable-version3` is what upgrades
+# FFmpeg's GPL parts from "v2 or later" to v3, and a GPLv2-only build cannot be
+# combined with AGPLv3 at all. So `--enable-gpl` requires `--enable-version3`;
+# an LGPL build is fine either way.
+ffmpeg_license_ok() { # <configuration line>
+  case "$1" in
+    *--enable-gpl*)
+      case "$1" in
+        *--enable-version3*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
+}
+
+# The negative probe for the predicates the gate is built on (the GUI exit
+# classification and the FFmpeg licence rule): fake logs, statuses and
+# `configuration:` lines, no payload needed. Fails when a case is decided the
+# other way round.
 selftest() {
   local dir
   dir=$(mktemp -d "${TMPDIR:-/tmp}/appimage-selftest.XXXXXX")
@@ -184,6 +210,27 @@ selftest() {
       ok "selftest: status $status is decided by the log, not the code"
     fi
   done
+  # The FFmpeg licence rule, probed with doctored `configuration:` lines: an
+  # LGPL build passes, a GPLv3 build (--enable-gpl --enable-version3) passes,
+  # and a GPLv2-only build fails -- dropping that last arm is the regression
+  # that would let an AGPL-incompatible FFmpeg ship.
+  local licence_probe expected line got
+  for licence_probe in \
+    'pass|configuration: --enable-shared --enable-zlib --enable-libdav1d' \
+    'pass|configuration: --enable-gpl --enable-version3 --enable-shared' \
+    'fail|configuration: --enable-shared --enable-gpl'; do
+    expected=${licence_probe%%|*}
+    line=${licence_probe#*|}
+    got=pass
+    ffmpeg_license_ok "$line" || got=fail
+    if [ "$got" = "$expected" ]; then
+      ok "selftest: ffmpeg licence '$line' -> $got"
+    else
+      printf 'verify: FAIL: selftest expected %s for ffmpeg licence line: %s\n' \
+        "$expected" "$line" >&2
+      failures=$((failures + 1))
+    fi
+  done
   rm -rf "$dir"
   [ "$failures" -eq 0 ] || die "$failures selftest probe(s) decided the wrong way"
   ok "selftest: every probe decided as intended"
@@ -194,7 +241,7 @@ while [ $# -gt 0 ]; do
     --max-glibc) MAX_GLIBC=$2; shift 2 ;;
     --skip-gui) SKIP_GUI=1; shift ;;
     --selftest) selftest; exit 0 ;;
-    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [ -z "$TARGET" ] || die "more than one payload given"; TARGET=$1; shift ;;
   esac
@@ -468,9 +515,15 @@ head -c $((320 * 240 * 3)) /dev/zero | tr '\0' '\377' >"$WORK/frame.rgb"
 run_ffmpeg() { env -i HOME="$WORK" PATH=/usr/bin:/bin TMPDIR="$WORK" "$FFMPEG" -hide_banner -nostdin "$@"; }
 run_ffmpeg -version >"$WORK/ffmpeg-version.txt" 2>&1 || die "ffmpeg -version failed"
 grep -qi 'ffmpeg version' "$WORK/ffmpeg-version.txt" || die "ffmpeg -version output looks wrong"
-if grep -q -- '--enable-gpl' "$WORK/ffmpeg-version.txt"; then
-  die "ffmpeg was configured with --enable-gpl; the AppImage ships an LGPL build"
-fi
+# A GPL build is fine here (the app is AGPL-3.0-or-later, GPLv3 section 13 allows
+# the combination, and mpv is GPL anyway) -- but only GPLv3: `--enable-gpl`
+# without `--enable-version3` is a GPLv2-only codec stack, which cannot combine
+# with AGPLv3. See ffmpeg_license_ok().
+config_line=$(grep -m1 -E '^[[:space:]]*configuration:' "$WORK/ffmpeg-version.txt" || true)
+[ -n "$config_line" ] || die "ffmpeg -version printed no 'configuration:' line"
+ffmpeg_license_ok "$config_line" \
+  || die "ffmpeg was configured with --enable-gpl but without --enable-version3: a GPLv2-only build cannot be combined with this AGPL-3.0-or-later application (add --enable-version3, or drop --enable-gpl)"
+ok "ffmpeg configuration:${config_line#*configuration:}"
 ok "ffmpeg -version: $(grep -oiE 'ffmpeg version [^ ]+' "$WORK/ffmpeg-version.txt" | head -n 1)"
 
 # A synthetic 320x240 RGB frame, fed as rawvideo: no lavfi *input device*
