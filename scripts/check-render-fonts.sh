@@ -13,9 +13,11 @@
 #
 # Usage: scripts/check-render-fonts.sh [--selftest]
 #
-# `--selftest` proves the predicate both ways using a throwaway fontconfig (an
-# empty font directory must fail, the real system config must pass), so the gate
-# can be exercised on a machine that does have the font. Needy of nothing beyond
+# `--selftest` proves the predicate using a throwaway fontconfig (an empty font
+# directory must be rejected, the real system config must be accepted), so the
+# gate can be exercised on a machine that does have the font: that second half
+# only runs when the host actually has a ja font (CI always does, the workflow
+# installs one first) and prints a notice otherwise. Needy of nothing beyond
 # coreutils + fontconfig.
 set -euo pipefail
 
@@ -48,6 +50,16 @@ selftest() {
   <cachedir>$tmp/cache</cachedir>
 </fontconfig>
 EOF
+
+  # fontconfig falls back to the system config -- silently, exit 0, every system
+  # font listed -- when FONTCONFIG_FILE is malformed or missing, and
+  # `has_ja_font` hides its stderr. So prove the throwaway config is the one in
+  # effect (an empty <dir> yields no fonts at all) before trusting the query
+  # below; otherwise the negative half would pass for the wrong reason.
+  if [ -n "$(FONTCONFIG_FILE="$tmp/fonts.conf" fc-list 2>/dev/null)" ]; then
+    echo "::error::selftest: fontconfig ignored the throwaway config, so the negative half would prove nothing"
+    exit 1
+  fi
 
   if FONTCONFIG_FILE="$tmp/fonts.conf" has_ja_font; then
     echo "::error::selftest: a font directory with no fonts reported a Japanese font"

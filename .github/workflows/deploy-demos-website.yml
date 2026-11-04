@@ -209,9 +209,15 @@ jobs:
             sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev ffmpeg mesa-vulkan-drivers fonts-noto-cjk fontconfig
 
       # Hard gate, not a warning: a runner image that stops shipping a CJK font
-      # must fail here instead of silently publishing tofu `ja` videos.
+      # must fail here instead of silently publishing tofu `ja` videos. The
+      # selftest runs first so a vacuous predicate (one that can no longer
+      # reject an empty font set) fails the job rather than passing it, and the
+      # bare invocation after it is the actual gate for this runner.
       - name: Verify Japanese Font Availability
-        run: ./scripts/check-render-fonts.sh
+        run: |
+          set -euo pipefail
+          ./scripts/check-render-fonts.sh --selftest
+          ./scripts/check-render-fonts.sh
 
       - name: Download Demo Export Binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
