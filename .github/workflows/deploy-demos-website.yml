@@ -201,8 +201,17 @@ jobs:
             # compiled here, so no nasm/libclang. ffmpeg encodes the video,
             # mesa-vulkan-drivers supplies the software Vulkan ICD the headless
             # renderer needs, and the -dev packages carry the shared libraries
-            # the prebuilt binary links (libmpv, ALSA, dav1d).
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev ffmpeg mesa-vulkan-drivers
+            # the prebuilt binary links (libmpv, ALSA, dav1d). fonts-noto-cjk is
+            # the Japanese text: cosmic-text only falls back over installed
+            # system fonts and nothing CJK is bundled, so without it the `ja`
+            # demos render as tofu. fontconfig guarantees `fc-list` for the gate
+            # below.
+            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev ffmpeg mesa-vulkan-drivers fonts-noto-cjk fontconfig
+
+      # Hard gate, not a warning: a runner image that stops shipping a CJK font
+      # must fail here instead of silently publishing tofu `ja` videos.
+      - name: Verify Japanese Font Availability
+        run: ./scripts/check-render-fonts.sh
 
       - name: Download Demo Export Binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
