@@ -172,8 +172,11 @@ jobs:
             # runtime library is `libasound2t64` on Ubuntu 24.04+ (`libasound2`
             # is a virtual package there with two providers, so apt refuses to
             # install it by that name) and `libasound2` on 22.04.
+            # zsyncmake generates the AppImage's .zsync and readelf (binutils)
+            # reads/patch-checks the runtime's .upd_info section
+            # (packaging/appimage/appimage-update-info.sh).
             sudo apt-get update
-            sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2
+            sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2 zsync binutils
 
       - name: Install System Dependencies (macOS Only)
         if: startsWith(matrix.os, 'macos')
@@ -420,6 +423,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ github.ref_name }}" Releases/*.sig --clobber
+
+      - name: Upload AppImage zsync to GitHub Draft Release
+        if: success() && startsWith(matrix.os, 'ubuntu')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # AppImageUpdate downloads this control file from the release and then
+          # fetches only the changed blocks of the AppImage. pack-appimage.sh
+          # generates it from the final bytes, beside the AppImage.
+          gh release upload "${{ github.ref_name }}" Releases/*.AppImage.zsync --clobber
 
   publish:
     runs-on: ubuntu-latest

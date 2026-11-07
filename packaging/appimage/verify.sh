@@ -24,7 +24,10 @@
 #      "error while loading shared libraries", without a startup crash (a Rust
 #      panic exits 101 and is always fatal), and without dying silently before
 #      it has had time to initialise (it may die later for lack of a GPU, which
-#      is not this check's business).
+#      is not this check's business);
+#   g) a sealed AppImage carries usable AppImageUpdate information and has a
+#      .zsync beside it that describes its exact bytes (see
+#      appimage-update-info.sh).
 #
 # Usage: verify.sh <path-to-AppDir|path-to.AppImage> [--max-glibc X.Y] [--skip-gui]
 #        verify.sh --selftest
@@ -238,7 +241,7 @@ while [ $# -gt 0 ]; do
     --max-glibc) MAX_GLIBC=$2; shift 2 ;;
     --skip-gui) SKIP_GUI=1; shift ;;
     --selftest) selftest; exit 0 ;;
-    -h|--help) sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,41p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1" ;;
     *) [ -z "$TARGET" ] || die "more than one payload given"; TARGET=$1; shift ;;
   esac
@@ -275,6 +278,17 @@ case "$TARGET" in
 esac
 [ -d "$PAYLOAD/usr" ] || die "$PAYLOAD does not look like an AppDir (no usr/)"
 log "payload: $PAYLOAD ($(du -sh "$PAYLOAD" | cut -f1))"
+
+# ---------------------------------------------------------------------------
+# (g) AppImageUpdate information (sealed AppImage only)
+# ---------------------------------------------------------------------------
+# The AppDir cannot carry it: the update-information section belongs to the
+# runtime vpk prepends when it seals the payload. The .zsync is a sibling of the
+# AppImage on the release, so it must be generated from the final bytes.
+if [ -n "$APPIMAGE" ]; then
+  bash "$SCRIPT_DIR/appimage-update-info.sh" check "$APPIMAGE" \
+    || die "sealed AppImage has no usable AppImageUpdate information (.upd_info / .zsync)"
+fi
 
 mapfile -d '' ELFS < <(find "$PAYLOAD" -type f -print0 | while IFS= read -r -d '' f; do
   is_elf "$f" && printf '%s\0' "$f"

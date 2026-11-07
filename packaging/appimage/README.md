@@ -32,8 +32,9 @@ no binaries are committed to git and nothing is downloaded at runtime.
 | `bundle.sh` | `stage` (container side) computes the closure into `target/appimage-stage`; `install` (host side) copies it into the AppDir, writes the RPATHs and fails on any unresolved `DT_NEEDED`. |
 | `excludelist` | The host-provided allowlist: what must never be bundled (glibc/loader, the GL/Vulkan/GPU-driver stack, and the plugin hosts the host's plugins bind to) with a one-line reason per entry. |
 | `excludelist.sh` | The policy *code* for that list (`is_excluded`, `host_reason`, the driver globs, the dlopen-only names), sourced by `bundle.sh` and `verify.sh` so the two cannot disagree about the same name. |
-| `pack-appimage.sh` | The two-pass `vpk pack` flow (staging → pack → unpack → bundle → verify → desktop surgery → final pack), shared by `release.yml` and `appimage.yml`. |
-| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode (h264, hevc, vp9 and AV1 through libdav1d) plus its licence rule, GUI start under Xvfb (`--selftest` probes the exit and licence predicates; the host floor is printed on every run). |
+| `pack-appimage.sh` | The two-pass `vpk pack` flow (staging → pack → unpack → bundle → verify → desktop surgery → final pack), shared by `release.yml` and `appimage.yml`. Fills the runtime's AppImageUpdate information before the first pack and generates the `.zsync` after the last. |
+| `appimage-update-info.sh` | Fills the `.upd_info` section of vpk's vendored runtime (so the released AppImage *and* the copy inside the `.nupkg` carry it), generates the `.zsync` from the final AppImage, and is the gate for both (`--selftest` probes the pure logic: channel selection, update-info string, section parsing, `.zsync` headers). |
+| `verify.sh` | The gate: glibc floor (incl. `GLIBC_ABI_*`), NEEDED resolution, the library-name manifest of the whole payload, `libmpv.so.2` presence, real `ffmpeg` encode/decode (h264, hevc, vp9 and AV1 through libdav1d) plus its licence rule, GUI start under Xvfb, and (on a sealed AppImage) usable AppImageUpdate information with a matching `.zsync` beside it (`--selftest` probes the exit and licence predicates; the host floor is printed on every run). |
 | `testdata/` | Committed decode fixtures (`h264.mp4`, `hevc.mp4`, `vp9.webm`, ~24 KB total) that `verify.sh` decodes with the bundled `ffmpeg`; its `README.md` has the exact regenerating commands. |
 
 CI wiring: `.github/workflows/appimage.yml` (packaging-only check, **x64 and
@@ -108,10 +109,14 @@ bash packaging/appimage/verify.sh squashfs-root
 
 `verify.sh` also accepts a packed `.AppImage` (it extracts it with
 `--appimage-extract`, so FUSE is not needed) and needs `xvfb` on the host for
-the GUI check; `--skip-gui` disables that one check.
+the GUI check; `--skip-gui` disables that one check. On a packed `.AppImage` it
+additionally requires the sibling `<name>.zsync` and hard-fails without it,
+because a shipped AppImage must carry update information; on an extracted AppDir
+it does not check that (an AppDir has no runtime to carry it).
 
-To produce the sealed AppImage locally (vpk, `mksquashfs` and `patchelf` on
-PATH, `xvfb` for the gate inside it):
+To produce the sealed AppImage locally (`vpk`, `mksquashfs`, `patchelf`,
+`readelf` from binutils and `zsyncmake` from zsync on PATH, `xvfb` for the gate
+inside it):
 
 ```bash
 TARGET_DIR=target/x86_64-unknown-linux-gnu/release \
@@ -128,10 +133,10 @@ The payload's glibc floor is the glibc of whatever compiled it. Building on
 `ubuntu-24.04` (2.39) is what broke the AppImage catalog test, so the build
 runs in `ubuntu:22.04` (2.35). The same container also means the Rust link
 cannot accidentally pick up a host `libmpv`: the release runner installs only
-`squashfs-tools`, `patchelf`, `xvfb`, `xdotool` and the host-provided libraries
-the gate needs to start the app (`libasound2t64` — the Ubuntu 24.04 name of the
-ALSA runtime, where `libasound2` is a virtual package — and `libdrm2`) — no
-`-dev` packages at all.
+`squashfs-tools`, `patchelf`, `xvfb`, `xdotool`, `zsync` (for `zsyncmake`) and
+`binutils` (for `readelf`), plus the host-provided libraries the gate needs to
+start the app (`libasound2t64` — the Ubuntu 24.04 name of the ALSA runtime, where
+`libasound2` is a virtual package — and `libdrm2`) — no `-dev` packages at all.
 
 `patchelf` and the AppDir, however, live on the host (vpk produces the AppDir
 there), so the work is split: the container *resolves and stages* the closure
@@ -515,6 +520,65 @@ requirement), `libstdc++.so.6`, `libasound.so.2`, `libdrm.so.2` and the
 GPU/driver stack, each with a note on whether it resolves on the machine running
 the gate. CI installs those libraries, so a "missing here" list alone used to
 make the floor invisible in the release log.
+
+## AppImageUpdate information and the `.zsync`
+
+The AppImage carries
+[AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate)
+information, and a `.zsync` control file is published beside it, so
+`AppImageUpdate-*.AppImage` can update it in place without downloading the whole
+payload again.
+
+**The runtime is patched before packing, not the finished AppImage.** `vpk pack`
+prepends AppImageKit's type-2 runtime to the squashfs; that runtime already
+carries a 1024-byte `.upd_info` ELF section, but vpk leaves it all zeroes
+(`--appimage-updateinformation` prints an empty line). vpk has no option to fill
+it, and upstream declined zsync support
+([velopack#351](https://github.com/velopack/velopack/issues/351)), so
+`appimage-update-info.sh patch-runtime` writes the string into vpk's **vendored
+copy** of the runtime (`<dotnet tools>/.store/vpk/*/vendor/appimagekit-runtime-*`)
+and `pack-appimage.sh` calls it before the first pack. Everything downstream —
+pass 1, pass 2, the shipped `Releases/MediaSort-linux-*.AppImage`, the
+byte-identical copy velopack wraps into the `.nupkg` as
+`lib/app/MediaSort.AppImage`, and the SHA1/SHA256/Size hashes in
+`releases.*.json` — is then derived from the patched bytes.
+
+The trap this avoids: velopack's Linux self-updater extracts the `*.AppImage`
+from the `.nupkg` and moves it over the running AppImage. Patching only the
+finished `Releases/*.AppImage` would look correct until the first in-app update,
+after which the AppImage has an empty `.upd_info` again and AppImageUpdate
+silently stops working. Patching the `.nupkg` afterwards would instead mean
+recomputing those hashes and re-signing. The patch is idempotent (it zeroes the
+section before writing, so a shorter string leaves no stale tail) and proves
+itself by running the runtime with `--appimage-updateinformation`.
+
+The update-information string is
+`gh-releases-zsync|<owner>|<repo>|<channel>|<asset>.zsync`. Channel selection is
+**strict**: a stable version (no `-`) gets `latest`, a prerelease gets
+`latest-pre`, so a stable user is never offered a prerelease. It is baked in per
+build; there is no runtime substitution. The asset field is the exact `.zsync`
+name — both architectures are attached to the same release, and a wildcard would
+let AppImageUpdate pick the lexicographically greatest match, i.e. the wrong
+architecture.
+
+After the second pack, `pack-appimage.sh` runs
+`zsyncmake -u <AppImage basename>` on the **final** bytes, verifies the control
+file names that AppImage and carries its SHA-1, and gates the sealed AppImage
+with `check`. `release.yml` uploads `Releases/*.AppImage.zsync` next to the
+`.sig` files, after `vpk upload github`; `verify.sh` runs the same check on the
+sealed AppImage, so a build without update information or without a matching
+sibling `.zsync` fails instead of shipping.
+
+The vpk version is deliberately not pinned, so vpk changing its vendor layout
+(or shipping a runtime without `.upd_info`) makes the script fail with an
+actionable message rather than ship an AppImage that cannot update itself. A
+local `pack-appimage.sh` run leaves the runtime in that machine's vpk install
+patched, so later AppImages built with the same vpk carry this repository's
+update string until vpk is reinstalled or updated; CI is unaffected because every
+job installs a fresh tool. Use `APPIMAGE_RUNTIME_PATH` to exercise the patch
+against a copy instead of the installed runtime. The dependence on vpk's
+internals is the accepted cost of not post-processing the `.nupkg`; a patched
+`.nupkg` is the alternative to revisit if that layout ever becomes unstable.
 
 ## Licensing
 

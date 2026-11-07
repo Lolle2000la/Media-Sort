@@ -71,6 +71,14 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The AppImageUpdate helper's pure logic (channel selection, update-info
+      # string, .upd_info parsing, .zsync header parsing) is cheap to probe and
+      # needs no payload, so a regression there fails in seconds instead of
+      # after the ~10 minute container build.
+      - name: Selftest AppImage Update Info Helper
+        shell: bash
+        run: bash packaging/appimage/appimage-update-info.sh --selftest
+
       # The gate itself (apt tools, the ubuntu:22.04 container build, the
       # two-pass vpk pack, and verify.sh on both the AppDir and the sealed
       # AppImage) lives in the composite action, so this workflow and

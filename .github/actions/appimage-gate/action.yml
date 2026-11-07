@@ -57,8 +57,10 @@ runs:
         # past the loader on a bare runner, and the gate fails. The ALSA runtime
         # library is `libasound2t64` on Ubuntu 24.04+ -- `libasound2` is a
         # virtual package there with two providers, so apt refuses it. xdotool
-        # makes verify.sh's informational window probe run.
-        sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2
+        # makes verify.sh's informational window probe run. zsyncmake builds the
+        # .zsync and readelf (binutils) reads/checks the runtime's .upd_info
+        # section (packaging/appimage/appimage-update-info.sh).
+        sudo apt-get install -y squashfs-tools patchelf xvfb xdotool libasound2t64 libdrm2 zsync binutils
 
     - name: Setup .NET SDK (For vpk CLI)
       uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
