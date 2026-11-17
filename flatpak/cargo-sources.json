@@ -4721,14 +4721,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/lucide-icons/lucide-icons-1.61.0.crate",
-        "sha256": "8b52cfed63f0f6c329d194fb945afe022c441a59838e28e3c27758a674cbd3a9",
-        "dest": "cargo/vendor/lucide-icons-1.61.0"
+        "url": "https://static.crates.io/crates/lucide-icons/lucide-icons-1.67.0.crate",
+        "sha256": "d8bf43e74c58a6a8ce01ff3516feb4e509ad6623b00d39700f180babe62c9058",
+        "dest": "cargo/vendor/lucide-icons-1.67.0"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"8b52cfed63f0f6c329d194fb945afe022c441a59838e28e3c27758a674cbd3a9\", \"files\": {}}",
-        "dest": "cargo/vendor/lucide-icons-1.61.0",
+        "contents": "{\"package\": \"d8bf43e74c58a6a8ce01ff3516feb4e509ad6623b00d39700f180babe62c9058\", \"files\": {}}",
+        "dest": "cargo/vendor/lucide-icons-1.67.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {
