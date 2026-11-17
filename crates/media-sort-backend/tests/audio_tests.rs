@@ -51,7 +51,7 @@ fn test_audio_player_plays_and_advances_position() {
         // regression is still caught.
         let headless_macos_ci = cfg!(target_os = "macos") && std::env::var_os("CI").is_some();
         assert!(
-            !headless_macos_ci,
+            headless_macos_ci,
             "playback position should advance while the output stream is consuming samples"
         );
         eprintln!(
