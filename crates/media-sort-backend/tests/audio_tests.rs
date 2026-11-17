@@ -48,7 +48,9 @@ fn test_audio_player_plays_and_advances_position() {
         // ran, and the clock is still asserted strictly on Linux CI (its null
         // device does consume) and on any real machine. Keep the strict path
         // everywhere so a genuine "the writer thread exited while idle"
-        // regression is still caught.
+        // regression is still caught. Everything after this point depends on
+        // the device actually consuming samples (the queue only drains when it
+        // does), so a runner that consumed nothing ends the test here instead.
         let headless_macos_ci = cfg!(target_os = "macos") && std::env::var_os("CI").is_some();
         assert!(
             headless_macos_ci,
@@ -56,8 +58,11 @@ fn test_audio_player_plays_and_advances_position() {
         );
         eprintln!(
             "SKIP: the output device consumed no samples (headless macOS CI runner); \
-             the queue/duration assertions above still ran"
+             the queue/duration assertions above still ran, the stop/drain assertions \
+             below are skipped"
         );
+        player.stop();
+        return;
     }
 
     player.stop();
