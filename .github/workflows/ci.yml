@@ -240,8 +240,87 @@ jobs:
           # regenerates. The code also self-validates via the VERSION marker.
           key: ${{ matrix.os }}-fixtures-${{ hashFiles('crates/benchmarks/src/fixture_gen.rs', 'resources/MockState/mock 1.jpg') }}
 
+      # Compiling is split from executing so that only the compile is retried.
+      # On Windows the vendored dav1d is built by dav1d-sys's build script,
+      # which git-clones the source and only panics when the process cannot be
+      # spawned -- a transient network failure (or an interrupted clone that
+      # leaves a partial .git behind) is silently ignored, the script reports
+      # success without producing dav1d.lib, and the link then dies with
+      # "LNK1181: cannot open input file 'dav1d.lib'" (job 134899537045; a
+      # re-run of the same job passed). That is a flake in the toolchain, so
+      # the build gets the retry while the test run below stays a single
+      # attempt: a genuine test failure must fail the job immediately instead
+      # of being retried until it looks green. The retry alone would only
+      # repeat the link failure -- cargo still believes that build script is
+      # fresh -- so on_retry_command discards the half-built state first.
+      - name: Build Test Binaries (retry on transient network failures)
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        env:
+          # Keep in sync with the test and doctest steps below: RUSTFLAGS is
+          # part of cargo's fingerprint, so a copy that disagrees silently
+          # turns their run into a full rebuild.
+          LIBRARY_PATH: ${{ matrix.os == 'macos-latest' && '/opt/homebrew/lib' || '' }}
+          RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-L native=libs -C link-arg=/NODEFAULTLIB:LIBCMTD -C link-arg=/NODEFAULTLIB:LIBCMT' || '' }}
+        with:
+          # Bounds each attempt, three attempts in total: a cold build compiles
+          # the whole workspace including the vendored libjpeg-turbo and dav1d
+          # sources, and every retry additionally rebuilds dav1d from scratch.
+          timeout_minutes: 60
+          max_attempts: 3
+          retry_wait_seconds: 20
+          shell: bash
+          # Runs before every retry, never after the last attempt. retry@v4
+          # executes it through execSync with the platform default shell
+          # (cmd.exe on Windows, /bin/sh elsewhere) rather than the `shell:`
+          # setting above, so the cleanup is handed to bash explicitly:
+          # `set -euo pipefail` is not cmd syntax, and cmd.exe would pass
+          # `$GITHUB_WORKSPACE` through literally instead of expanding it. A
+          # failure here (Linux/macOS, where dav1d-sys is not built from
+          # source) is reported through the action's info() channel and cannot
+          # fail the step. `cargo clean -p dav1d-sys` is the part that counts:
+          # it drops the build script's fingerprint, so the script re-runs and
+          # re-clones. The rm only drops the half-clone, covering both cargo
+          # layouts (`build/dav1d-sys/<hash>/out` on current toolchains,
+          # `build/dav1d-sys-<hash>/out` on older ones), and is a no-op where
+          # neither exists.
+          on_retry_command: |
+            bash -c "set -euo pipefail; cd \"$GITHUB_WORKSPACE\"; rm -rf target/*/build/dav1d-sys/*/out/dav1d target/*/build/dav1d-sys-*/out/dav1d; cargo clean -p dav1d-sys"
+          command: |
+            # nick-fields/retry@v4 spawns the command without set -e, so a
+            # failed compile would otherwise be swallowed; be explicit.
+            set -euo pipefail
+            # retry@v4 runs `command` in a different working directory than
+            # GITHUB_WORKSPACE (it cannot honor working-directory).
+            cd "$GITHUB_WORKSPACE"
+            # git-bash puts its own /usr/bin -- where coreutils' `link.exe`
+            # lives -- ahead of the MSVC dirs, and rustc resolves MSVC's
+            # linker by bare name (see the NOTE on the nextest step below), so
+            # promote the first PATH entry that really holds MSVC's linker.
+            # No-op on Linux/macOS, where no such entry exists.
+            if [ "${RUNNER_OS:-}" = "Windows" ]; then
+              msvc_link_dir=""
+              while IFS= read -r entry; do
+                case "$entry" in
+                  ''|/usr/bin|/bin) continue ;;
+                esac
+                if [ -f "$entry/link.exe" ]; then
+                  msvc_link_dir="$entry"
+                  break
+                fi
+              done <<< "$(printf '%s\n' "$PATH" | tr ':' '\n')"
+              if [ -n "$msvc_link_dir" ]; then
+                export PATH="$msvc_link_dir:$PATH"
+              fi
+            fi
+            # --no-run compiles every workspace test binary (the same
+            # selection, profile and RUSTFLAGS as the test step) and runs
+            # nothing, so the flake is retried here and never around a test.
+            cargo nextest run --workspace --no-run
+
       - name: Run Workspace Tests
         env:
+          # Keep in sync with the build and doctest steps' env (see above and
+          # below); a mismatched RUSTFLAGS rebuilds the workspace here.
           LIBRARY_PATH: ${{ matrix.os == 'macos-latest' && '/opt/homebrew/lib' || '' }}
           RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-L native=libs -C link-arg=/NODEFAULTLIB:LIBCMTD -C link-arg=/NODEFAULTLIB:LIBCMT' || '' }}
         # nextest runs each test in its own process, so the previous Windows
@@ -256,6 +335,8 @@ jobs:
 
       - name: Run Doctests
         env:
+          # Keep in sync with the build and test steps' env above; a
+          # mismatched RUSTFLAGS rebuilds the workspace here.
           LIBRARY_PATH: ${{ matrix.os == 'macos-latest' && '/opt/homebrew/lib' || '' }}
           RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-L native=libs -C link-arg=/NODEFAULTLIB:LIBCMTD -C link-arg=/NODEFAULTLIB:LIBCMT' || '' }}
         # cargo-nextest does not run doctests, and the old `--tests` selection
