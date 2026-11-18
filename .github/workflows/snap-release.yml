@@ -59,7 +59,7 @@ jobs:
       # Same retried shell build as snap.yml, with the matrix platform. The
       # store-facing calls inside it are the flaky ones (a `core26` download
       # reset, a `snapcraft` assertion fetch past its deadline), and a failed
-      # fetched must not keep a release from being built, so the whole sequence is
+      # fetch must not keep a release from being built, so the whole sequence is
       # retried as one unit -- which is why every call in it survives a second
       # run. `retry_on` stays at its default (`any`): a genuine failure therefore
       # costs up to three builds before the leg goes red. No cache on this path
