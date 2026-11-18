@@ -56,23 +56,53 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Retried for the same reason as in snap.yml: the Snap store fetches that
+      # fail here happen *inside* Canonical's action (installing LXD and
+      # snapcraft), so wrapping a command cannot cover them, and a failed fetch
+      # must not keep a release from being built. Safe to repeat: the action
+      # falls back to `snap refresh` when the snap is already installed.
+      #
+      # wretry.action exposes the wrapped action's outputs only as one JSON map,
+      # so the artifact is resolved from the workspace below instead; for the
+      # same reason (it spawns the action itself) the project root travels as an
+      # explicit `path` rather than the action's cwd-relative default `.`.
       - name: Build Snap
         id: snapcraft
-        uses: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
         with:
-          snapcraft-args: pack --platform ${{ matrix.platform }}
+          action: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
+          attempt_limit: 3
+          attempt_delay: 30000
+          with: |
+            path: ${{ github.workspace }}
+            snapcraft-args: pack --platform ${{ matrix.platform }}
+
+      - name: Locate the built snap
+        id: snap
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          snaps=(media-sort_*.snap)
+          if [ "${#snaps[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one media-sort_*.snap, found ${#snaps[@]}"
+            ls -l ./*.snap || true
+            exit 1
+          fi
+          echo "path=${snaps[0]}" >> "$GITHUB_OUTPUT"
+          echo "snap: ${snaps[0]}"
 
       # Verified before the artifact can be published: a snap that cannot start
       # in its own confinement must not reach a channel. Same check as snap.yml,
       # hence the shared script.
       - name: Check the snap in its confinement
-        run: scripts/check-snap-confinement.sh "${{ steps.snapcraft.outputs.snap }}"
+        run: scripts/check-snap-confinement.sh "${{ steps.snap.outputs.path }}"
 
       - name: Upload the snap
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: snap-${{ matrix.platform }}
-          path: ${{ steps.snapcraft.outputs.snap }}
+          path: ${{ steps.snap.outputs.path }}
           if-no-files-found: error
           retention-days: 7
 
@@ -117,11 +147,20 @@ jobs:
           path: dist-snap
           merge-multiple: true
 
+      # The Store fetch is the flaky half of this (`snap install` has been seen
+      # to time out fetching assertions), and `install || refresh` keeps a retry
+      # idempotent: after a partial install `snap install` refuses the
+      # already-present snap, `snap refresh` succeeds instead.
       - name: Install snapcraft
-        run: |
-          set -euo pipefail
-          sudo snap install snapcraft --classic
-          snapcraft version
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 20
+          command: |
+            set -euo pipefail
+            sudo snap install snapcraft --classic || sudo snap refresh snapcraft
+            snapcraft version
 
       - name: Publish
         env:
