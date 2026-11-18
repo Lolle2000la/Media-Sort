@@ -76,12 +76,25 @@ jobs:
       - name: Install System Dependencies
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 10
+          # 20 min per attempt: the two apt calls below bound themselves to
+          # 15 min in total, so the action's own timeout-kill -- which fails
+          # the step with `Error: kill EPERM` instead of retrying -- is never
+          # reached.
+          timeout_minutes: 20
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            sudo apt-get update
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
+            # nick-fields/retry@v4 spawns the command without `set -e`, so a
+            # failed apt call would otherwise be swallowed and the step could
+            # still report success; be explicit.
+            set -euo pipefail
+            # Each apt call gets its own, shorter budget: a stalled mirror is
+            # then killed by `timeout` (exit 124, an ordinary failure the
+            # action retries) rather than by the action's own timeout, whose
+            # `process.kill(-pid)` raises an uncaught `Error: kill EPERM` and
+            # aborts the step instead of making the next attempt.
+            timeout --kill-after=60 300 sudo apt-get update
+            timeout --kill-after=60 600 sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
 
       - name: Check Formatting
         run: cargo fmt --all -- --check
@@ -147,12 +160,25 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 10
+          # 20 min per attempt: the two apt calls below bound themselves to
+          # 15 min in total, so the action's own timeout-kill -- which fails
+          # the step with `Error: kill EPERM` instead of retrying -- is never
+          # reached.
+          timeout_minutes: 20
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            sudo apt-get update
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
+            # nick-fields/retry@v4 spawns the command without `set -e`, so a
+            # failed apt call would otherwise be swallowed and the step could
+            # still report success; be explicit.
+            set -euo pipefail
+            # Each apt call gets its own, shorter budget: a stalled mirror is
+            # then killed by `timeout` (exit 124, an ordinary failure the
+            # action retries) rather than by the action's own timeout, whose
+            # `process.kill(-pid)` raises an uncaught `Error: kill EPERM` and
+            # aborts the step instead of making the next attempt.
+            timeout --kill-after=60 300 sudo apt-get update
+            timeout --kill-after=60 600 sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
 
       - name: Install System Dependencies (macOS)
         if: matrix.os == 'macos-latest'
