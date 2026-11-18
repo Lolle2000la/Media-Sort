@@ -250,7 +250,9 @@ jobs:
       # re-run of the same job passed). That is a flake in the toolchain, so
       # the build gets the retry while the test run below stays a single
       # attempt: a genuine test failure must fail the job immediately instead
-      # of being retried until it looks green.
+      # of being retried until it looks green. The retry alone would only
+      # repeat the link failure -- cargo still believes that build script is
+      # fresh -- so on_retry_command discards the half-built state first.
       - name: Build Test Binaries (retry on transient network failures)
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         env:
@@ -263,6 +265,16 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 20
           shell: bash
+          # Runs before every retry, never after the last attempt. retry@v4
+          # executes it through execSync -- the platform default shell
+          # (cmd.exe on Windows, /bin/sh elsewhere), NOT the `shell:` setting
+          # above -- so the cleanup is handed to bash explicitly; cmd.exe
+          # cannot parse `set -euo pipefail` and would split on the `||`/`&&`
+          # operators. Its failures are caught and merely warned about, so the
+          # mismatch on Linux/macOS, where dav1d-sys is not built from source,
+          # can never fail the step.
+          on_retry_command: |
+            bash -c "set -euo pipefail; cd \"$GITHUB_WORKSPACE\"; rm -rf target/*/build/dav1d-sys-*/out/dav1d; cargo clean -p dav1d-sys"
           command: |
             # nick-fields/retry@v4 spawns the command without set -e, so a
             # failed compile would otherwise be swallowed; be explicit.
