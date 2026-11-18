@@ -240,6 +240,61 @@ jobs:
           # regenerates. The code also self-validates via the VERSION marker.
           key: ${{ matrix.os }}-fixtures-${{ hashFiles('crates/benchmarks/src/fixture_gen.rs', 'resources/MockState/mock 1.jpg') }}
 
+      # Compiling is split from executing so that only the compile is retried.
+      # On Windows the vendored dav1d is built by dav1d-sys's build script,
+      # which git-clones the source and only panics when the process cannot be
+      # spawned -- a transient network failure (or an interrupted clone that
+      # leaves a partial .git behind) is silently ignored, the script reports
+      # success without producing dav1d.lib, and the link then dies with
+      # "LNK1181: cannot open input file 'dav1d.lib'" (job 134899537045; a
+      # re-run of the same job passed). That is a flake in the toolchain, so
+      # the build gets the retry while the test run below stays a single
+      # attempt: a genuine test failure must fail the job immediately instead
+      # of being retried until it looks green.
+      - name: Build Test Binaries (retry on transient network failures)
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        env:
+          LIBRARY_PATH: ${{ matrix.os == 'macos-latest' && '/opt/homebrew/lib' || '' }}
+          RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-L native=libs -C link-arg=/NODEFAULTLIB:LIBCMTD -C link-arg=/NODEFAULTLIB:LIBCMT' || '' }}
+        with:
+          # Generous per attempt: a cold build compiles the whole workspace
+          # including the vendored libjpeg-turbo and dav1d sources.
+          timeout_minutes: 45
+          max_attempts: 3
+          retry_wait_seconds: 20
+          shell: bash
+          command: |
+            # nick-fields/retry@v4 spawns the command without set -e, so a
+            # failed compile would otherwise be swallowed; be explicit.
+            set -euo pipefail
+            # retry@v4 runs `command` in a different working directory than
+            # GITHUB_WORKSPACE (it cannot honor working-directory).
+            cd "$GITHUB_WORKSPACE"
+            # git-bash puts its own /usr/bin -- where coreutils' `link.exe`
+            # lives -- ahead of the MSVC dirs, and rustc resolves MSVC's
+            # linker by bare name (see the NOTE on the nextest step below), so
+            # promote the first PATH entry that really holds MSVC's linker.
+            # No-op on Linux/macOS, where no such entry exists.
+            if [ "${RUNNER_OS:-}" = "Windows" ]; then
+              msvc_link_dir=""
+              while IFS= read -r entry; do
+                case "$entry" in
+                  ''|/usr/bin|/bin) continue ;;
+                esac
+                if [ -f "$entry/link.exe" ]; then
+                  msvc_link_dir="$entry"
+                  break
+                fi
+              done <<< "$(printf '%s\n' "$PATH" | tr ':' '\n')"
+              if [ -n "$msvc_link_dir" ]; then
+                export PATH="$msvc_link_dir:$PATH"
+              fi
+            fi
+            # --no-run compiles every workspace test binary (the same
+            # selection, profile and RUSTFLAGS as the test step) and runs
+            # nothing, so the flake is retried here and never around a test.
+            cargo nextest run --workspace --no-run
+
       - name: Run Workspace Tests
         env:
           LIBRARY_PATH: ${{ matrix.os == 'macos-latest' && '/opt/homebrew/lib' || '' }}
