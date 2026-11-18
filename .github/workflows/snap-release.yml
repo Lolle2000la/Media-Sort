@@ -56,23 +56,118 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Same retried shell build as snap.yml, with the matrix platform. The
+      # store-facing calls inside it are the flaky ones (a `core26` download
+      # reset, a `snapcraft` assertion fetch past its deadline), and a failed
+      # fetched must not keep a release from being built, so the whole sequence is
+      # retried as one unit -- which is why every call in it survives a second
+      # run. `retry_on` stays at its default (`any`): a genuine failure therefore
+      # costs up to three builds before the leg goes red. No cache on this path
+      # (see AGENTS.md): it never runs on `push`, and a restored snap would be
+      # published without having been built from the tagged tree.
       - name: Build Snap
-        id: snapcraft
-        uses: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          snapcraft-args: pack --platform ${{ matrix.platform }}
+          # Per attempt: the build alone took ~11 min on the old 4-core runner.
+          timeout_minutes: 40
+          max_attempts: 3
+          retry_wait_seconds: 30
+          # The action spawns the command without `-e`, and from its own working
+          # directory, so both are set up inside the command.
+          shell: bash
+          command: |
+            set -euo pipefail
+            cd "$GITHUB_WORKSPACE"
+
+            # snapd is what everything below goes through; hosted runners ship
+            # it and the retired action installed it when they did not.
+            command -v snap >/dev/null \
+              || { sudo apt-get update -q && sudo apt-get install -qy snapd; }
+            # snap-confine trips over a `/` that is not root-owned. Always the
+            # case on a hosted runner, so this is a no-op guard.
+            [ "$(stat -c '%u:%g' /)" = "0:0" ] || sudo chown root:root /
+
+            # A .deb LXD next to the snap's would put two daemons on one
+            # socket, so remove it first, as Canonical's action did. Guarded on
+            # the binary, so a retry finds nothing left to remove.
+            if [ -x /usr/bin/lxd ]; then
+              sudo apt-get remove -qy lxd lxd-client
+            fi
+            # The build user has to be in the `lxd` group, but `usermod` only
+            # takes effect in a new session -- which is why snapcraft is run
+            # through `sudo -u ... -E` below instead of relying on the group of
+            # this shell.
+            sudo groupadd --force --system lxd
+            sudo usermod --append --groups lxd "$(id -un)"
+
+            # Install only when the daemon is absent: a retry finds it present,
+            # and a `snap refresh` for an already-installed, already-initialised
+            # snap would be a store round-trip of its own -- one that could kill
+            # the attempt before it reaches the call being retried.
+            command -v lxd >/dev/null || sudo snap install lxd
+            # `lxd init --auto` refuses an already-initialised daemon -- exactly
+            # what a retry hits -- so its exit code says nothing about LXD being
+            # usable. `waitready` is the assertion instead: it blocks until the
+            # daemon answers (300 s, comfortably past a refresh restarting it)
+            # and fails loudly if LXD is genuinely absent.
+            sudo lxd init --auto \
+              || echo "::warning::'lxd init --auto' did not complete; continuing with the daemon already present"
+            if ! sudo lxd waitready --timeout 300; then
+              echo "::error::LXD is not ready, so the container build cannot run"
+              exit 1
+            fi
+            # Docker owns the FORWARD chain on the runner (see the LXD/Docker
+            # firewall notes upstream). Not a store call, so it stays fatal:
+            # tolerating it only resurfaces later as an unrelated networking
+            # error inside the build.
+            sudo iptables -P FORWARD ACCEPT
+
+            sudo snap install --channel stable --classic snapcraft \
+              || sudo snap refresh --channel stable --classic snapcraft
+            # Records in the log which snapcraft actually built the snap.
+            snapcraft version
+
+            # A retried attempt must not leave a second artefact behind: the
+            # locator step below requires exactly one media-sort_*.snap.
+            rm -f media-sort_*.snap
+
+            # SNAPCRAFT_BUILD_INFO=1 is what puts snap/manifest.yaml into the
+            # snap (the Store reads it to flag vulnerable stage-packages);
+            # SNAPCRAFT_IMAGE_INFO is the build record; `-E` keeps the rest of
+            # the environment (PATH, HOME) for the unprivileged build.
+            image_info="{\"build_url\":\"https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}"
+            sudo -u "$(id -un)" -E env \
+              SNAPCRAFT_BUILD_ENVIRONMENT=lxd \
+              SNAPCRAFT_BUILD_INFO=1 \
+              SNAPCRAFT_IMAGE_INFO="$image_info" \
+              snapcraft pack --platform ${{ matrix.platform }}
+
+      - name: Locate the built snap
+        id: snap
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          snaps=(media-sort_*.snap)
+          if [ "${#snaps[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one media-sort_*.snap, found ${#snaps[@]}"
+            ls -l ./*.snap || true
+            exit 1
+          fi
+          echo "path=${snaps[0]}" >> "$GITHUB_OUTPUT"
+          echo "snap: ${snaps[0]}"
 
       # Verified before the artifact can be published: a snap that cannot start
       # in its own confinement must not reach a channel. Same check as snap.yml,
       # hence the shared script.
       - name: Check the snap in its confinement
-        run: scripts/check-snap-confinement.sh "${{ steps.snapcraft.outputs.snap }}"
+        run: scripts/check-snap-confinement.sh "${{ steps.snap.outputs.path }}"
 
       - name: Upload the snap
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: snap-${{ matrix.platform }}
-          path: ${{ steps.snapcraft.outputs.snap }}
+          path: ${{ steps.snap.outputs.path }}
           if-no-files-found: error
           retention-days: 7
 
@@ -117,11 +212,20 @@ jobs:
           path: dist-snap
           merge-multiple: true
 
+      # The Store fetch is the flaky half of this (`snap install` has been seen
+      # to time out fetching assertions), and `install || refresh` keeps a retry
+      # idempotent: after a partial install `snap install` refuses the
+      # already-present snap, `snap refresh` succeeds instead.
       - name: Install snapcraft
-        run: |
-          set -euo pipefail
-          sudo snap install snapcraft --classic
-          snapcraft version
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 20
+          command: |
+            set -euo pipefail
+            sudo snap install snapcraft --classic || sudo snap refresh snapcraft
+            snapcraft version
 
       - name: Publish
         env:
