@@ -56,26 +56,79 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Retried for the same reason as in snap.yml: the Snap store fetches that
-      # fail here happen *inside* Canonical's action (installing LXD and
-      # snapcraft), so wrapping a command cannot cover them, and a failed fetch
-      # must not keep a release from being built. Safe to repeat: the action
-      # falls back to `snap refresh` when the snap is already installed.
-      #
-      # wretry.action exposes the wrapped action's outputs only as one JSON map,
-      # so the artifact is resolved from the workspace below instead; for the
-      # same reason (it spawns the action itself) the project root travels as an
-      # explicit `path` rather than the action's cwd-relative default `.`.
+      # Same retried shell build as snap.yml, with the matrix platform. The
+      # store-facing calls inside it are the flaky ones (a `core26` download
+      # reset, a `snapcraft` assertion fetch past its deadline), and a failed
+      # fetch must not keep a release from being built, so the whole sequence is
+      # retried as one unit -- which is why every call in it survives a second
+      # run. No cache on this path (see AGENTS.md): it never runs on `push`, and
+      # a restored snap would be published without having been built from the
+      # tagged tree.
       - name: Build Snap
-        id: snapcraft
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          action: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
-          attempt_limit: 3
-          attempt_delay: 30000
-          with: |
-            path: ${{ github.workspace }}
-            snapcraft-args: pack --platform ${{ matrix.platform }}
+          # Per attempt: the build alone took ~11 min on the old 4-core runner.
+          timeout_minutes: 40
+          max_attempts: 3
+          retry_wait_seconds: 30
+          # The action spawns the command without `-e`, and from its own working
+          # directory, so both are set up inside the command.
+          shell: bash
+          command: |
+            set -euo pipefail
+            cd "$GITHUB_WORKSPACE"
+
+            # snapd is what everything below goes through; hosted runners ship
+            # it and the retired action installed it when they did not.
+            command -v snap >/dev/null \
+              || { sudo apt-get update -q && sudo apt-get install -qy snapd; }
+            # snap-confine trips over a `/` that is not root-owned. Always the
+            # case on a hosted runner, so this is a no-op guard.
+            [ "$(stat -c '%u:%g' /)" = "0:0" ] || sudo chown root:root /
+
+            # The build user has to be in the `lxd` group, but `usermod` only
+            # takes effect in a new session -- which is why snapcraft is run
+            # through `sudo -u ... -E` below instead of relying on the group of
+            # this shell.
+            sudo groupadd --force --system lxd
+            sudo usermod --append --groups lxd "$(id -un)"
+
+            # `|| refresh`: a retry finds the snap installed, and a bare
+            # `install` fails on that.
+            sudo snap install lxd || sudo snap refresh lxd
+            # `lxd init --auto` refuses an already-initialised daemon -- exactly
+            # what a retry hits -- so its exit code says nothing about LXD being
+            # usable. `waitready` is the assertion instead: it blocks until the
+            # daemon answers, and fails loudly if LXD is genuinely absent.
+            sudo lxd init --auto \
+              || echo "::warning::'lxd init --auto' did not complete; continuing with the daemon already present"
+            if ! sudo lxd waitready --timeout 60; then
+              echo "::error::LXD is not ready, so the container build cannot run"
+              exit 1
+            fi
+            # Docker owns the FORWARD chain on the runner (see the LXD/Docker
+            # firewall notes upstream); this must not abort the step.
+            sudo iptables -P FORWARD ACCEPT || true
+
+            sudo snap install --channel stable --classic snapcraft \
+              || sudo snap refresh --channel stable --classic snapcraft
+            # Records in the log which snapcraft actually built the snap.
+            snapcraft version
+
+            # A retried attempt must not leave a second artefact behind: the
+            # locator step below requires exactly one media-sort_*.snap.
+            rm -f media-sort_*.snap
+
+            # SNAPCRAFT_BUILD_INFO=1 is what puts snap/manifest.yaml into the
+            # snap (the Store reads it to flag vulnerable stage-packages);
+            # SNAPCRAFT_IMAGE_INFO is the build record; `-E` keeps the rest of
+            # the environment (PATH, HOME) for the unprivileged build.
+            image_info="{\"build_url\":\"https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}"
+            sudo -u "$(id -un)" -E env \
+              SNAPCRAFT_BUILD_ENVIRONMENT=lxd \
+              SNAPCRAFT_BUILD_INFO=1 \
+              SNAPCRAFT_IMAGE_INFO="$image_info" \
+              snapcraft pack --platform ${{ matrix.platform }}
 
       - name: Locate the built snap
         id: snap
