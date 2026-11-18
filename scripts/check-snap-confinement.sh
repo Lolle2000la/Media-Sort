@@ -29,7 +29,28 @@ snap list media-sort
 # `gpu-2404` content provider, which the Store installs as a default-provider
 # dependency. A local `--dangerous` install does not pull it in, so do it here --
 # without it the app cannot start.
-snap list mesa-2404 >/dev/null 2>&1 || sudo snap install mesa-2404
+#
+# This one fetch is retried: it is the only Store call in this script that a
+# flake can retry safely (`sudo snap install --dangerous` above fails outright
+# if the revision is already present, so that one must not be repeated). Skip
+# when the provider is already installed, so the retry is idempotent.
+provider_installed=false
+for attempt in 1 2 3; do
+  if snap list mesa-2404 >/dev/null 2>&1; then
+    provider_installed=true
+    break
+  fi
+  if sudo snap install mesa-2404; then
+    provider_installed=true
+    break
+  fi
+  echo "::warning::installing mesa-2404 failed (attempt $attempt/3)"
+  [ "$attempt" -eq 3 ] || sleep 20
+done
+if [ "$provider_installed" != true ]; then
+  echo "::error::could not install the mesa-2404 provider after 3 attempts"
+  exit 1
+fi
 if ! snap connections media-sort | grep -q "mesa-2404:gpu-2404"; then
   sudo snap connect media-sort:gpu-2404 mesa-2404
 fi

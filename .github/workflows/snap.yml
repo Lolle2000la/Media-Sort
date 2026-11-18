@@ -33,6 +33,15 @@ on:
   # No `merge_group` on purpose: path filters are silently ignored for it, so it
   # would run on every queued merge instead of only for snap/dependency changes.
   workflow_dispatch:
+    inputs:
+      force-build:
+        # Dispatching this workflow is how the recipe gets re-proved against
+        # today's archive, base and `build-packages`, so the default has to be a
+        # real build -- unchecking it is the way to re-run the check against an
+        # already-built snap instead.
+        description: 'Build the snap even if a matching cache entry exists'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -49,26 +58,178 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Canonical's action installs and configures snapd, LXD and snapcraft,
-      # then builds inside an LXD container pinned to the recipe's base
-      # (core24 = Ubuntu 24.04). That is what lets this job run on any runner
-      # release: `--destructive-mode` only accepts a host that *is* the base, so
-      # pinning the runner to `ubuntu-24.04` was load-bearing, and a runner bump
-      # broke the job. Building in the base container also makes the "clean
-      # environment" guarantee real -- only the recipe's `build-packages`, never
-      # the libraries the runner happens to ship. One architecture is enough to
-      # prove the recipe resolves, so build only `amd64`; `--platform` must name
-      # one of `platforms:` in snap/snapcraft.yaml.
-      - name: Build Snap
-        id: snapcraft
-        uses: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
+      # The build runs in an LXD container pinned to the recipe's base (core24 =
+      # Ubuntu 24.04) rather than on the runner, which is what lets this job run
+      # on any runner release: `--destructive-mode` only accepts a host that *is*
+      # the base, so pinning the runner to `ubuntu-24.04` was load-bearing, and a
+      # runner bump broke the job. Building in the base container also makes the
+      # "clean environment" guarantee real -- only the recipe's
+      # `build-packages`, never the libraries the runner happens to ship. One
+      # architecture is enough to prove the recipe resolves, so build only
+      # `amd64`; `--platform` must name one of `platforms:` in
+      # snap/snapcraft.yaml.
+      #
+      # The step is a retried shell command that performs the sequence the
+      # retired `snapcore/action-build` action performed -- install and
+      # initialise snapd, LXD and snapcraft, then run `snapcraft pack` -- so the
+      # store-facing calls can be retried without pulling in a third-party
+      # action. Both failures this job has shown were Snap *store* fetches: a
+      # `core26` download reset by the peer during the LXD install, and a
+      # `snapcraft` assertion fetch past its deadline. The whole sequence is
+      # retried as one unit, so every call in it survives a second attempt: a
+      # `.deb` LXD is removed only if present, LXD and snapcraft are never
+      # re-fetched when already installed (except snapcraft's `|| refresh`,
+      # which *is* one of the flaky calls), `lxd init` is tolerated and
+      # `lxd waitready` decides whether LXD actually works, and the
+      # stale-artefact sweep keeps the locator's exactly-one rule true.
+      # `retry_on` stays at its default (`any`): there is no way to filter for
+      # network-shaped failures, so a genuine build failure costs up to three
+      # builds before the job goes red -- its exit code still propagates.
+      #
+      # Only the sealed snap is cacheable. The build tree is not: under managed
+      # LXD the instance is created fresh per run and craft-application works in
+      # `/root`, so `parts/`, `/root/.cargo` and Cargo's `target/` live inside
+      # the ephemeral container and never appear on the host (a job log shows
+      # `cargo install ... --root /root/parts/media-sort/install`). Reusing a
+      # `target/` would also be actively harmful: the recipe's `build-packages`
+      # are unpinned and Cargo fingerprints do not track system library
+      # versions, so a stale link could sail past the confinement check this job
+      # exists for.
+      #
+      # Be honest about what a hit means: the trigger paths above are a *subset*
+      # of this key's inputs, so any push or pull request that runs this job has
+      # changed a hashed input by construction -- a PR therefore always misses
+      # and always builds, which is the property the check depends on. A hit is
+      # reachable only by re-running (or revert-shaped pushing) a tree that was
+      # already built, and by a `workflow_dispatch` that opts out of
+      # `force-build`; a dispatch forces the build by default, because
+      # re-proving the recipe against today's archive and `build-packages` is
+      # the reason to dispatch this workflow at all.
+      - name: Restore the built snap
+        id: snap-cache
+        # A dispatch that asks for a build skips the lookup, which leaves
+        # `cache-hit` unset -- the build gate below reads that as a miss.
+        if: github.event_name != 'workflow_dispatch' || inputs.force-build != true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          snapcraft-args: pack --platform amd64
+          path: media-sort_*.snap
+          # Exactly the recipe's inputs, the workflow file included because it
+          # carries the build wiring. No `restore-keys`: a snap built from other
+          # sources must never be substituted for this tree, or the check would
+          # validate the wrong artifact.
+          key: snap-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/**', 'resources/**', 'snap/**', 'scripts/check-snap-confinement.sh', '.github/workflows/snap.yml') }}
+
+      - name: Build Snap
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          # Per attempt: the build alone took ~11 min on the old 4-core runner.
+          timeout_minutes: 40
+          max_attempts: 3
+          retry_wait_seconds: 30
+          # The action spawns the command without `-e`, and from its own working
+          # directory, so both are set up inside the command.
+          shell: bash
+          command: |
+            set -euo pipefail
+            cd "$GITHUB_WORKSPACE"
+
+            # snapd is what everything below goes through; hosted runners ship
+            # it and the retired action installed it when they did not.
+            command -v snap >/dev/null \
+              || { sudo apt-get update -q && sudo apt-get install -qy snapd; }
+            # snap-confine trips over a `/` that is not root-owned. Always the
+            # case on a hosted runner, so this is a no-op guard.
+            [ "$(stat -c '%u:%g' /)" = "0:0" ] || sudo chown root:root /
+
+            # A .deb LXD next to the snap's would put two daemons on one
+            # socket, so remove it first, as Canonical's action did. Guarded on
+            # the binary, so a retry finds nothing left to remove.
+            if [ -x /usr/bin/lxd ]; then
+              sudo apt-get remove -qy lxd lxd-client
+            fi
+            # The build user has to be in the `lxd` group, but `usermod` only
+            # takes effect in a new session -- which is why snapcraft is run
+            # through `sudo -u ... -E` below instead of relying on the group of
+            # this shell.
+            sudo groupadd --force --system lxd
+            sudo usermod --append --groups lxd "$(id -un)"
+
+            # Install only when the daemon is absent: a retry finds it present,
+            # and a `snap refresh` for an already-installed, already-initialised
+            # snap would be a store round-trip of its own -- one that could kill
+            # the attempt before it reaches the call being retried.
+            command -v lxd >/dev/null || sudo snap install lxd
+            # `lxd init --auto` refuses an already-initialised daemon -- exactly
+            # what a retry hits -- so its exit code says nothing about LXD being
+            # usable. `waitready` is the assertion instead: it blocks until the
+            # daemon answers (300 s, comfortably past a refresh restarting it)
+            # and fails loudly if LXD is genuinely absent.
+            sudo lxd init --auto \
+              || echo "::warning::'lxd init --auto' did not complete; continuing with the daemon already present"
+            if ! sudo lxd waitready --timeout 300; then
+              echo "::error::LXD is not ready, so the container build cannot run"
+              exit 1
+            fi
+            # Docker owns the FORWARD chain on the runner (see the LXD/Docker
+            # firewall notes upstream). Not a store call, so it stays fatal:
+            # tolerating it only resurfaces later as an unrelated networking
+            # error inside the build.
+            sudo iptables -P FORWARD ACCEPT
+
+            sudo snap install --channel stable --classic snapcraft \
+              || sudo snap refresh --channel stable --classic snapcraft
+            # Records in the log which snapcraft actually built the snap.
+            snapcraft version
+
+            # A retried attempt must not leave a second artefact behind: the
+            # locator step below requires exactly one media-sort_*.snap.
+            rm -f media-sort_*.snap
+
+            # SNAPCRAFT_BUILD_INFO=1 is what puts snap/manifest.yaml into the
+            # snap (the Store reads it to flag vulnerable stage-packages);
+            # SNAPCRAFT_IMAGE_INFO is the build record; `-E` keeps the rest of
+            # the environment (PATH, HOME) for the unprivileged build.
+            image_info="{\"build_url\":\"https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}"
+            sudo -u "$(id -un)" -E env \
+              SNAPCRAFT_BUILD_ENVIRONMENT=lxd \
+              SNAPCRAFT_BUILD_INFO=1 \
+              SNAPCRAFT_IMAGE_INFO="$image_info" \
+              snapcraft pack --platform amd64
+
+      # The packed snap is the one build artifact that reaches the host, so it is
+      # resolved here for both paths (a cache hit restores it, a build leaves it
+      # behind) and cannot be a missing or double-match by accident.
+      - name: Locate the built snap
+        id: snap
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          snaps=(media-sort_*.snap)
+          if [ "${#snaps[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one media-sort_*.snap, found ${#snaps[@]}"
+            ls -l ./*.snap || true
+            exit 1
+          fi
+          echo "path=${snaps[0]}" >> "$GITHUB_OUTPUT"
+          echo "snap: ${snaps[0]}"
 
       # Installing it, connecting the `gpu-2404` provider and checking it from
       # *inside* the sandbox all live in scripts/check-snap-confinement.sh: the
       # release workflow has to make the same check before it publishes, and this
       # is the part the ordinary CI build cannot see, because it links against
-      # whatever the runner happens to have.
+      # whatever the runner happens to have. It runs on a cache hit too: it is
+      # what validates the artifact.
       - name: Check the snap in its confinement
-        run: scripts/check-snap-confinement.sh "${{ steps.snapcraft.outputs.snap }}"
+        run: scripts/check-snap-confinement.sh "${{ steps.snap.outputs.path }}"
+
+      # Trusted writers only, exactly like ci.yml: a PR or merge-queue run may
+      # build the snap and check it, but only merged code may store the artifact
+      # a later run would trust instead of building.
+      - name: Save the built snap
+        if: ${{ github.event_name == 'push' && steps.snap-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: media-sort_*.snap
+          key: ${{ steps.snap-cache.outputs.cache-primary-key }}
