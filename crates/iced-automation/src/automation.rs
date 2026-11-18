@@ -120,7 +120,11 @@ impl Default for AutomationStyle {
             completed_border: Color::from_rgb(0.2, 0.65, 0.2),
             completed_border_width: 2.0,
             hud_border_width: 1.5,
-            cursor_outline_width: 1.5,
+            // Reference units: the overlay multiplies this by the render
+            // height relative to `CURSOR_REFERENCE_HEIGHT`, so the default
+            // draws a 2.0 px outline at 1080p instead of a hairline that
+            // smears at the yuv420p chroma limit.
+            cursor_outline_width: 2.0,
         }
     }
 }
@@ -305,10 +309,92 @@ pub fn handle_bounds_resolved<Message>(
     automation.step_ready = true;
 }
 
+// --- Cursor geometry ---
+/// Render height the cursor geometry is authored against. The overlay scales
+/// every offset by the actual render height divided by this, so the pointer
+/// keeps its proportions at 1080p, at a downscaled demo window and at a 4K
+/// export alike.
+pub const CURSOR_REFERENCE_HEIGHT: f32 = 1080.0;
+
+/// Lower clamp of the resolution scale factor: a small interactive demo
+/// window still gets a visible pointer instead of a few faint pixels.
+pub const CURSOR_MIN_SCALE: f32 = 0.75;
+
+/// Upper clamp of the resolution scale factor: a huge render must not paint a
+/// screen-sized arrow.
+pub const CURSOR_MAX_SCALE: f32 = 3.0;
+
+/// Canonical arrow pointer in reference units: tip at the origin, x right,
+/// y down. 11.0 wide × 19.4 tall (aspect ≈0.57, like an OS pointer, unlike the
+/// old 28×34 wedge) with the shoulder notch at (4.3, 12.7) and the narrow tail
+/// leg (6.8, 19.4) → (9.3, 18.1).
+pub const CURSOR_POINTER_UNITS: [(f32, f32); 7] = [
+    (0.0, 0.0),
+    (0.0, 16.6),
+    (4.3, 12.7),
+    (6.8, 19.4),
+    (9.3, 18.1),
+    (7.0, 11.5),
+    (11.0, 10.9),
+];
+
+/// Pixels per reference unit for a render `render_height` pixels tall, clamped
+/// to [`CURSOR_MIN_SCALE`]..=[`CURSOR_MAX_SCALE`]. A missing/zero/NaN height
+/// falls back to 1:1 so the overlay never degenerates into a zero-size path.
+pub fn cursor_render_scale(render_height: f32) -> f32 {
+    if !render_height.is_finite() || render_height <= 0.0 {
+        return 1.0;
+    }
+    (render_height / CURSOR_REFERENCE_HEIGHT).clamp(CURSOR_MIN_SCALE, CURSOR_MAX_SCALE)
+}
+
+/// The pointer silhouette scaled for a render `render_height` pixels tall, as
+/// pixel offsets from the tip (which stays exactly on the automation target).
+pub fn cursor_pointer_offsets(render_height: f32) -> [(f32, f32); 7] {
+    let scale = cursor_render_scale(render_height);
+    CURSOR_POINTER_UNITS.map(|(x, y)| (x * scale, y * scale))
+}
+
+/// How long the click ring is drawn for, measured in the emulator's own
+/// `step_elapsed` (reset when a step fires) — never in wall-clock time, so a
+/// headless export stays frame-exact.
+pub const CURSOR_CLICK_PULSE: Duration = Duration::from_millis(280);
+
+/// Radius (reference units) and alpha of the click ring `elapsed` after the
+/// click fired, or `None` once the pulse is over (or before it starts). The
+/// ring starts wide enough that its arc clears the pointer's body (a smaller
+/// ring is swallowed by the arrow and reads as no feedback), expands while it
+/// fades, and is fully transparent past the pulse so a resting click cannot
+/// leave a hoop on screen.
+pub fn cursor_click_ring(elapsed: Duration) -> Option<(f32, f32)> {
+    let progress = elapsed.as_secs_f32() / CURSOR_CLICK_PULSE.as_secs_f32();
+    if !(0.0..1.0).contains(&progress) {
+        return None;
+    }
+    Some((9.0 + 15.0 * progress, 0.9 * (1.0 - progress)))
+}
+
+fn pointer_path(origin: Point, offsets: &[(f32, f32)]) -> canvas::Path {
+    canvas::Path::new(|builder| {
+        let mut points = offsets
+            .iter()
+            .map(|(x, y)| Point::new(origin.x + x, origin.y + y));
+        if let Some(first) = points.next() {
+            builder.move_to(first);
+            for point in points {
+                builder.line_to(point);
+            }
+            builder.close();
+        }
+    })
+}
+
 // --- Cursor overlay (canvas) ---
 struct CursorOverlay {
     position: Point,
-    is_clicking: bool,
+    /// How long ago the click at `position` fired. Drives the ring; the arrow
+    /// itself never changes shape or colour on a click.
+    click_elapsed: Option<Duration>,
     style: AutomationStyle,
 }
 
@@ -325,30 +411,42 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for CursorOverlay {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
-        let cursor_color = if self.is_clicking {
-            self.style.click_color
-        } else {
-            self.style.cursor_color
-        };
+        let scale = cursor_render_scale(bounds.height);
+        let offsets = cursor_pointer_offsets(bounds.height);
+        let pointer = pointer_path(self.position, &offsets);
 
-        let p = self.position;
-        let pointer_path = canvas::Path::new(|builder| {
-            builder.move_to(p);
-            builder.line_to(Point::new(p.x + 10.0, p.y + 24.0));
-            builder.line_to(Point::new(p.x + 15.0, p.y + 21.0));
-            builder.line_to(Point::new(p.x + 23.0, p.y + 34.0));
-            builder.line_to(Point::new(p.x + 27.0, p.y + 31.0));
-            builder.line_to(Point::new(p.x + 19.0, p.y + 18.0));
-            builder.line_to(Point::new(p.x + 28.0, p.y + 14.0));
-            builder.close();
-        });
+        // Soft drop shadow: the same silhouette offset down-right in a
+        // translucent black, so the light fill keeps an edge on light themes
+        // and gains depth on dark ones. One filled path, no blur. The offset
+        // has to clear the outline width, or the shadow hides under it.
+        let shadow_path = pointer_path(
+            Point::new(self.position.x + 2.2 * scale, self.position.y + 3.0 * scale),
+            &offsets,
+        );
+        frame.fill(&shadow_path, Color::from_rgba(0.0, 0.0, 0.0, 0.3));
 
-        frame.fill(&pointer_path, cursor_color);
+        // Click feedback as a separate ring at the tip, drawn behind the arrow
+        // so the pointer itself stays untouched and the ring reads as a ripple
+        // radiating out from it.
+        if let Some((radius, alpha)) = self.click_elapsed.and_then(cursor_click_ring) {
+            let ring_path = canvas::Path::circle(self.position, radius * scale);
+            frame.stroke(
+                &ring_path,
+                canvas::Stroke::default()
+                    .with_color(Color {
+                        a: alpha,
+                        ..self.style.click_color
+                    })
+                    .with_width(2.4 * scale),
+            );
+        }
+
+        frame.fill(&pointer, self.style.cursor_color);
         frame.stroke(
-            &pointer_path,
+            &pointer,
             canvas::Stroke::default()
                 .with_color(self.style.outline_color)
-                .with_width(self.style.cursor_outline_width),
+                .with_width(self.style.cursor_outline_width * scale),
         );
 
         vec![frame.into_geometry()]
@@ -440,7 +538,11 @@ where
 
     let cursor = canvas(CursorOverlay {
         position: automation.virtual_cursor,
-        is_clicking: automation.is_clicking,
+        click_elapsed: if automation.is_clicking {
+            Some(automation.step_elapsed)
+        } else {
+            None
+        },
         style: automation.style.clone(),
     })
     .width(Length::Fill)
