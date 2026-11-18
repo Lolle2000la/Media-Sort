@@ -59,16 +59,86 @@ jobs:
       # the libraries the runner happens to ship. One architecture is enough to
       # prove the recipe resolves, so build only `amd64`; `--platform` must name
       # one of `platforms:` in snap/snapcraft.yaml.
+      #
+      # Both failures this recipe check has shown so far were Snap *store*
+      # fetches inside Canonical's action -- a `core26` download reset by the
+      # peer during the `lxd` install, and a `snapcraft` assertion fetch past its
+      # deadline -- so the retry has to wrap the action itself rather than a
+      # command: those calls happen inside it. Retrying is safe because the
+      # action tolerates a pre-existing install (it switches to `snap refresh`),
+      # so an attempt that got halfway is not worse than a cold one.
+      #
+      # wretry.action reports the wrapped action's outputs only as a single JSON
+      # map, so the built snap is located from the workspace below instead of
+      # from an output. It also spawns the wrapped action itself, so the project
+      # root is passed as `path` explicitly instead of leaving the action's
+      # default `.` to be resolved against whatever cwd the wrapper hands it.
+      #
+      # Only the sealed snap is cacheable. The build tree is not: under managed
+      # LXD the instance is created fresh per run and craft-application works in
+      # `/root`, so `parts/`, `/root/.cargo` and Cargo's `target/` live inside
+      # the ephemeral container and never appear on the host (a job log shows
+      # `cargo install ... --root /root/parts/media-sort/install`). Reusing a
+      # `target/` would also be actively harmful: the recipe's `build-packages`
+      # are unpinned and Cargo fingerprints do not track system library
+      # versions, so a stale link could sail past the confinement check this job
+      # exists for.
+      - name: Restore the built snap
+        id: snap-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: media-sort_*.snap
+          # Exactly the recipe's inputs, the workflow file included because it
+          # carries the build wiring. No `restore-keys`: a snap built from other
+          # sources must never be substituted for this tree, or the check would
+          # validate the wrong artifact.
+          key: snap-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'crates/**', 'resources/**', 'snap/**', 'scripts/check-snap-confinement.sh', '.github/workflows/snap.yml') }}
+
       - name: Build Snap
         id: snapcraft
-        uses: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
+        if: steps.snap-cache.outputs.cache-hit != 'true'
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
         with:
-          snapcraft-args: pack --platform amd64
+          action: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
+          attempt_limit: 3
+          attempt_delay: 30000
+          with: |
+            path: ${{ github.workspace }}
+            snapcraft-args: pack --platform amd64
+
+      # The packed snap is the one build artifact that reaches the host, so it is
+      # resolved here for both paths (a cache hit restores it, a build leaves it
+      # behind) and cannot be a missing or double-match by accident.
+      - name: Locate the built snap
+        id: snap
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          snaps=(media-sort_*.snap)
+          if [ "${#snaps[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one media-sort_*.snap, found ${#snaps[@]}"
+            ls -l ./*.snap || true
+            exit 1
+          fi
+          echo "path=${snaps[0]}" >> "$GITHUB_OUTPUT"
+          echo "snap: ${snaps[0]}"
 
       # Installing it, connecting the `gpu-2404` provider and checking it from
       # *inside* the sandbox all live in scripts/check-snap-confinement.sh: the
       # release workflow has to make the same check before it publishes, and this
       # is the part the ordinary CI build cannot see, because it links against
-      # whatever the runner happens to have.
+      # whatever the runner happens to have. It runs on a cache hit too: it is
+      # what validates the artifact.
       - name: Check the snap in its confinement
-        run: scripts/check-snap-confinement.sh "${{ steps.snapcraft.outputs.snap }}"
+        run: scripts/check-snap-confinement.sh "${{ steps.snap.outputs.path }}"
+
+      # Trusted writers only, exactly like ci.yml: a PR or merge-queue run may
+      # build the snap and check it, but only merged code may store the artifact
+      # a later run would trust instead of building.
+      - name: Save the built snap
+        if: ${{ github.event_name == 'push' && steps.snap-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: media-sort_*.snap
+          key: ${{ steps.snap-cache.outputs.cache-primary-key }}
