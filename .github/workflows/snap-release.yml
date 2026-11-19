@@ -69,9 +69,34 @@ jobs:
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
           # Per attempt: the build alone took ~11 min on the old 4-core runner.
-          timeout_minutes: 40
+          # 100 min, comfortably above the ~79.5 min the calls inside are
+          # allowed to spend in total (per-call budgets plus their --kill-after
+          # windows, as itemised below; ~71.5 min when only one of
+          # `sudo snap install` / `snap refresh` runs). That ordering is the
+          # point -- a hung store fetch or build is killed by `timeout` (exit
+          # 124, an ordinary failure the action retries) and never by the
+          # action's timeout, whose per-pid tree-kill rethrows the `EPERM` it
+          # hits on `sudo`'s child from the kill callback and aborts the step
+          # instead of making the next attempt. The `on_retry_command` cleanup
+          # runs *between* attempts, outside this timer, and is bounded so that
+          # three attempts plus two cleanups stay under GitHub's 360 min job
+          # ceiling (300 + ~38 min).
+          timeout_minutes: 100
           max_attempts: 3
           retry_wait_seconds: 30
+          # Killing the client does not cancel the work: `snap install` is an
+          # RPC (snapd keeps the change running) and `snapcraft pack` builds
+          # inside the managed LXD instance. Without this, attempt 2 would meet
+          # a still-running change or a half-built instance and fail fast --
+          # the hung-store case the timeouts exist for would end red anyway.
+          # Each step is bounded and tolerant (nothing in flight, no build
+          # state, no lxd group yet are all normal) -- the leading `snap
+          # changes` included, since this hook runs untimed: a wedged snapd
+          # must cost a minute, not the job. The payload runs under `bash -c`
+          # because the action's on_retry_command gets the platform default
+          # shell and no working directory.
+          on_retry_command: |
+            bash -c 'set -uo pipefail; cd "$GITHUB_WORKSPACE"; timeout --kill-after=30 60 sudo snap changes | while read -r id status rest; do case $status in Do|Doing|Undo|Undoing) timeout --kill-after=15 60 sudo snap abort "$id" || true;; esac; done; timeout --kill-after=30 120 sudo snap watch --last=change >/dev/null 2>&1 || true; timeout --kill-after=60 600 sudo -u "$(id -un)" -E env SNAPCRAFT_BUILD_ENVIRONMENT=lxd snapcraft clean || true; echo "retry: drained snap changes and cleaned the snapcraft build state"'
           # The action spawns the command without `-e`, and from its own working
           # directory, so both are set up inside the command.
           shell: bash
@@ -79,10 +104,17 @@ jobs:
             set -euo pipefail
             cd "$GITHUB_WORKSPACE"
 
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: the apt calls below still decide their own
+            # failures, and snapd's own assertions decide the rest.
+            timeout --kill-after=30 180 sudo dpkg --configure -a || true
+
             # snapd is what everything below goes through; hosted runners ship
             # it and the retired action installed it when they did not.
             command -v snap >/dev/null \
-              || { sudo apt-get update -q && sudo apt-get install -qy snapd; }
+              || { timeout --kill-after=60 120 sudo apt-get update -q \
+                     && timeout --kill-after=60 240 sudo apt-get install -qy snapd; }
             # snap-confine trips over a `/` that is not root-owned. Always the
             # case on a hosted runner, so this is a no-op guard.
             [ "$(stat -c '%u:%g' /)" = "0:0" ] || sudo chown root:root /
@@ -91,7 +123,7 @@ jobs:
             # socket, so remove it first, as Canonical's action did. Guarded on
             # the binary, so a retry finds nothing left to remove.
             if [ -x /usr/bin/lxd ]; then
-              sudo apt-get remove -qy lxd lxd-client
+              timeout --kill-after=60 120 sudo apt-get remove -qy lxd lxd-client
             fi
             # The build user has to be in the `lxd` group, but `usermod` only
             # takes effect in a new session -- which is why snapcraft is run
@@ -104,13 +136,20 @@ jobs:
             # and a `snap refresh` for an already-installed, already-initialised
             # snap would be a store round-trip of its own -- one that could kill
             # the attempt before it reaches the call being retried.
-            command -v lxd >/dev/null || sudo snap install lxd
+            # A 124 on an earlier attempt can leave the daemon-side change
+            # running (on_retry_command aborts it, but a change can also finish
+            # or fail between the two), so the install's own status is only a
+            # warning here: `lxd waitready` below is the assertion, and a
+            # genuinely absent LXD still fails the step there.
+            command -v lxd >/dev/null \
+              || timeout --kill-after=60 480 sudo snap install lxd \
+              || echo "::warning::'snap install lxd' did not complete (in-flight change or already-installed snap); 'lxd waitready' below decides"
             # `lxd init --auto` refuses an already-initialised daemon -- exactly
             # what a retry hits -- so its exit code says nothing about LXD being
             # usable. `waitready` is the assertion instead: it blocks until the
             # daemon answers (300 s, comfortably past a refresh restarting it)
             # and fails loudly if LXD is genuinely absent.
-            sudo lxd init --auto \
+            timeout --kill-after=30 120 sudo lxd init --auto \
               || echo "::warning::'lxd init --auto' did not complete; continuing with the daemon already present"
             if ! sudo lxd waitready --timeout 300; then
               echo "::error::LXD is not ready, so the container build cannot run"
@@ -122,13 +161,22 @@ jobs:
             # error inside the build.
             sudo iptables -P FORWARD ACCEPT
 
-            sudo snap install --channel stable --classic snapcraft \
-              || sudo snap refresh --channel stable --classic snapcraft
+            # Same tolerance as LXD above: a change left in flight by a killed
+            # attempt (or an "already installed" answer) must not fail the
+            # retry. The version probe below is the assertion -- it fails the
+            # step when snapcraft is genuinely absent -- so the install's own
+            # status only warns.
+            timeout --kill-after=60 420 sudo snap install --channel stable --classic snapcraft \
+              || timeout --kill-after=60 420 sudo snap refresh --channel stable --classic snapcraft \
+              || echo "::warning::snapcraft install/refresh did not complete; the version probe below decides"
             # Records in the log which snapcraft actually built the snap.
-            snapcraft version
+            timeout --kill-after=30 60 snapcraft version
 
             # A retried attempt must not leave a second artefact behind: the
             # locator step below requires exactly one media-sort_*.snap.
+            # (`on_retry_command` also runs `snapcraft clean` for the LXD
+            # environment, so a pack killed at its budget does not meet
+            # attempt 2 as a half-built instance.)
             rm -f media-sort_*.snap
 
             # SNAPCRAFT_BUILD_INFO=1 is what puts snap/manifest.yaml into the
@@ -136,7 +184,8 @@ jobs:
             # SNAPCRAFT_IMAGE_INFO is the build record; `-E` keeps the rest of
             # the environment (PATH, HOME) for the unprivileged build.
             image_info="{\"build_url\":\"https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}"
-            sudo -u "$(id -un)" -E env \
+            timeout --kill-after=60 1800 \
+              sudo -u "$(id -un)" -E env \
               SNAPCRAFT_BUILD_ENVIRONMENT=lxd \
               SNAPCRAFT_BUILD_INFO=1 \
               SNAPCRAFT_IMAGE_INFO="$image_info" \
@@ -219,13 +268,21 @@ jobs:
       - name: Install snapcraft
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 10
+          # 30 min per attempt against 17.5 min of store calls and their
+          # --kill-after windows: a hung fetch is killed by `timeout` (exit 124,
+          # an ordinary failure the action retries) rather than by the action's
+          # timeout, whose tree kill (tree-kill resolves the tree with `ps`
+          # and signals each pid) rethrows the `EPERM` it hits on `sudo`'s
+          # child from the kill callback -- uncaught, so the step aborts instead
+          # of making the next attempt.
+          timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 20
           command: |
             set -euo pipefail
-            sudo snap install snapcraft --classic || sudo snap refresh snapcraft
-            snapcraft version
+            timeout --kill-after=60 420 sudo snap install snapcraft --classic \
+              || timeout --kill-after=60 420 sudo snap refresh snapcraft
+            timeout --kill-after=30 60 snapcraft version
 
       - name: Publish
         env:

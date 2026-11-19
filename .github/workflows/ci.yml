@@ -76,12 +76,35 @@ jobs:
       - name: Install System Dependencies
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 10
+          # 60 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 47.5 min including their --kill-after windows, so the
+          # action's timeout never fires -- and never runs its tree kill,
+          # which rethrows the `EPERM` it hits on `sudo`'s child and aborts the
+          # step instead of retrying.
+          timeout_minutes: 60
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            sudo apt-get update
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
+            set -euo pipefail
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 300 sudo dpkg --configure -a || true
+            # Each apt call gets its own, shorter budget: a stalled mirror is
+            # then killed by `timeout` (exit 124, an ordinary failure the
+            # action retries) rather than by the action's timeout, whose tree
+            # kill (tree-kill resolves the tree with `ps` and signals each pid)
+            # rethrows the `EPERM` it hits on `sudo`'s child from the kill
+            # callback -- uncaught, so the step aborts instead of retrying.
+            timeout --kill-after=60 600 sudo apt-get update
+            timeout --kill-after=60 1800 sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
 
       - name: Check Formatting
         run: cargo fmt --all -- --check
@@ -147,12 +170,35 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 10
+          # 60 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 47.5 min including their --kill-after windows, so the
+          # action's timeout never fires -- and never runs its tree kill,
+          # which rethrows the `EPERM` it hits on `sudo`'s child and aborts the
+          # step instead of retrying.
+          timeout_minutes: 60
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            sudo apt-get update
-            sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
+            set -euo pipefail
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 300 sudo dpkg --configure -a || true
+            # Each apt call gets its own, shorter budget: a stalled mirror is
+            # then killed by `timeout` (exit 124, an ordinary failure the
+            # action retries) rather than by the action's timeout, whose tree
+            # kill (tree-kill resolves the tree with `ps` and signals each pid)
+            # rethrows the `EPERM` it hits on `sudo`'s child from the kill
+            # callback -- uncaught, so the step aborts instead of retrying.
+            timeout --kill-after=60 600 sudo apt-get update
+            timeout --kill-after=60 1800 sudo apt-get install -y libmpv-dev libasound2-dev libdav1d-dev nasm
 
       - name: Install System Dependencies (macOS)
         if: matrix.os == 'macos-latest'

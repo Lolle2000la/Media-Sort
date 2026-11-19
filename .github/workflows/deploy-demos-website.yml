@@ -108,8 +108,11 @@ jobs:
     # Nothing to compile when the rendered videos are already cached.
     if: ${{ needs.plan.outputs.demos-cached != 'true' }}
     runs-on: ubuntu-latest
-    # A slow mirror can spend 15 min installing; the demo build and upload follow.
-    timeout-minutes: 40
+    # Sized from `max_attempts`, not from a typical run: 3 attempts x the apt
+    # step's 60 min ceiling is 180 min, plus 30 min for the demo build and
+    # upload. A smaller cap would let a stalled first attempt make the job
+    # timeout cancel the run before attempt 2 was ever made.
+    timeout-minutes: 210
 
     steps:
       - name: Checkout Source Code
@@ -135,20 +138,38 @@ jobs:
       - name: Install Build Dependencies
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 15
+          # 60 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 47.5 min including their --kill-after windows, so the
+          # action's timeout never fires -- and never runs its tree kill,
+          # which rethrows the `EPERM` it hits on `sudo`'s child and aborts the
+          # step instead of retrying.
+          timeout_minutes: 60
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            # nick-fields/retry@v4 spawns the command without `set -e`, so a
-            # failed apt call would otherwise be swallowed and the step could
-            # still report success; be explicit.
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
             set -euo pipefail
-            # The timeout above is deliberately generous and apt is told to
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 300 sudo dpkg --configure -a || true
+            # The step timeout is deliberately generous and apt is told to
             # retry on its own: a slow-but-alive mirror can outlast any fixed
-            # per-attempt timeout, and when that timeout does fire the action
-            # kills its own child and fails the step with `Error: kill EPERM`
-            # instead of making the next attempt.
-            sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            # per-attempt timeout. The fixed budget therefore lives on the apt
+            # calls themselves (`timeout`, exit 124 -- an ordinary failure the
+            # action retries), because when the action's timeout fires it kills
+            # the child tree per pid via tree-kill, and the `EPERM` it hits on a
+            # root-owned descendant (`sudo`'s child) is rethrown from the kill
+            # callback as an uncaught exception -- the step aborts instead of
+            # making the next attempt. 300 s + 600 s + 1800 s, plus
+            # their --kill-after windows, = 47.5 min.
+            timeout --kill-after=60 600 sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
             # The `--export` demo build links the same native stack the test and
             # release jobs do, so keep this list in step with ci.yml/release.yml:
             #   libmpv-dev          video/GIF playback (bindgen uses the runner's
@@ -160,7 +181,7 @@ jobs:
             #   mesa-vulkan-drivers software Vulkan ICD for the headless wgpu
             #                       renderer (pulls in the libvulkan loader)
             #   ffmpeg              encodes the rendered demo videos
-            sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libmpv-dev libasound2-dev libdav1d-dev nasm squashfs-tools ffmpeg mesa-vulkan-drivers
+            timeout --kill-after=60 1800 sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libmpv-dev libasound2-dev libdav1d-dev nasm squashfs-tools ffmpeg mesa-vulkan-drivers
 
       - name: Build Demo Export Binary
         env:
@@ -186,8 +207,11 @@ jobs:
     needs: [plan, build-app]
     if: ${{ needs.plan.outputs.demos-cached != 'true' }}
     runs-on: ubuntu-latest
-    # ~3.4 min per video x 3 locales, with generous headroom for a slow runner.
-    timeout-minutes: 45
+    # ~3.4 min per video x 3 locales, with generous headroom for a slow runner
+    # -- plus the apt step's ceiling, which the job cap has to let `max_attempts`
+    # use: 3 attempts x 75 min is 225 min, and 35 min are left for the artifact
+    # download, font gate, renders and upload.
+    timeout-minutes: 260
     strategy:
       # One bad flow must not cancel the others; `assemble` refuses to publish a
       # partial set anyway.
@@ -202,20 +226,39 @@ jobs:
       - name: Install Runtime Dependencies
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 20
+          # 75 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 57.5 min including their --kill-after windows, so the
+          # action's timeout never fires -- and never runs its tree kill,
+          # which rethrows the `EPERM` it hits on `sudo`'s child and aborts the
+          # step instead of retrying.
+          timeout_minutes: 75
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            # nick-fields/retry@v4 spawns the command without `set -e`, so a
-            # failed apt call would otherwise be swallowed and the step could
-            # still report success; be explicit.
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
             set -euo pipefail
-            # The timeout above is deliberately generous and apt is told to
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 300 sudo dpkg --configure -a || true
+            # The step timeout is deliberately generous and apt is told to
             # retry on its own: a slow-but-alive mirror can outlast any fixed
-            # per-attempt timeout, and when that timeout does fire the action
-            # kills its own child and fails the step with `Error: kill EPERM`
-            # instead of making the next attempt.
-            sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+            # per-attempt timeout. The fixed budget therefore lives on the apt
+            # calls themselves (`timeout`, exit 124 -- an ordinary failure the
+            # action retries), because when the action's timeout fires it kills
+            # the child tree per pid via tree-kill, and the `EPERM` it hits on a
+            # root-owned descendant (`sudo`'s child) is rethrown from the kill
+            # callback as an uncaught exception -- the step aborts instead of
+            # making the next attempt. That is exactly how run
+            # 44409835703 lost all three `render` jobs at once. 300 s + 600 s
+            # + 2400 s, plus their --kill-after windows, = 57.5 min.
+            timeout --kill-after=60 600 sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
             # Runtime-only counterpart of the build job's list: nothing is
             # compiled here, so no nasm/libclang. ffmpeg encodes the video,
             # mesa-vulkan-drivers supplies the software Vulkan ICD the headless
@@ -225,7 +268,7 @@ jobs:
             # system fonts and nothing CJK is bundled, so without it the `ja`
             # demos render as tofu. fontconfig guarantees `fc-list` for the gate
             # below.
-            sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libmpv-dev libasound2-dev libdav1d-dev ffmpeg mesa-vulkan-drivers fonts-noto-cjk fontconfig
+            timeout --kill-after=60 2400 sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libmpv-dev libasound2-dev libdav1d-dev ffmpeg mesa-vulkan-drivers fonts-noto-cjk fontconfig
 
       # Hard gate, not a warning: a runner image that stops shipping a CJK font
       # must fail here instead of silently publishing tofu `ja` videos. The
