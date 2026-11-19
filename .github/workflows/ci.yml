@@ -76,18 +76,26 @@ jobs:
       - name: Install System Dependencies
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          # 20 min per attempt: the two apt calls below bound themselves to
-          # 15 min in total, so the action's own timeout-kill -- which fails
-          # the step with `Error: kill EPERM` instead of retrying -- is never
-          # reached.
-          timeout_minutes: 20
+          # 30 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 20.5 min including their --kill-after windows, so the
+          # action's own timeout-kill -- which fails the step with
+          # `Error: kill EPERM` instead of retrying -- is never reached.
+          timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            # nick-fields/retry@v4 spawns the command without `set -e`, so a
-            # failed apt call would otherwise be swallowed and the step could
-            # still report success; be explicit.
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
             set -euo pipefail
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 180 sudo dpkg --configure -a || true
             # Each apt call gets its own, shorter budget: a stalled mirror is
             # then killed by `timeout` (exit 124, an ordinary failure the
             # action retries) rather than by the action's own timeout, whose
@@ -160,18 +168,26 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          # 20 min per attempt: the two apt calls below bound themselves to
-          # 15 min in total, so the action's own timeout-kill -- which fails
-          # the step with `Error: kill EPERM` instead of retrying -- is never
-          # reached.
-          timeout_minutes: 20
+          # 30 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 20.5 min including their --kill-after windows, so the
+          # action's own timeout-kill -- which fails the step with
+          # `Error: kill EPERM` instead of retrying -- is never reached.
+          timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            # nick-fields/retry@v4 spawns the command without `set -e`, so a
-            # failed apt call would otherwise be swallowed and the step could
-            # still report success; be explicit.
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
             set -euo pipefail
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 180 sudo dpkg --configure -a || true
             # Each apt call gets its own, shorter budget: a stalled mirror is
             # then killed by `timeout` (exit 124, an ordinary failure the
             # action retries) rather than by the action's own timeout, whose

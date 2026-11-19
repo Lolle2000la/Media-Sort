@@ -108,9 +108,11 @@ jobs:
     # Nothing to compile when the rendered videos are already cached.
     if: ${{ needs.plan.outputs.demos-cached != 'true' }}
     runs-on: ubuntu-latest
-    # A slow mirror can stall the install; that apt step bounds itself and the
-    # demo build and upload follow.
-    timeout-minutes: 40
+    # Sized from `max_attempts`, not from a typical run: 3 attempts x the apt
+    # step's 30 min ceiling is 90 min, plus 60 min for the demo build and
+    # upload. A smaller cap would let a stalled first attempt make the job
+    # timeout cancel the run before attempt 2 was ever made.
+    timeout-minutes: 150
 
     steps:
       - name: Checkout Source Code
@@ -136,18 +138,26 @@ jobs:
       - name: Install Build Dependencies
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          # 20 min per attempt: the two apt calls below bound themselves to
-          # 15 min in total, so the action's own timeout-kill -- which fails
-          # the step with `Error: kill EPERM` instead of retrying -- is never
-          # reached.
-          timeout_minutes: 20
+          # 30 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 20.5 min including their --kill-after windows, so the
+          # action's own timeout-kill -- which fails the step with
+          # `Error: kill EPERM` instead of retrying -- is never reached.
+          timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            # nick-fields/retry@v4 spawns the command without `set -e`, so a
-            # failed apt call would otherwise be swallowed and the step could
-            # still report success; be explicit.
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
             set -euo pipefail
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 180 sudo dpkg --configure -a || true
             # The step timeout is deliberately generous and apt is told to
             # retry on its own: a slow-but-alive mirror can outlast any fixed
             # per-attempt timeout. The fixed budget therefore lives on the apt
@@ -155,7 +165,8 @@ jobs:
             # action retries), because when the action's own timeout fires it
             # walks the process tree with `process.kill(-pid)`, that raise
             # lands as an uncaught `Error: kill EPERM`, and the step aborts
-            # instead of making the next attempt. 300 s + 600 s = 15 min.
+            # instead of making the next attempt. 180 s + 300 s + 600 s, plus
+            # their --kill-after windows, = 20.5 min.
             timeout --kill-after=60 300 sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
             # The `--export` demo build links the same native stack the test and
             # release jobs do, so keep this list in step with ci.yml/release.yml:
@@ -194,8 +205,11 @@ jobs:
     needs: [plan, build-app]
     if: ${{ needs.plan.outputs.demos-cached != 'true' }}
     runs-on: ubuntu-latest
-    # ~3.4 min per video x 3 locales, with generous headroom for a slow runner.
-    timeout-minutes: 45
+    # ~3.4 min per video x 3 locales, with generous headroom for a slow runner
+    # -- plus the apt step's ceiling, which the job cap has to let `max_attempts`
+    # use: 3 attempts x 40 min is 120 min, and 60 min are left for the artifact
+    # download, font gate, renders and upload.
+    timeout-minutes: 180
     strategy:
       # One bad flow must not cancel the others; `assemble` refuses to publish a
       # partial set anyway.
@@ -210,18 +224,26 @@ jobs:
       - name: Install Runtime Dependencies
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          # 30 min per attempt: the two apt calls below bound themselves to
-          # 20 min in total, so the action's own timeout-kill -- which fails
-          # the step with `Error: kill EPERM` instead of retrying -- is never
-          # reached.
-          timeout_minutes: 30
+          # 40 min per attempt: the dpkg repair and the two apt calls below add
+          # up to 25.5 min including their --kill-after windows, so the
+          # action's own timeout-kill -- which fails the step with
+          # `Error: kill EPERM` instead of retrying -- is never reached.
+          timeout_minutes: 40
           max_attempts: 3
           retry_wait_seconds: 10
           command: |
-            # nick-fields/retry@v4 spawns the command without `set -e`, so a
-            # failed apt call would otherwise be swallowed and the step could
-            # still report success; be explicit.
+            # `set -e` because nick-fields/retry@v4 spawns the command without
+            # it: only the last call's failure would otherwise reach the
+            # action, so a failed `apt-get update` was swallowed (`install` is
+            # last and did propagate). The cost of fixing that is a new red for
+            # an update-only failure that cached package lists used to carry --
+            # accepted, it is a real network failure.
             set -euo pipefail
+            # A kill during unpack leaves dpkg's configure pass pending, after
+            # which every later attempt refuses with "dpkg was interrupted".
+            # `|| true` is safe: `apt-get install` below still decides the exit
+            # status, so a genuinely broken package state is not hidden.
+            timeout --kill-after=30 180 sudo dpkg --configure -a || true
             # The step timeout is deliberately generous and apt is told to
             # retry on its own: a slow-but-alive mirror can outlast any fixed
             # per-attempt timeout. The fixed budget therefore lives on the apt
@@ -230,8 +252,8 @@ jobs:
             # walks the process tree with `process.kill(-pid)`, that raise
             # lands as an uncaught `Error: kill EPERM`, and the step aborts
             # instead of making the next attempt. That is exactly how run
-            # 44409835703 lost all three `render` jobs at once. 300 s + 900 s
-            # = 20 min.
+            # 44409835703 lost all three `render` jobs at once. 180 s + 300 s
+            # + 900 s, plus their --kill-after windows, = 25.5 min.
             timeout --kill-after=60 300 sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
             # Runtime-only counterpart of the build job's list: nothing is
             # compiled here, so no nasm/libclang. ffmpeg encodes the video,
