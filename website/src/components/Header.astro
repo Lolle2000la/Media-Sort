@@ -10,7 +10,16 @@ const shouldRenderSearch =
     config.pagefind ||
     config.components.Search !== '@astrojs/starlight/components/Search.astro';
 
-const locale = Astro.props.locale;
+// Starlight renders this override as `<Header slot="header" />` with no props
+// (Page.astro), so the locale can never arrive through `Astro.props` — it has
+// to come from the route. `Astro.currentLocale` is resolved from the request
+// path against the i18n config Starlight configures (`defaultLocale: 'en'`,
+// `prefixDefaultLocale: true`), so it is 'de'/'ja' on those pages and falls
+// back to the default locale on unprefixed routes such as the root redirect.
+// `Astro.locals.starlightRoute` is deliberately not used: this component is
+// also rendered on pages that are not Starlight routes, where that local is
+// undefined.
+const locale = Astro.currentLocale ?? 'en';
 const docsUrl = locale
     ? `/${locale}/getting-started/installation/`
     : '/en/getting-started/installation/';
