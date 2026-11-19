@@ -6,8 +6,10 @@ pub mod headless;
 
 pub use automation::{
     AutomationContext, AutomationMessage, AutomationState, AutomationStateTrait, AutomationStep,
-    AutomationStyle, AutomationTarget, AutomationTickResult, JsonAutomationFlow,
-    JsonAutomationStep, JsonTarget, VIRTUAL_CURSOR, VirtualTickMessage, build_automation_steps,
+    AutomationStyle, AutomationTarget, AutomationTickResult, CURSOR_CLICK_PULSE, CURSOR_MAX_SCALE,
+    CURSOR_MIN_SCALE, CURSOR_POINTER_UNITS, CURSOR_REFERENCE_HEIGHT, CURSOR_UNIT_SCALE,
+    JsonAutomationFlow, JsonAutomationStep, JsonTarget, VIRTUAL_CURSOR, VirtualTickMessage,
+    build_automation_steps, cursor_click_ring, cursor_pointer_offsets, cursor_render_scale,
     find_bounds_task, handle_automation_message, handle_automation_tick,
     handle_automation_virtual_tick, handle_bounds_resolved, static_widget_id, try_tick,
     try_tick_state, wrap_view,

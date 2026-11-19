@@ -100,6 +100,10 @@ pub struct AutomationStyle {
     pub completed_border: Color,
     pub completed_border_width: f32,
     pub hud_border_width: f32,
+    /// Width of the pointer's outline in **reference units**, not pixels: the
+    /// overlay multiplies it by `cursor_render_scale(render_height)`, so the
+    /// default is a ~1.75 px edge at 1080p and grows with the render. (Unlike
+    /// `hud_border_width` and `completed_border_width`, which are raw pixels.)
     pub cursor_outline_width: f32,
 }
 
@@ -120,7 +124,11 @@ impl Default for AutomationStyle {
             completed_border: Color::from_rgb(0.2, 0.65, 0.2),
             completed_border_width: 2.0,
             hud_border_width: 1.5,
-            cursor_outline_width: 1.5,
+            // Reference units: 1.13 × `CURSOR_UNIT_SCALE` is a 1.75 px outline
+            // at 1080p on a ~30 px tall pointer — a crisp edge that still
+            // leaves the white fill dominant (the old 2.0-unit stroke on a
+            // 19 px arrow ate most of the interior).
+            cursor_outline_width: 1.13,
         }
     }
 }
@@ -130,6 +138,12 @@ pub struct AutomationState<Message> {
     pub virtual_cursor: Point,
     pub current_pixel_target: Point,
     pub is_clicking: bool,
+    /// `virtual_elapsed` at which the cursor last clicked. The click ring is
+    /// driven from this and not from `step_elapsed`, which the step scheduler
+    /// also resets: reading that clock made the ring restart from full opacity
+    /// on every step transition, one frame of flash per step. Tick-based, so a
+    /// headless export stays frame-exact.
+    pub click_started_at: Duration,
     pub active_keycap: Option<(String, Duration)>,
     pub script_index: usize,
     pub steps: Vec<AutomationStep<Message>>,
@@ -184,9 +198,19 @@ impl<Message> AutomationState<Message> {
             step_ready: false,
             virtual_elapsed: Duration::ZERO,
             step_elapsed: Duration::ZERO,
+            click_started_at: Duration::ZERO,
             style,
             real_time: true,
         }
+    }
+
+    /// How long ago the last click fired, for the click ring, or `None` while
+    /// the emulator is not in a clicked state. Measured on `virtual_elapsed`
+    /// (one tick per rendered frame), so one click yields exactly one pulse of
+    /// [`CURSOR_CLICK_PULSE`] and a step transition cannot restart it.
+    pub fn click_elapsed(&self) -> Option<Duration> {
+        self.is_clicking
+            .then(|| self.virtual_elapsed.saturating_sub(self.click_started_at))
     }
 
     pub fn update_window_size(&mut self, width: f32, height: f32) {
@@ -256,6 +280,7 @@ where
     if automation.step_ready && cursor_arrived {
         let step = &automation.steps[automation.script_index];
         automation.is_clicking = true;
+        automation.click_started_at = automation.virtual_elapsed;
         if let Some(ref label) = step.keycap_label {
             automation.active_keycap = Some((label.clone(), automation.virtual_elapsed));
         }
@@ -305,10 +330,114 @@ pub fn handle_bounds_resolved<Message>(
     automation.step_ready = true;
 }
 
+// --- Cursor geometry ---
+//
+// Everything `pub` in this section (and [`CURSOR_CLICK_PULSE`] /
+// [`cursor_click_ring`] below) is public for the integration tests in
+// `tests/automation_tests.rs`; it is not part of the app-facing API, and the
+// overlay itself only needs `cursor_render_scale` and `cursor_pointer_offsets`.
+/// Render height the cursor geometry is authored against. The overlay scales
+/// every offset by the actual render height divided by this, so the pointer
+/// keeps its proportions at 1080p, at a downscaled demo window and at a 4K
+/// export alike.
+pub const CURSOR_REFERENCE_HEIGHT: f32 = 1080.0;
+
+/// Pixels per reference unit at [`CURSOR_REFERENCE_HEIGHT`]. The silhouette is
+/// authored in a 20-unit box; this factor makes it a ~30 px tall pointer at
+/// 1080p (a 19 px one read as a fleck next to the UI text and was smaller than
+/// the wedge it replaced).
+pub const CURSOR_UNIT_SCALE: f32 = 1.55;
+
+/// Lower clamp of the resolution scale factor: a small interactive demo
+/// window still gets a visible pointer instead of a few faint pixels.
+pub const CURSOR_MIN_SCALE: f32 = 0.75;
+
+/// Upper clamp of the resolution scale factor: a huge render must not paint a
+/// screen-sized arrow. 2160p lands at 3.1, so a 4K export is not clamped.
+pub const CURSOR_MAX_SCALE: f32 = 3.5;
+
+/// Canonical arrow pointer in reference units: tip at the origin, x right,
+/// y down. 11.0 wide × 19.4 tall (aspect ≈0.57, like an OS pointer, unlike the
+/// old 28×34 wedge) with the shoulder notch at (4.3, 12.7) and the narrow tail
+/// leg (6.8, 19.4) → (9.3, 18.1). Multiplied by [`CURSOR_UNIT_SCALE`] that is
+/// ≈17.1 × 30.1 px at 1080p.
+pub const CURSOR_POINTER_UNITS: [(f32, f32); 7] = [
+    (0.0, 0.0),
+    (0.0, 16.6),
+    (4.3, 12.7),
+    (6.8, 19.4),
+    (9.3, 18.1),
+    (7.0, 11.5),
+    (11.0, 10.9),
+];
+
+/// Drop-shadow offset in reference units (≈2.0 px at 1080p) and its alpha:
+/// enough to lift the white fill off a light background, far too little to
+/// read as a second, dark body. Module-private: only the overlay draws it.
+const CURSOR_SHADOW_OFFSET_UNITS: f32 = 1.3;
+const CURSOR_SHADOW_ALPHA: f32 = 0.22;
+
+/// Pixels per reference unit for a render `render_height` pixels tall, clamped
+/// to [`CURSOR_MIN_SCALE`]..=[`CURSOR_MAX_SCALE`]. A missing/zero/NaN height
+/// falls back to the reference scale so the overlay never degenerates into a
+/// zero-size path.
+pub fn cursor_render_scale(render_height: f32) -> f32 {
+    if !render_height.is_finite() || render_height <= 0.0 {
+        return CURSOR_UNIT_SCALE;
+    }
+    (render_height / CURSOR_REFERENCE_HEIGHT * CURSOR_UNIT_SCALE)
+        .clamp(CURSOR_MIN_SCALE, CURSOR_MAX_SCALE)
+}
+
+/// The pointer silhouette scaled for a render `render_height` pixels tall, as
+/// pixel offsets from the tip (which stays exactly on the automation target).
+pub fn cursor_pointer_offsets(render_height: f32) -> [(f32, f32); 7] {
+    let scale = cursor_render_scale(render_height);
+    CURSOR_POINTER_UNITS.map(|(x, y)| (x * scale, y * scale))
+}
+
+/// How long the click ring is drawn for, measured on the emulator's tick clock
+/// (`virtual_elapsed` since [`AutomationState::click_started_at`]) — never
+/// wall-clock time, so a headless export stays frame-exact. Deliberately not
+/// `step_elapsed`: the step scheduler resets that clock too, which made a
+/// second, full-opacity ring flash at every step transition.
+pub const CURSOR_CLICK_PULSE: Duration = Duration::from_millis(280);
+
+/// Radius (reference units) and alpha of the click ring `elapsed` after the
+/// click fired, or `None` once the pulse is over (or before it starts). The
+/// ring starts wide enough that its arc clears the pointer's body (a smaller
+/// ring is swallowed by the arrow and reads as no feedback), expands while it
+/// fades, and is fully transparent past the pulse so a resting click cannot
+/// leave a hoop on screen.
+pub fn cursor_click_ring(elapsed: Duration) -> Option<(f32, f32)> {
+    let progress = elapsed.as_secs_f32() / CURSOR_CLICK_PULSE.as_secs_f32();
+    if !(0.0..1.0).contains(&progress) {
+        return None;
+    }
+    Some((9.0 + 15.0 * progress, 0.9 * (1.0 - progress)))
+}
+
+fn pointer_path(origin: Point, offsets: &[(f32, f32)]) -> canvas::Path {
+    canvas::Path::new(|builder| {
+        let mut points = offsets
+            .iter()
+            .map(|(x, y)| Point::new(origin.x + x, origin.y + y));
+        if let Some(first) = points.next() {
+            builder.move_to(first);
+            for point in points {
+                builder.line_to(point);
+            }
+            builder.close();
+        }
+    })
+}
+
 // --- Cursor overlay (canvas) ---
 struct CursorOverlay {
     position: Point,
-    is_clicking: bool,
+    /// How long ago the click at `position` fired. Drives the ring; the arrow
+    /// itself never changes shape or colour on a click.
+    click_elapsed: Option<Duration>,
     style: AutomationStyle,
 }
 
@@ -325,30 +454,50 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for CursorOverlay {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
-        let cursor_color = if self.is_clicking {
-            self.style.click_color
-        } else {
-            self.style.cursor_color
-        };
+        let scale = cursor_render_scale(bounds.height);
+        let offsets = cursor_pointer_offsets(bounds.height);
+        let pointer = pointer_path(self.position, &offsets);
 
-        let p = self.position;
-        let pointer_path = canvas::Path::new(|builder| {
-            builder.move_to(p);
-            builder.line_to(Point::new(p.x + 10.0, p.y + 24.0));
-            builder.line_to(Point::new(p.x + 15.0, p.y + 21.0));
-            builder.line_to(Point::new(p.x + 23.0, p.y + 34.0));
-            builder.line_to(Point::new(p.x + 27.0, p.y + 31.0));
-            builder.line_to(Point::new(p.x + 19.0, p.y + 18.0));
-            builder.line_to(Point::new(p.x + 28.0, p.y + 14.0));
-            builder.close();
-        });
+        // Soft drop shadow: the same silhouette offset down-right in a
+        // translucent black, so the light fill keeps an edge on light themes
+        // and gains depth on dark ones. One filled path, no blur. The offset
+        // has to clear the outline width, or the shadow hides under it — but
+        // it stays light, so it reads as depth rather than a second body.
+        let shadow_offset = CURSOR_SHADOW_OFFSET_UNITS * scale;
+        let shadow_path = pointer_path(
+            Point::new(
+                self.position.x + shadow_offset,
+                self.position.y + shadow_offset,
+            ),
+            &offsets,
+        );
+        frame.fill(
+            &shadow_path,
+            Color::from_rgba(0.0, 0.0, 0.0, CURSOR_SHADOW_ALPHA),
+        );
 
-        frame.fill(&pointer_path, cursor_color);
+        // Click feedback as a separate ring at the tip, drawn behind the arrow
+        // so the pointer itself stays untouched and the ring reads as a ripple
+        // radiating out from it.
+        if let Some((radius, alpha)) = self.click_elapsed.and_then(cursor_click_ring) {
+            let ring_path = canvas::Path::circle(self.position, radius * scale);
+            frame.stroke(
+                &ring_path,
+                canvas::Stroke::default()
+                    .with_color(Color {
+                        a: alpha,
+                        ..self.style.click_color
+                    })
+                    .with_width(2.4 * scale),
+            );
+        }
+
+        frame.fill(&pointer, self.style.cursor_color);
         frame.stroke(
-            &pointer_path,
+            &pointer,
             canvas::Stroke::default()
                 .with_color(self.style.outline_color)
-                .with_width(self.style.cursor_outline_width),
+                .with_width(self.style.cursor_outline_width * scale),
         );
 
         vec![frame.into_geometry()]
@@ -440,7 +589,7 @@ where
 
     let cursor = canvas(CursorOverlay {
         position: automation.virtual_cursor,
-        is_clicking: automation.is_clicking,
+        click_elapsed: automation.click_elapsed(),
         style: automation.style.clone(),
     })
     .width(Length::Fill)
