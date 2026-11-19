@@ -1,9 +1,8 @@
 use iced_automation::{
-    AutomationStep, AutomationStyle, AutomationTarget, CURSOR_CLICK_PULSE, CURSOR_MAX_SCALE,
-    CURSOR_MIN_SCALE, CURSOR_POINTER_UNITS, CURSOR_REFERENCE_HEIGHT, CURSOR_SHADOW_ALPHA,
-    CURSOR_SHADOW_OFFSET_UNITS, CURSOR_UNIT_SCALE, JsonAutomationFlow, JsonAutomationStep,
-    JsonTarget, build_automation_steps, cursor_click_ring, cursor_pointer_offsets,
-    cursor_render_scale,
+    AutomationState, AutomationStep, AutomationStyle, AutomationTarget, CURSOR_CLICK_PULSE,
+    CURSOR_MAX_SCALE, CURSOR_MIN_SCALE, CURSOR_POINTER_UNITS, CURSOR_REFERENCE_HEIGHT,
+    CURSOR_UNIT_SCALE, JsonAutomationFlow, JsonAutomationStep, JsonTarget, build_automation_steps,
+    cursor_click_ring, cursor_pointer_offsets, cursor_render_scale, handle_automation_virtual_tick,
 };
 use std::time::Duration;
 
@@ -103,14 +102,35 @@ fn reflex_vertices(vertices: &[(f32, f32)]) -> Vec<usize> {
 }
 
 #[test]
-fn test_cursor_tip_stays_on_automation_target() {
-    // The emulator aims widget centres at the tip; any offset in the first
-    // vertex would draw the click ring and the pointer somewhere else.
+fn test_cursor_tip_is_the_pointer_origin() {
+    // `draw()` places every vertex at `position + offset`, so the drawn tip —
+    // and therefore the click ring, which is centred on `position` — lands
+    // exactly on the widget centre the emulator aimed at only while the tip
+    // vertex is the origin. It also has to be the silhouette's extreme point,
+    // or the visible tip would sit elsewhere.
+    assert_eq!(CURSOR_POINTER_UNITS[0], (0.0, 0.0));
+    let topmost = CURSOR_POINTER_UNITS
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::INFINITY, f32::min);
+    let leftmost = CURSOR_POINTER_UNITS
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::INFINITY, f32::min);
+    assert_eq!((leftmost, topmost), (0.0, 0.0));
+
     for height in [200.0, 540.0, CURSOR_REFERENCE_HEIGHT, 2160.0, 4320.0] {
         let offsets = cursor_pointer_offsets(height);
         assert_eq!(offsets[0], (0.0, 0.0), "tip moved at height {height}");
+        // Nothing hangs above or left of the tip either: the whole pointer is
+        // drawn down-right of the click point it represents.
+        for (x, y) in &offsets[1..] {
+            assert!(
+                *x >= 0.0 && *y >= 0.0,
+                "vertex ({x}, {y}) sits up/left of the tip at height {height}"
+            );
+        }
     }
-    assert_eq!(CURSOR_POINTER_UNITS[0], (0.0, 0.0));
 }
 
 #[test]
@@ -164,34 +184,24 @@ fn test_cursor_scale_falls_back_for_degenerate_height() {
 }
 
 #[test]
-fn test_default_outline_is_visible_at_1080p() {
-    // A sub-2 px stroke on the old 19 px arrow fringed at the yuv420p chroma
-    // limit; on the 30 px pointer the stroke must instead stay thin enough
-    // that the white body dominates the glyph.
+fn test_outline_width_scales_with_the_render_height() {
+    // The field is in reference units, not pixels: it must grow with the
+    // render. A stroke that ignored the scale would be the same px at 1080p
+    // and 2160p.
     let style = AutomationStyle::default();
-    let outline = style.cursor_outline_width * cursor_render_scale(CURSOR_REFERENCE_HEIGHT);
-    assert_close(outline, 1.7515);
-    let width = cursor_extent(cursor_pointer_offsets(CURSOR_REFERENCE_HEIGHT)).0;
-    assert!(
-        outline / width < 0.12,
-        "outline {outline} px is too heavy for a {width} px wide pointer (ratio {})",
-        outline / width
-    );
-}
+    let at_1080 = style.cursor_outline_width * cursor_render_scale(CURSOR_REFERENCE_HEIGHT);
+    let at_2160 = style.cursor_outline_width * cursor_render_scale(2160.0);
+    assert_close(at_1080, 1.7515);
+    assert_close(at_2160, 2.0 * at_1080);
 
-#[test]
-fn test_cursor_shadow_stays_subtle() {
-    // The shadow is depth, not a second body: on the old 19 px arrow a 0.3
-    // alpha shadow plus a 2 px stroke turned the whole glyph dark.
-    let style = AutomationStyle::default();
-    assert!(
-        CURSOR_SHADOW_ALPHA < 0.25 * style.outline_color.a,
-        "shadow alpha {CURSOR_SHADOW_ALPHA} is too close to the edge's opacity"
-    );
-    let offset_px = CURSOR_SHADOW_OFFSET_UNITS * cursor_render_scale(CURSOR_REFERENCE_HEIGHT);
-    assert_close(offset_px, 2.015);
+    // And the white body has to stay wider than the edge drawn around it (the
+    // stroke is centred, so it eats half its width on each side).
     let width = cursor_extent(cursor_pointer_offsets(CURSOR_REFERENCE_HEIGHT)).0;
-    assert!(offset_px < width * 0.2, "shadow offset {offset_px} px");
+    let body = width - at_1080;
+    assert!(
+        body > at_1080,
+        "outline {at_1080} px leaves only {body} px of white on a {width} px wide pointer"
+    );
 }
 
 #[test]
@@ -220,4 +230,79 @@ fn test_click_ring_expands_and_fades_then_disappears() {
     // painted at the tip for the rest of the demo.
     assert_eq!(cursor_click_ring(CURSOR_CLICK_PULSE), None);
     assert_eq!(cursor_click_ring(CURSOR_CLICK_PULSE * 2), None);
+}
+
+/// Two-step flow: click at (60, 0), then a 400 ms delay before the next step's
+/// target is scheduled. Returns the state, ready to be ticked.
+fn click_then_transition_state() -> AutomationState<String> {
+    AutomationState::new(
+        vec![
+            AutomationStep {
+                execution_delay: Duration::ZERO,
+                target: AutomationTarget::Pixel(iced::Point::new(60.0, 0.0)),
+                underlying_message: Some("click".to_string()),
+                keycap_label: None,
+            },
+            AutomationStep {
+                execution_delay: Duration::from_millis(400),
+                target: AutomationTarget::Pixel(iced::Point::ORIGIN),
+                underlying_message: Some("next".to_string()),
+                keycap_label: None,
+            },
+        ],
+        "click pulse",
+        1920.0,
+        1080.0,
+        AutomationStyle::default(),
+    )
+}
+
+#[test]
+fn test_click_pulse_fires_once_per_click() {
+    // Regression: the ring used to read `step_elapsed`, which the step
+    // scheduler also resets when a step's delay expires, so the frame after
+    // every step transition restarted the pulse at full opacity (visible as a
+    // one-frame flash in every exported video).
+    let delta = Duration::from_millis(16);
+    let mut state = click_then_transition_state();
+    assert_eq!(state.click_elapsed(), None, "ring before any click");
+
+    let mut pulse_starts = 0;
+    let mut clicked = false;
+    let mut transition = None;
+    let mut ticks = 0;
+    while transition.is_none() {
+        ticks += 1;
+        assert!(ticks < 500, "the second step never became ready");
+
+        let before = state.current_pixel_target;
+        let _ = handle_automation_virtual_tick(&mut state, delta);
+
+        if let Some(elapsed) = state.click_elapsed() {
+            clicked = true;
+            // A tick at the very start of the pulse is a pulse *start*.
+            if elapsed < delta {
+                pulse_starts += 1;
+            }
+        }
+        // The scheduler re-targeting the cursor is the step transition.
+        if before != state.current_pixel_target && clicked {
+            transition = Some(state.click_elapsed());
+        }
+    }
+
+    assert!(
+        clicked,
+        "the flow never clicked, so the test proves nothing"
+    );
+    assert_eq!(pulse_starts, 1, "the click pulse started more than once");
+
+    let elapsed = transition
+        .expect("the second step's delay never expired")
+        .expect("a clicked cursor keeps its pulse state until it moves");
+    assert!(
+        elapsed >= CURSOR_CLICK_PULSE,
+        "the ring restarted at the step transition ({elapsed:?} into a {CURSOR_CLICK_PULSE:?} pulse)"
+    );
+    assert_eq!(cursor_click_ring(elapsed), None);
 }

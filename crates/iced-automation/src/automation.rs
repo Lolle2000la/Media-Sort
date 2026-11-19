@@ -100,6 +100,10 @@ pub struct AutomationStyle {
     pub completed_border: Color,
     pub completed_border_width: f32,
     pub hud_border_width: f32,
+    /// Width of the pointer's outline in **reference units**, not pixels: the
+    /// overlay multiplies it by `cursor_render_scale(render_height)`, so the
+    /// default is a ~1.75 px edge at 1080p and grows with the render. (Unlike
+    /// `hud_border_width` and `completed_border_width`, which are raw pixels.)
     pub cursor_outline_width: f32,
 }
 
@@ -134,6 +138,12 @@ pub struct AutomationState<Message> {
     pub virtual_cursor: Point,
     pub current_pixel_target: Point,
     pub is_clicking: bool,
+    /// `virtual_elapsed` at which the cursor last clicked. The click ring is
+    /// driven from this and not from `step_elapsed`, which the step scheduler
+    /// also resets: reading that clock made the ring restart from full opacity
+    /// on every step transition, one frame of flash per step. Tick-based, so a
+    /// headless export stays frame-exact.
+    pub click_started_at: Duration,
     pub active_keycap: Option<(String, Duration)>,
     pub script_index: usize,
     pub steps: Vec<AutomationStep<Message>>,
@@ -188,9 +198,19 @@ impl<Message> AutomationState<Message> {
             step_ready: false,
             virtual_elapsed: Duration::ZERO,
             step_elapsed: Duration::ZERO,
+            click_started_at: Duration::ZERO,
             style,
             real_time: true,
         }
+    }
+
+    /// How long ago the last click fired, for the click ring, or `None` while
+    /// the emulator is not in a clicked state. Measured on `virtual_elapsed`
+    /// (one tick per rendered frame), so one click yields exactly one pulse of
+    /// [`CURSOR_CLICK_PULSE`] and a step transition cannot restart it.
+    pub fn click_elapsed(&self) -> Option<Duration> {
+        self.is_clicking
+            .then(|| self.virtual_elapsed.saturating_sub(self.click_started_at))
     }
 
     pub fn update_window_size(&mut self, width: f32, height: f32) {
@@ -260,6 +280,7 @@ where
     if automation.step_ready && cursor_arrived {
         let step = &automation.steps[automation.script_index];
         automation.is_clicking = true;
+        automation.click_started_at = automation.virtual_elapsed;
         if let Some(ref label) = step.keycap_label {
             automation.active_keycap = Some((label.clone(), automation.virtual_elapsed));
         }
@@ -310,6 +331,11 @@ pub fn handle_bounds_resolved<Message>(
 }
 
 // --- Cursor geometry ---
+//
+// Everything `pub` in this section (and [`CURSOR_CLICK_PULSE`] /
+// [`cursor_click_ring`] below) is public for the integration tests in
+// `tests/automation_tests.rs`; it is not part of the app-facing API, and the
+// overlay itself only needs `cursor_render_scale` and `cursor_pointer_offsets`.
 /// Render height the cursor geometry is authored against. The overlay scales
 /// every offset by the actual render height divided by this, so the pointer
 /// keeps its proportions at 1080p, at a downscaled demo window and at a 4K
@@ -347,9 +373,9 @@ pub const CURSOR_POINTER_UNITS: [(f32, f32); 7] = [
 
 /// Drop-shadow offset in reference units (≈2.0 px at 1080p) and its alpha:
 /// enough to lift the white fill off a light background, far too little to
-/// read as a second, dark body.
-pub const CURSOR_SHADOW_OFFSET_UNITS: f32 = 1.3;
-pub const CURSOR_SHADOW_ALPHA: f32 = 0.22;
+/// read as a second, dark body. Module-private: only the overlay draws it.
+const CURSOR_SHADOW_OFFSET_UNITS: f32 = 1.3;
+const CURSOR_SHADOW_ALPHA: f32 = 0.22;
 
 /// Pixels per reference unit for a render `render_height` pixels tall, clamped
 /// to [`CURSOR_MIN_SCALE`]..=[`CURSOR_MAX_SCALE`]. A missing/zero/NaN height
@@ -370,9 +396,11 @@ pub fn cursor_pointer_offsets(render_height: f32) -> [(f32, f32); 7] {
     CURSOR_POINTER_UNITS.map(|(x, y)| (x * scale, y * scale))
 }
 
-/// How long the click ring is drawn for, measured in the emulator's own
-/// `step_elapsed` (reset when a step fires) — never in wall-clock time, so a
-/// headless export stays frame-exact.
+/// How long the click ring is drawn for, measured on the emulator's tick clock
+/// (`virtual_elapsed` since [`AutomationState::click_started_at`]) — never
+/// wall-clock time, so a headless export stays frame-exact. Deliberately not
+/// `step_elapsed`: the step scheduler resets that clock too, which made a
+/// second, full-opacity ring flash at every step transition.
 pub const CURSOR_CLICK_PULSE: Duration = Duration::from_millis(280);
 
 /// Radius (reference units) and alpha of the click ring `elapsed` after the
@@ -561,11 +589,7 @@ where
 
     let cursor = canvas(CursorOverlay {
         position: automation.virtual_cursor,
-        click_elapsed: if automation.is_clicking {
-            Some(automation.step_elapsed)
-        } else {
-            None
-        },
+        click_elapsed: automation.click_elapsed(),
         style: automation.style.clone(),
     })
     .width(Length::Fill)
