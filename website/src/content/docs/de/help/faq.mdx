@@ -10,7 +10,7 @@ import Kbd from '../../../../components/Kbd.astro';
 ### Ich sehe keine Dateien im Raster
 
 - Stellen Sie sicher, dass Sie einen Ordner geöffnet haben, der unterstützte Mediendateien enthält. Drücken Sie <Kbd>O</Kbd>, um die Ordnerauswahl zu öffnen.
-- Überprüfen Sie, ob Ihre Dateien erkannte Erweiterungen haben. Eine vollständige Liste der unterstützten Formate finden Sie auf der Seite [Medienfunktionen](/manuals/media-capabilities/).
+- Überprüfen Sie, ob Ihre Dateien erkannte Erweiterungen haben. Eine vollständige Liste der unterstützten Formate finden Sie auf der Seite [Medienfunktionen](../../manuals/media-capabilities/).
 - Wenn Sie eine Suche durchführen, klicken Sie auf die Löschen-Schaltfläche (×) in der Suchleiste, um den Filter zurückzusetzen und alle Dateien anzuzeigen.
 
 ### Videos werden nicht abgespielt (die Vorschau ist leer oder zeigt einen Platzhalter)
@@ -24,13 +24,13 @@ Sie können Bilder weiterhin anzeigen und Audio auch ohne libmpv abspielen. Verw
 
 ### Die Anwendung startet nicht oder stürzt beim Start ab
 
-- **Veraltete Konfiguration:** Versuchen Sie, Ihre `config.toml`-Datei zu löschen. Den Speicherort finden Sie auf der Seite [Konfigurationsdatei](/advanced/config-file/). Die App erstellt sie beim nächsten Start mit den Standardwerten neu.
+- **Veraltete Konfiguration:** Versuchen Sie, Ihre `config.toml`-Datei zu löschen. Den Speicherort finden Sie auf der Seite [Konfigurationsdatei](../../advanced/config-file/). Die App erstellt sie beim nächsten Start mit den Standardwerten neu.
 - **Vulkan-/GPU-Probleme:** Media Sort verwendet wgpu für das Rendering, was Vulkan-, Metal- oder DirectX-12-Unterstützung erfordert. Aktualisieren Sie Ihre GPU-Treiber und stellen Sie sicher, dass Ihr Grafik-Stack funktionsfähig ist.
 - **Fehlende Systembibliotheken:** Das AppImage bringt seine eigenen X11-/Wayland-Bibliotheken mit, nutzt aber bewusst die ALSA- (`libasound`), C++-Laufzeit- (`libstdc++`), `libdrm`- und GPU-Treiber-Bibliotheken des Hosts — jede Desktop-Distribution bringt sie mit, eine fehlende bedeutet also, dass der Desktop selbst unvollständig ist. Ein selbst kompilierter Build benötigt zusätzlich `libmpv-dev` (und `libx11`/`libwayland`/`libasound2`, falls nicht vorhanden).
 
 ### Wie setze ich alle Einstellungen auf die Standardwerte zurück?
 
-Löschen Sie die `config.toml`-Datei an dem auf der Seite [Konfigurationsdatei](/advanced/config-file/) angegebenen Speicherort. Media Sort erstellt beim nächsten Start eine neue Konfigurationsdatei.
+Löschen Sie die `config.toml`-Datei an dem auf der Seite [Konfigurationsdatei](../../advanced/config-file/) angegebenen Speicherort. Media Sort erstellt beim nächsten Start eine neue Konfigurationsdatei.
 
 ### Ich habe von der alten WPF-v2.x-Version aktualisiert. Wo sind meine Einstellungen?
 
@@ -42,7 +42,7 @@ Wenn die Datei vorhanden ist, die Einstellungen aber dennoch nicht migriert wurd
 
 ### Kann ich Media Sort vollständig mit der Tastatur bedienen?
 
-Ja. Media Sort ist für die tastaturorientierte Bedienung konzipiert. Jede Aktion (Ordner navigieren, Dateien auswählen, verschieben/kopieren/löschen, umbenennen, Ordner erstellen und angepinnte Ordner verwalten) hat ein Tastenkürzel. Eine vollständige Referenz finden Sie auf der Seite [Tastaturschema](/manuals/keyboard-layout/).
+Ja. Media Sort ist für die tastaturorientierte Bedienung konzipiert. Jede Aktion (Ordner navigieren, Dateien auswählen, verschieben/kopieren/löschen, umbenennen, Ordner erstellen und angepinnte Ordner verwalten) hat ein Tastenkürzel. Eine vollständige Referenz finden Sie auf der Seite [Tastaturschema](../../manuals/keyboard-layout/).
 
 ### Wo sind meine Dateien, nachdem ich sie gelöscht habe?
 

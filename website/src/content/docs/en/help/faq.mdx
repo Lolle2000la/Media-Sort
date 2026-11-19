@@ -10,7 +10,7 @@ import Kbd from '../../../../components/Kbd.astro';
 ### I don't see any files in the grid
 
 - Make sure you have opened a folder that contains supported media files. Press <Kbd>O</Kbd> to open the folder picker.
-- Check that your files have recognized extensions. See the [Media Capabilities](/manuals/media-capabilities/) page for the full list of supported formats.
+- Check that your files have recognized extensions. See the [Media Capabilities](../../manuals/media-capabilities/) page for the full list of supported formats.
 - If you are searching, click the clear button (×) in the search bar to reset the filter and show all files.
 
 ### Videos don't play (preview is blank or shows a placeholder)
@@ -24,13 +24,13 @@ You can still view images and play audio without libmpv. Use the **"Open in syst
 
 ### The application won't start or crashes on launch
 
-- **Stale configuration:** Try deleting your `config.toml` file. Its location depends on your OS; see the [Configuration File](/advanced/config-file/) page. The app will recreate it with defaults on next launch.
+- **Stale configuration:** Try deleting your `config.toml` file. Its location depends on your OS; see the [Configuration File](../../advanced/config-file/) page. The app will recreate it with defaults on next launch.
 - **Vulkan / GPU issues:** Media Sort uses wgpu for rendering, which requires Vulkan, Metal, or DirectX 12 support. Update your GPU drivers and ensure your graphics stack is functional.
 - **Missing system libraries:** The AppImage bundles its own X11/Wayland libraries, but it deliberately uses the host's ALSA (`libasound`), C++ runtime (`libstdc++`), `libdrm` and GPU drivers — every desktop distribution ships those, so a missing one means the desktop itself is incomplete. A self-compiled build additionally needs `libmpv-dev` (and the equivalent of `libx11`/`libwayland`/`libasound2` when they are not installed).
 
 ### How do I reset all settings to defaults?
 
-Delete the `config.toml` file at the location listed on the [Configuration File](/advanced/config-file/) page. Media Sort will create a fresh configuration file on next launch.
+Delete the `config.toml` file at the location listed on the [Configuration File](../../advanced/config-file/) page. Media Sort will create a fresh configuration file on next launch.
 
 ### I upgraded from the old WPF v2.x version. Where are my settings?
 
@@ -42,7 +42,7 @@ If the file is present but settings still weren't migrated, delete the new `conf
 
 ### Can I use Media Sort entirely with the keyboard?
 
-Yes. Media Sort is designed for keyboard-first operation. Every action (navigating folders, selecting files, moving, copying, deleting, renaming, creating folders, and managing pinned folders) has a keyboard shortcut. See the [Keyboard Layout](/manuals/keyboard-layout/) page for the complete reference.
+Yes. Media Sort is designed for keyboard-first operation. Every action (navigating folders, selecting files, moving, copying, deleting, renaming, creating folders, and managing pinned folders) has a keyboard shortcut. See the [Keyboard Layout](../../manuals/keyboard-layout/) page for the complete reference.
 
 ### Where are my files after I delete them?
 
