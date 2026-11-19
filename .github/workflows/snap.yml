@@ -124,15 +124,19 @@ jobs:
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
           # Per attempt: the build alone took ~11 min on the old 4-core runner.
-          # 120 min, comfortably above the ~97 min an attempt is allowed to
-          # spend in total: ~80 min of per-call budgets plus their --kill-after
-          # windows (see the calls below), and up to ~17 min of on_retry
-          # cleanup between attempts. That ordering is the point -- a hung
-          # store fetch or build is killed by `timeout` (exit 124, an ordinary
-          # failure the action retries) and never by the action's own timeout,
-          # whose `process.kill(-pid)` raises an uncaught `Error: kill EPERM`
-          # and aborts the step instead of making the next attempt.
-          timeout_minutes: 120
+          # 100 min, comfortably above the ~79.5 min the calls inside are
+          # allowed to spend in total (per-call budgets plus their --kill-after
+          # windows, as itemised below; ~71.5 min when only one of
+          # `sudo snap install` / `snap refresh` runs). That ordering is the
+          # point -- a hung store fetch or build is killed by `timeout` (exit
+          # 124, an ordinary failure the action retries) and never by the
+          # action's timeout, whose per-pid tree-kill rethrows the `EPERM` it
+          # hits on `sudo`'s child from the kill callback and aborts the step
+          # instead of making the next attempt. The `on_retry_command` cleanup
+          # runs *between* attempts, outside this timer, and is bounded so that
+          # three attempts plus two cleanups stay under GitHub's 360 min job
+          # ceiling (300 + ~38 min).
+          timeout_minutes: 100
           max_attempts: 3
           retry_wait_seconds: 30
           # Killing the client does not cancel the work: `snap install` is an
@@ -141,11 +145,13 @@ jobs:
           # a still-running change or a half-built instance and fail fast --
           # the hung-store case the timeouts exist for would end red anyway.
           # Each step is bounded and tolerant (nothing in flight, no build
-          # state, no lxd group yet are all normal), and the payload runs under
-          # `bash -c` because the action's on_retry_command gets the platform
-          # default shell and no working directory.
+          # state, no lxd group yet are all normal) -- the leading `snap
+          # changes` included, since this hook runs untimed: a wedged snapd
+          # must cost a minute, not the job. The payload runs under `bash -c`
+          # because the action's on_retry_command gets the platform default
+          # shell and no working directory.
           on_retry_command: |
-            bash -c 'set -uo pipefail; cd "$GITHUB_WORKSPACE"; sudo snap changes | while read -r id status rest; do case $status in Do|Doing|Undo|Undoing) timeout --kill-after=15 60 sudo snap abort "$id" || true;; esac; done; timeout --kill-after=30 120 sudo snap watch --last=change >/dev/null 2>&1 || true; timeout --kill-after=60 600 sudo -u "$(id -un)" -E env SNAPCRAFT_BUILD_ENVIRONMENT=lxd snapcraft clean || true; echo "retry: drained snap changes and cleaned the snapcraft build state"'
+            bash -c 'set -uo pipefail; cd "$GITHUB_WORKSPACE"; timeout --kill-after=30 60 sudo snap changes | while read -r id status rest; do case $status in Do|Doing|Undo|Undoing) timeout --kill-after=15 60 sudo snap abort "$id" || true;; esac; done; timeout --kill-after=30 120 sudo snap watch --last=change >/dev/null 2>&1 || true; timeout --kill-after=60 600 sudo -u "$(id -un)" -E env SNAPCRAFT_BUILD_ENVIRONMENT=lxd snapcraft clean || true; echo "retry: drained snap changes and cleaned the snapcraft build state"'
           # The action spawns the command without `-e`, and from its own working
           # directory, so both are set up inside the command.
           shell: bash
