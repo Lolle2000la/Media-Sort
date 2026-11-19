@@ -35,7 +35,7 @@ objc2-foundation = { version = "0.3", features = ["NSFileManager", "NSURL", "NSS
 # trash rather than the sandbox's private one) and OpenURI (handing a file to
 # the host file manager or default handler, see `src/platform/desktop_portal.rs`).
 # ashpd is async-only, so its synchronous callers drive it with pollster.
-ashpd = { version = "0.13", default-features = false, features = [
+ashpd = { version = "0.14", default-features = false, features = [
     "async-io",
     "open_uri",
     "trash",
