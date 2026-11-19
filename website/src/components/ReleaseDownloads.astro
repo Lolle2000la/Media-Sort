@@ -10,6 +10,45 @@ interface Asset {
     url: string;
 }
 
+// The component is rendered from each locale's installation page as a bare
+// `<ReleaseDownloads />` (no props), so the locale has to come from the route
+// — the same reason Header.astro reads `Astro.currentLocale`. An unprefixed
+// route (e.g. the root redirect) falls back to the default locale.
+const locale = Astro.currentLocale ?? 'en';
+
+// Only the chrome around the release data is translated; "SHA-256", the OS
+// group headings and the artifact names are technical identifiers and stay as
+// they are in every language.
+interface Labels {
+    buildTimeNotice: string;
+    latestRelease: string;
+    download: string;
+    copyHash: string;
+}
+
+const labels: Record<string, Labels> = {
+    en: {
+        buildTimeNotice: 'Build-Time Notice:',
+        latestRelease: 'Latest Release:',
+        download: 'Download',
+        copyHash: 'Copy Hash',
+    },
+    de: {
+        buildTimeNotice: 'Hinweis zum Build-Zeitpunkt:',
+        latestRelease: 'Neueste Version:',
+        download: 'Herunterladen',
+        copyHash: 'Hash kopieren',
+    },
+    ja: {
+        buildTimeNotice: 'ビルド時の注意:',
+        latestRelease: '最新リリース:',
+        download: 'ダウンロード',
+        copyHash: 'ハッシュをコピー',
+    },
+};
+
+const t = labels[locale] ?? labels.en;
+
 let tagName = '';
 let assets: Asset[] = [];
 let errorMsg = '';
@@ -136,14 +175,14 @@ const iconMap = {
 <div class="download-container">
     {errorMsg && (
         <div class="error-alert">
-            <strong>⚠️ Build-Time Notice:</strong> {errorMsg}
+            <strong>⚠️ {t.buildTimeNotice}</strong> {errorMsg}
         </div>
     )}
 
     {tagName && (
         <div class="release-header">
             <span class="version-tag">
-                Latest Release: <strong>{tagName}</strong>
+                {t.latestRelease} <strong>{tagName}</strong>
             </span>
         </div>
     )}
@@ -172,7 +211,7 @@ const iconMap = {
                                             {item.label}
                                         </span>
                                         <span class="badge-meta">
-                                            {item.size} • Download
+                                            {item.size} • {t.download}
                                         </span>
                                     </div>
                                 </a>
@@ -187,7 +226,7 @@ const iconMap = {
                                     <button
                                         class="copy-btn"
                                         data-hash={item.sha256}
-                                        title="Copy Hash"
+                                        title={t.copyHash}
                                     >
                                         <Copy size={14} />
                                     </button>
