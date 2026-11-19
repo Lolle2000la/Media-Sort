@@ -120,11 +120,11 @@ impl Default for AutomationStyle {
             completed_border: Color::from_rgb(0.2, 0.65, 0.2),
             completed_border_width: 2.0,
             hud_border_width: 1.5,
-            // Reference units: the overlay multiplies this by the render
-            // height relative to `CURSOR_REFERENCE_HEIGHT`, so the default
-            // draws a 2.0 px outline at 1080p instead of a hairline that
-            // smears at the yuv420p chroma limit.
-            cursor_outline_width: 2.0,
+            // Reference units: 1.13 × `CURSOR_UNIT_SCALE` is a 1.75 px outline
+            // at 1080p on a ~30 px tall pointer — a crisp edge that still
+            // leaves the white fill dominant (the old 2.0-unit stroke on a
+            // 19 px arrow ate most of the interior).
+            cursor_outline_width: 1.13,
         }
     }
 }
@@ -316,18 +316,25 @@ pub fn handle_bounds_resolved<Message>(
 /// export alike.
 pub const CURSOR_REFERENCE_HEIGHT: f32 = 1080.0;
 
+/// Pixels per reference unit at [`CURSOR_REFERENCE_HEIGHT`]. The silhouette is
+/// authored in a 20-unit box; this factor makes it a ~30 px tall pointer at
+/// 1080p (a 19 px one read as a fleck next to the UI text and was smaller than
+/// the wedge it replaced).
+pub const CURSOR_UNIT_SCALE: f32 = 1.55;
+
 /// Lower clamp of the resolution scale factor: a small interactive demo
 /// window still gets a visible pointer instead of a few faint pixels.
 pub const CURSOR_MIN_SCALE: f32 = 0.75;
 
 /// Upper clamp of the resolution scale factor: a huge render must not paint a
-/// screen-sized arrow.
-pub const CURSOR_MAX_SCALE: f32 = 3.0;
+/// screen-sized arrow. 2160p lands at 3.1, so a 4K export is not clamped.
+pub const CURSOR_MAX_SCALE: f32 = 3.5;
 
 /// Canonical arrow pointer in reference units: tip at the origin, x right,
 /// y down. 11.0 wide × 19.4 tall (aspect ≈0.57, like an OS pointer, unlike the
 /// old 28×34 wedge) with the shoulder notch at (4.3, 12.7) and the narrow tail
-/// leg (6.8, 19.4) → (9.3, 18.1).
+/// leg (6.8, 19.4) → (9.3, 18.1). Multiplied by [`CURSOR_UNIT_SCALE`] that is
+/// ≈17.1 × 30.1 px at 1080p.
 pub const CURSOR_POINTER_UNITS: [(f32, f32); 7] = [
     (0.0, 0.0),
     (0.0, 16.6),
@@ -338,14 +345,22 @@ pub const CURSOR_POINTER_UNITS: [(f32, f32); 7] = [
     (11.0, 10.9),
 ];
 
+/// Drop-shadow offset in reference units (≈2.0 px at 1080p) and its alpha:
+/// enough to lift the white fill off a light background, far too little to
+/// read as a second, dark body.
+pub const CURSOR_SHADOW_OFFSET_UNITS: f32 = 1.3;
+pub const CURSOR_SHADOW_ALPHA: f32 = 0.22;
+
 /// Pixels per reference unit for a render `render_height` pixels tall, clamped
 /// to [`CURSOR_MIN_SCALE`]..=[`CURSOR_MAX_SCALE`]. A missing/zero/NaN height
-/// falls back to 1:1 so the overlay never degenerates into a zero-size path.
+/// falls back to the reference scale so the overlay never degenerates into a
+/// zero-size path.
 pub fn cursor_render_scale(render_height: f32) -> f32 {
     if !render_height.is_finite() || render_height <= 0.0 {
-        return 1.0;
+        return CURSOR_UNIT_SCALE;
     }
-    (render_height / CURSOR_REFERENCE_HEIGHT).clamp(CURSOR_MIN_SCALE, CURSOR_MAX_SCALE)
+    (render_height / CURSOR_REFERENCE_HEIGHT * CURSOR_UNIT_SCALE)
+        .clamp(CURSOR_MIN_SCALE, CURSOR_MAX_SCALE)
 }
 
 /// The pointer silhouette scaled for a render `render_height` pixels tall, as
@@ -418,12 +433,20 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for CursorOverlay {
         // Soft drop shadow: the same silhouette offset down-right in a
         // translucent black, so the light fill keeps an edge on light themes
         // and gains depth on dark ones. One filled path, no blur. The offset
-        // has to clear the outline width, or the shadow hides under it.
+        // has to clear the outline width, or the shadow hides under it — but
+        // it stays light, so it reads as depth rather than a second body.
+        let shadow_offset = CURSOR_SHADOW_OFFSET_UNITS * scale;
         let shadow_path = pointer_path(
-            Point::new(self.position.x + 2.2 * scale, self.position.y + 3.0 * scale),
+            Point::new(
+                self.position.x + shadow_offset,
+                self.position.y + shadow_offset,
+            ),
             &offsets,
         );
-        frame.fill(&shadow_path, Color::from_rgba(0.0, 0.0, 0.0, 0.3));
+        frame.fill(
+            &shadow_path,
+            Color::from_rgba(0.0, 0.0, 0.0, CURSOR_SHADOW_ALPHA),
+        );
 
         // Click feedback as a separate ring at the tip, drawn behind the arrow
         // so the pointer itself stays untouched and the ring reads as a ripple
