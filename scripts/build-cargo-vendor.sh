@@ -3,10 +3,10 @@
 # Build the Flatpak vendored-crate tarball from Cargo.lock.
 #
 # Flathub builds offline, so the manifest needs every crate Cargo.lock resolves
-# to plus a `cargo/config` that points Cargo at them. This runs
+# to plus a `cargo/config.toml` that points Cargo at them. This runs
 # `cargo vendor --locked`, normalizes the printed source-replacement config to
 # the path the manifest layout expects, and packs the result as a deterministic
-# tarball whose root is `cargo/` (`cargo/config` + `cargo/vendor/<crate>`). The
+# tarball whose root is `cargo/` (`cargo/config.toml` + `cargo/vendor/<crate>`). The
 # manifest consumes it as a `type: archive` source with `strip-components: 0`,
 # landing it at the module build root exactly where the old generated
 # cargo-sources.json used to go.
@@ -37,12 +37,12 @@ mkdir -p "$WORK/cargo"
 # given; rewrite that line to the path the manifest layout uses (relative to the
 # build root), so an absolute temp path never reaches the tarball.
 cargo vendor --locked --manifest-path "$ROOT/Cargo.toml" "$WORK/cargo/vendor" \
-  | sed 's|^directory = .*|directory = "cargo/vendor"|' > "$WORK/cargo/config" \
+  | sed 's|^directory = .*|directory = "cargo/vendor"|' > "$WORK/cargo/config.toml" \
   || die "cargo vendor failed"
 
-[ -s "$WORK/cargo/config" ] || die "cargo vendor printed no source-replacement config"
-grep -q '^directory = "cargo/vendor"$' "$WORK/cargo/config" \
-  || die "could not normalize the vendor directory in cargo/config"
+[ -s "$WORK/cargo/config.toml" ] || die "cargo vendor printed no source-replacement config"
+grep -q '^directory = "cargo/vendor"$' "$WORK/cargo/config.toml" \
+  || die "could not normalize the vendor directory in cargo/config.toml"
 { [ -d "$WORK/cargo/vendor" ] && [ -n "$(ls -A "$WORK/cargo/vendor")" ]; } \
   || die "cargo vendor produced no crates"
 

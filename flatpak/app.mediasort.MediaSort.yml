@@ -10,7 +10,7 @@
 #   * add a matching <release> entry to
 #     packaging/linux/app.mediasort.MediaSort.metainfo.xml.
 #
-# The vendor archive is a `cargo vendor` tarball (a `cargo/config` source
+# The vendor archive is a `cargo vendor` tarball (a `cargo/config.toml` source
 # replacement plus `cargo/vendor/<crate>`), built with
 # scripts/build-cargo-vendor.sh and attached to each GitHub release by
 # release.yml. Flathub's external data checker bumps its url/sha256 along with
@@ -256,7 +256,7 @@ modules:
       # BEGIN CARGO VENDOR SOURCE
       - type: archive
         url: https://github.com/Lolle2000la/Media-Sort/releases/download/v3.0.1/cargo-vendor.tar.gz
-        sha256: 2a83c0803221386ac4ac94b6354ac3ad70ea220eac346fcef32568e05c7a21c7
+        sha256: 481df6780208b71d0cd2efa8829ba83cbad3c7cd042a902a3a0d199db2c43ed5
         strip-components: 0
         x-checker-data:
           type: github

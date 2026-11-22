@@ -222,12 +222,31 @@ infrastructure — nothing here is published automatically.
    tag whose first `<release>` is not that version.
 3. There is no `cargo-sources.json` to copy: the vendored crates are the
    `cargo-vendor.tar.gz` asset of the tag being submitted, which `release.yml`
-   builds and attaches (see below). `v3.0.1` predates that asset, so either
-   upload it to `v3.0.1` once — `gh release upload v3.0.1 cargo-vendor.tar.gz`
-   with a tarball built by `scripts/build-cargo-vendor.sh` at `v3.0.1` — or point
-   the manifest at the next release, which attaches it automatically. Both the
-   app source and the vendor source carry `x-checker-data`, so Flathub's
-   external data checker bumps the tag *and* the vendor archive's url+sha256.
+   builds and attaches (see below). Both the app source and the vendor source
+   carry `x-checker-data`, so Flathub's external data checker bumps the tag
+   *and* the vendor archive's url+sha256.
+
+   `v3.0.1` predates that asset, and the manifest pins its tarball's sha256. The
+   pinned value is reproducible **only** when the tarball is built from that tag
+   with the current `scripts/build-cargo-vendor.sh` (the script does not exist in
+   the `v3.0.1`/`v3.0.2` trees, and building from a newer checkout gives a
+   different checksum). Either:
+
+   - **preferred:** cut the next release — its `publish` job attaches the
+     tarball, and the data checker then moves the manifest's tag and
+     url/sha256; or
+   - **immediate:** build the tarball from the tag, upload it, and repin the
+     `sha256` if the printed value differs:
+
+     ```bash
+     git worktree add --detach /tmp/ms-v3.0.1 v3.0.1
+     mkdir -p /tmp/ms-v3.0.1/scripts
+     cp scripts/build-cargo-vendor.sh /tmp/ms-v3.0.1/scripts/
+     bash /tmp/ms-v3.0.1/scripts/build-cargo-vendor.sh /tmp/cargo-vendor.tar.gz
+     gh release upload v3.0.1 /tmp/cargo-vendor.tar.gz
+     # if the printed sha256 differs from the manifest's, update that sha256 line
+     git worktree remove /tmp/ms-v3.0.1
+     ```
 4. Fork [`flathub/flathub`](https://github.com/flathub/flathub), create a branch
    named `app.mediasort.MediaSort`, add `app.mediasort.MediaSort.yml` at the
    repository root (the vendor tarball is fetched from the release, not
@@ -241,7 +260,7 @@ infrastructure — nothing here is published automatically.
 Flathub builds offline, so the app module needs every crate `Cargo.lock` resolves
 to. That is not a checked-in file: `scripts/build-cargo-vendor.sh` runs
 `cargo vendor --locked` and packs the result as a deterministic tarball whose
-root is `cargo/` (`cargo/config` plus `cargo/vendor/<crate>`), which the manifest
+root is `cargo/` (`cargo/config.toml` plus `cargo/vendor/<crate>`), which the manifest
 consumes as a `type: archive` source with `strip-components: 0`.
 
 It is built automatically:
@@ -253,14 +272,16 @@ It is built automatically:
   points the manifest at that local file, so a dependency change is validated
   against the offline build without any checked-in artifact.
 
-Build it locally — to verify, or to upload it to a release that predates the
-asset:
+Build it locally to verify the archive (for a release that predates the asset,
+follow the tag-worktree steps in the submission notes above):
 
 ```bash
 bash scripts/build-cargo-vendor.sh            # -> ./cargo-vendor.tar.gz (gitignored)
 bash scripts/build-cargo-vendor.sh /tmp/x.tar.gz
-gh release upload <tag> cargo-vendor.tar.gz   # to attach it to a release by hand
 ```
+
+A tarball only matches the manifest's pinned sha256 when built from that same
+tag.
 
 The archive is reproducible (sorted entries, fixed mtime and ownership, `gzip
 -n`), so its sha256 is stable for a given lock; the manifest pins that sha256 and

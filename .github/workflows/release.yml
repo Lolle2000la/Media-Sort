@@ -482,17 +482,34 @@ jobs:
           toolchain: stable
 
       - name: Build and attach the Flatpak cargo vendor tarball
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Flatpak builds offline, so the manifest points at a cargo-vendor.tar.gz
         # release asset rather than a checked-in generated file. The draft release
         # already exists (deploy created it), so build the tarball from this tag's
-        # lock and attach it; either step failing fails the job, so a release can
-        # never publish without it.
+        # lock and attach it; a failure after three attempts fails the release, so
+        # it can never publish without the archive.
+        #
+        # Each call is wrapped in coreutils `timeout` with its own budget (the
+        # vendor step downloads ~850 crates, the upload is ~130 MB), matching this
+        # workflow's retry convention.
         run: |
-          set -euo pipefail
-          bash scripts/build-cargo-vendor.sh "$RUNNER_TEMP/cargo-vendor.tar.gz"
-          gh release upload "${{ github.ref_name }}" "$RUNNER_TEMP/cargo-vendor.tar.gz" --clobber
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if timeout --kill-after=30 600 bash scripts/build-cargo-vendor.sh "$RUNNER_TEMP/cargo-vendor.tar.gz" \
+              && timeout --kill-after=60 900 gh release upload "${{ github.ref_name }}" "$RUNNER_TEMP/cargo-vendor.tar.gz" --clobber; then
+              exit 0
+            else
+              status=$?
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::Flatpak cargo vendor tarball build/upload failed (exit $status); retrying in 15s (attempt $attempt/3)"
+              sleep 15
+            fi
+          done
+          echo "::error::Flatpak cargo vendor tarball build/upload failed after 3 attempts (exit $status)"
+          exit 1
 
       - name: Extract Tag Message
         run: |
