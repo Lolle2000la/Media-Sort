@@ -6,7 +6,10 @@ Flatpak on [Flathub](https://flathub.org):
 | File | Purpose |
 | --- | --- |
 | `app.mediasort.MediaSort.yml` | The Flatpak build manifest (this is the file submitted to Flathub). |
-| `cargo-sources.json` | Vendored Rust crates, generated from `Cargo.lock` (Flathub builds offline). |
+
+The vendored Rust crates are **not** checked in: the manifest's second source is
+a `cargo-vendor.tar.gz` release asset, built with `scripts/build-cargo-vendor.sh`
+and attached to each GitHub release (see below). Flathub builds offline from it.
 
 Upstream metadata lives with the other Linux packaging files:
 
@@ -173,16 +176,24 @@ flatpak-builder --user --install --force-clean build-dir flatpak/app.mediasort.M
 flatpak run app.mediasort.MediaSort
 ```
 
-The manifest's app source points at the **released tag** (`v3.0.1`), so for a
-local build of uncommitted work, temporarily point that source at this checkout
-(e.g. a `type: dir` or local `type: git` source) instead.
+The manifest's two sources point at the released tag (`v3.0.1`): the app source
+and the `cargo-vendor.tar.gz` asset beside it. For a local build of uncommitted
+work, build the vendor tarball and point both sources at local paths:
 
-CI runs this same build for any change to `Cargo.lock`, a `Cargo.toml` or
-`flatpak/**`: `.github/workflows/flatpak-build.yml` regenerates
-`cargo-sources.json` from the checked-out `Cargo.lock`, rewrites the manifest's
-app source to `type: dir` (so it builds the checkout, not the release tag) and
-runs `flatpak-builder` against the same runtime. It is expensive, so it is not a
-required check.
+```bash
+bash scripts/build-cargo-vendor.sh "$PWD/cargo-vendor.tar.gz"
+# in a copy of the manifest: the app source becomes `type: dir` / `path: ..`,
+# and the vendor source becomes `type: archive` with
+# `path: /abs/path/cargo-vendor.tar.gz` and `strip-components: 0`.
+```
+
+CI runs this same build for any change to `Cargo.lock`, a `Cargo.toml`,
+`flatpak/**` or `scripts/build-cargo-vendor.sh`:
+`.github/workflows/flatpak-build.yml` builds the vendor tarball from the
+checked-out `Cargo.lock`, rewrites the app source to `type: dir` and, at the
+manifest's `# BEGIN/END CARGO VENDOR SOURCE` markers, swaps the released vendor
+asset for that local archive, then runs `flatpak-builder` against the same
+runtime. It is expensive, so it is not a required check.
 
 Lint the manifest before/after changes:
 
@@ -209,45 +220,51 @@ infrastructure — nothing here is published automatically.
    date) into `packaging/linux/app.mediasort.MediaSort.metainfo.xml` as part of
    cutting the release, and `verify-version` in `release.yml` refuses to build a
    tag whose first `<release>` is not that version.
-3. `cargo-sources.json` comes from the tagged tree — the release commit
-   regenerates it (see below) — so copy it as-is. Take it from the **release
-   tag**, not from `master`; Flathub's external data checker only bumps the
-   manifest's `tag`/`commit` and never regenerates `cargo-sources.json`. Re-run
-   `bash scripts/update-flatpak-sources.sh` only if you point the manifest at a
-   lock newer than the tag.
+3. There is no `cargo-sources.json` to copy: the vendored crates are the
+   `cargo-vendor.tar.gz` asset of the tag being submitted, which `release.yml`
+   builds and attaches (see below). `v3.0.1` predates that asset, so either
+   upload it to `v3.0.1` once — `gh release upload v3.0.1 cargo-vendor.tar.gz`
+   with a tarball built by `scripts/build-cargo-vendor.sh` at `v3.0.1` — or point
+   the manifest at the next release, which attaches it automatically. Both the
+   app source and the vendor source carry `x-checker-data`, so Flathub's
+   external data checker bumps the tag *and* the vendor archive's url+sha256.
 4. Fork [`flathub/flathub`](https://github.com/flathub/flathub), create a branch
-   named `app.mediasort.MediaSort`, add `app.mediasort.MediaSort.yml` and
-   `cargo-sources.json` at the repository root, and open a pull request.
+   named `app.mediasort.MediaSort`, add `app.mediasort.MediaSort.yml` at the
+   repository root (the vendor tarball is fetched from the release, not
+   committed), and open a pull request.
 5. Flathub reviews the submission. After it is merged the manifest moves to
    `flathub/app.mediasort.MediaSort`, builds start automatically, and future
    updates are a pull request to that repository.
 
-## Regenerating `cargo-sources.json`
+## The vendored-crate tarball
 
-`flatpak/cargo-sources.json` is a pure function of `Cargo.lock`, so it is
-regenerated automatically rather than hand-edited:
+Flathub builds offline, so the app module needs every crate `Cargo.lock` resolves
+to. That is not a checked-in file: `scripts/build-cargo-vendor.sh` runs
+`cargo vendor --locked` and packs the result as a deterministic tarball whose
+root is `cargo/` (`cargo/config` plus `cargo/vendor/<crate>`), which the manifest
+consumes as a `type: archive` source with `strip-components: 0`.
 
-- `scripts/release.sh` runs `scripts/update-flatpak-sources.sh` after refreshing
-  `Cargo.lock` and commits the result in the release commit, so every tag
-  carries a file that matches its own lock;
-- `release.yml`'s `verify-version` job runs the same script with `--check`, so a
-  tag whose committed file drifted from `Cargo.lock` fails before any build;
-- `.github/workflows/flatpak-build.yml` regenerates it from the checked-out lock
-  before building, so a dependency change is validated against the offline build
-  without needing a second commit.
+It is built automatically:
 
-The script fetches `flatpak-cargo-generator.py` from
-[flatpak-builder-tools](https://github.com/flatpak/flatpak-builder-tools)
-(`cargo/`, pinned to a commit in the script) and needs `aiohttp` and `tomlkit`;
-it installs both at pinned versions into a throwaway venv, so nothing has to be
-installed beforehand (only a `$PYTHON` that already imports both skips the venv).
-Run it by hand after changing `Cargo.lock` (or to verify a tagged tree), with
-`--check` to compare without writing:
+- `release.yml`'s `publish` job builds it from the tag's lock and attaches it to
+  the release before the notes go out, so every release carries
+  `cargo-vendor.tar.gz` (and the job fails if it cannot be built or uploaded);
+- `.github/workflows/flatpak-build.yml` builds it from the checked-out lock and
+  points the manifest at that local file, so a dependency change is validated
+  against the offline build without any checked-in artifact.
+
+Build it locally — to verify, or to upload it to a release that predates the
+asset:
 
 ```bash
-bash scripts/update-flatpak-sources.sh          # rewrite flatpak/cargo-sources.json
-bash scripts/update-flatpak-sources.sh --check  # fail if the committed file is stale
+bash scripts/build-cargo-vendor.sh            # -> ./cargo-vendor.tar.gz (gitignored)
+bash scripts/build-cargo-vendor.sh /tmp/x.tar.gz
+gh release upload <tag> cargo-vendor.tar.gz   # to attach it to a release by hand
 ```
+
+The archive is reproducible (sorted entries, fixed mtime and ownership, `gzip
+-n`), so its sha256 is stable for a given lock; the manifest pins that sha256 and
+Flathub's data checker updates it with the tag.
 
 ## Version maintenance
 
@@ -259,11 +276,13 @@ Every release touches the Flatpak packaging:
 - the matching `<release version="…" date="…"/>` in the metainfo is written by
   `scripts/release.sh` when the tag is cut, so only a hand-made tag needs it
   added manually;
-- `cargo-sources.json` is regenerated by `scripts/release.sh` in the release
-  commit and enforced by `verify-version`, so it needs no manual step.
+- the vendor archive: every release attaches `cargo-vendor.tar.gz`
+  (`release.yml`), and the manifest's `url`/`sha256` for it must move to that
+  tag — by hand, or via Flathub's external data checker.
 
 The `x-checker-data` blocks let Flathub's external data checker open automated
-bump PRs for mpv, libass, libplacebo and the app itself.
+bump PRs for mpv, libass, libplacebo, and the app together with its vendor
+archive.
 
 ## Known follow-ups
 

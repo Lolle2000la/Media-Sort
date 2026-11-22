@@ -31,36 +31,6 @@ jobs:
           # set must be present (fetch-depth: 0 fetches all history and tags).
           fetch-depth: 0
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
-        with:
-          python-version: '3.x'
-
-      - name: Verify Flatpak cargo sources are current
-        shell: bash
-        # scripts/release.sh regenerates and commits flatpak/cargo-sources.json,
-        # so a tag whose committed file no longer matches Cargo.lock was cut by
-        # hand (or the lock changed after the bump). The check fetches the
-        # generator and builds a venv, so its infrastructure failures (exit 2)
-        # get a bounded retry; drift (exit 1) fails immediately.
-        run: |
-          set -uo pipefail
-          for attempt in 1 2 3; do
-            if timeout --kill-after=30 300 bash scripts/update-flatpak-sources.sh --check; then
-              exit 0
-            else
-              status=$?
-            fi
-            if [ "$status" -eq 1 ]; then
-              exit 1
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "::warning::Flatpak cargo-sources check hit an infrastructure failure (exit $status); retrying in 15s (attempt $attempt/3)"
-              sleep 15
-            fi
-          done
-          echo "::error::Flatpak cargo-sources check failed after 3 attempts (exit $status)"
-          exit 2
-
       - name: Verify Tag Matches Version Files
         run: |
           set -euo pipefail
@@ -506,6 +476,23 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - name: Build and attach the Flatpak cargo vendor tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Flatpak builds offline, so the manifest points at a cargo-vendor.tar.gz
+        # release asset rather than a checked-in generated file. The draft release
+        # already exists (deploy created it), so build the tarball from this tag's
+        # lock and attach it; either step failing fails the job, so a release can
+        # never publish without it.
+        run: |
+          set -euo pipefail
+          bash scripts/build-cargo-vendor.sh "$RUNNER_TEMP/cargo-vendor.tar.gz"
+          gh release upload "${{ github.ref_name }}" "$RUNNER_TEMP/cargo-vendor.tar.gz" --clobber
 
       - name: Extract Tag Message
         run: |

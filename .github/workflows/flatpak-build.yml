@@ -26,8 +26,8 @@ on:
       # The metainfo/desktop/icon the app module installs; a malformed one fails
       # appstream compose in the build.
       - packaging/linux/**
-      # The generator the build below runs to refresh the vendored crate set.
-      - scripts/update-flatpak-sources.sh
+      # The vendor tarball builder the build below runs.
+      - scripts/build-cargo-vendor.sh
       - .github/workflows/flatpak-build.yml
   pull_request:
     paths: *paths
@@ -42,17 +42,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          python-version: '3.x'
+          toolchain: stable
 
-      - name: Regenerate the Flatpak cargo sources from Cargo.lock
-        # flatpak/cargo-sources.json is regenerated (and committed) at release
-        # time, so CI regenerates it here from the lock instead of demanding a
-        # second commit: this validates a dependency change against the offline
-        # build from the checked-out lock alone. The script pins the generator's
-        # deps and installs them into its own venv from this python3.
-        run: bash scripts/update-flatpak-sources.sh
+      - name: Build the Flatpak cargo vendor tarball
+        # The manifest points at a released cargo-vendor.tar.gz; this build uses
+        # the checkout's own lock, so build the tarball here and (below) rewrite
+        # the manifest to consume it from a local path.
+        run: bash scripts/build-cargo-vendor.sh "$GITHUB_WORKSPACE/cargo-vendor.tar.gz"
 
       - name: Install flatpak-builder and the runtime
         run: |
@@ -76,14 +74,31 @@ jobs:
       - name: Build this checkout with the manifest
         run: |
           python3 - <<'PY'
+          import os
           import pathlib
 
           manifest = pathlib.Path('flatpak/app.mediasort.MediaSort.yml')
           source = manifest.read_text()
-          start = source.index('      - type: git\n        url: https://github.com/Lolle2000la/Media-Sort.git')
-          end = source.index('      - cargo-sources.json')
-          # `path` is relative to the manifest, so `..` is the checkout root.
-          ci = source[:start] + '      - type: dir\n        path: ..\n' + source[end:]
+
+          # The app source points at the released tag; build the checkout instead
+          # (`path` is relative to the manifest, so `..` is the checkout root).
+          app_start = source.index('      - type: git\n        url: https://github.com/Lolle2000la/Media-Sort.git')
+          begin = '      # BEGIN CARGO VENDOR SOURCE\n'
+          end = '      # END CARGO VENDOR SOURCE\n'
+          vendor_start = source.index(begin)
+          vendor_end = source.index(end) + len(end)
+          if not app_start < vendor_start < vendor_end:
+              raise SystemExit('unexpected manifest source layout')
+
+          # Swap the released vendor asset for the tarball built above.
+          app_source = '      - type: dir\n        path: ..\n'
+          tarball = os.path.join(os.environ['GITHUB_WORKSPACE'], 'cargo-vendor.tar.gz')
+          vendor_source = (
+              '      - type: archive\n'
+              f'        path: {tarball}\n'
+              '        strip-components: 0\n'
+          )
+          ci = source[:app_start] + app_source + vendor_source + source[vendor_end:]
           pathlib.Path('flatpak/app.mediasort.MediaSort.ci.yml').write_text(ci)
           PY
           flatpak-builder --force-clean --disable-rofiles-fuse \

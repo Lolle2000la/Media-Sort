@@ -4,12 +4,17 @@
 # https://github.com/flathub/flathub, branch `app.mediasort.MediaSort`); see
 # flatpak/README.md for the full procedure. Keep it in sync with each release:
 #
-#   * bump `tag` (and add `commit`) on the `media-sort` source below, and
+#   * bump `tag` (and add `commit`) on the `media-sort` source below,
+#   * point the vendor archive (below) at that tag's `cargo-vendor.tar.gz`
+#     release asset and its sha256 (or let Flathub's data checker do both), and
 #   * add a matching <release> entry to
 #     packaging/linux/app.mediasort.MediaSort.metainfo.xml.
 #
-# cargo-sources.json (the vendored crates, generated from Cargo.lock with
-# flatpak-cargo-generator) sits next to this file.
+# The vendor archive is a `cargo vendor` tarball (a `cargo/config` source
+# replacement plus `cargo/vendor/<crate>`), built with
+# scripts/build-cargo-vendor.sh and attached to each GitHub release by
+# release.yml. Flathub's external data checker bumps its url/sha256 along with
+# the app's tag.
 #
 # The meson modules force `libdir=lib` in the long `--libdir` spelling. meson's
 # default libdir inside the SDK is `lib64`, which is neither where the later
@@ -248,4 +253,14 @@ modules:
           type: git
           tag-pattern: ^v([\d.]+)$
           is-main-source: true
-      - cargo-sources.json
+      # BEGIN CARGO VENDOR SOURCE
+      - type: archive
+        url: https://github.com/Lolle2000la/Media-Sort/releases/download/v3.0.1/cargo-vendor.tar.gz
+        sha256: 2a83c0803221386ac4ac94b6354ac3ad70ea220eac346fcef32568e05c7a21c7
+        strip-components: 0
+        x-checker-data:
+          type: github
+          repo: Lolle2000la/Media-Sort
+          tag-pattern: ^v([\d.]+)$
+          asset-name: cargo-vendor.tar.gz
+      # END CARGO VENDOR SOURCE
