@@ -1624,7 +1624,7 @@ fn test_document_loaded_ignores_stale_and_caches_valid() {
     let _ = update(
         &mut state,
         Message::Media(MediaMessage::DocumentLoaded {
-            path: other,
+            path: other.clone(),
             page_index: 1,
             result: Ok(DocumentPreview::PlainText {
                 text: "wrong".into(),
@@ -1634,21 +1634,23 @@ fn test_document_loaded_ignores_stale_and_caches_valid() {
     );
     assert!(state.document.loading);
     assert!(state.document.data.is_none());
+    assert!(!state.cache.document_cache.contains(&(other, 1)));
 
-    // Stale page index
+    // Background page for same document caches without clobbering active loading state
     let _ = update(
         &mut state,
         Message::Media(MediaMessage::DocumentLoaded {
             path: doc.clone(),
             page_index: 0,
             result: Ok(DocumentPreview::PlainText {
-                text: "stale page".into(),
+                text: "prefetched page".into(),
                 truncated: false,
             }),
         }),
     );
     assert!(state.document.loading);
     assert!(state.document.data.is_none());
+    assert!(state.cache.document_cache.contains(&(doc.clone(), 0)));
 
     // Matching response updates state and populates cache
     let _ = update(
@@ -1672,21 +1674,22 @@ fn test_document_loaded_ignores_stale_and_caches_valid() {
 
 #[test]
 fn test_document_prev_next_page_and_sheet_navigation() {
+    use crate::state::document::DocumentPreviewData;
     use media_sort_backend::media::DecodedImage;
     use media_sort_backend::media::document::{DocumentPreview, SheetData, SlideData};
 
     let mut state = AppState::new(SettingsStore::default());
     let doc = PathBuf::from("/test/sample.pdf");
-    let page0 = DocumentPreview::PagedImage {
+    let page0 = DocumentPreviewData::from_backend(&DocumentPreview::PagedImage {
         image: DecodedImage::new(2, 2, vec![255; 16]),
         page_index: 0,
         total_pages: 2,
-    };
-    let page1 = DocumentPreview::PagedImage {
+    });
+    let page1 = DocumentPreviewData::from_backend(&DocumentPreview::PagedImage {
         image: DecodedImage::new(2, 2, vec![0; 16]),
         page_index: 1,
         total_pages: 2,
-    };
+    });
     state
         .cache
         .document_cache
@@ -1694,9 +1697,7 @@ fn test_document_prev_next_page_and_sheet_navigation() {
     state.cache.document_cache.push((doc.clone(), 1), page1);
     state.document.current_path = Some(doc.clone());
     state.document.page_index = 0;
-    state.document.data = Some(crate::state::document::DocumentPreviewData::from_backend(
-        &page0,
-    ));
+    state.document.data = Some(page0);
 
     let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
     assert_eq!(state.document.page_index, 1);
@@ -1886,23 +1887,23 @@ fn test_settings_toggle_show_documents_by_default() {
 
 #[test]
 fn test_settings_toggle_libreoffice_preview_clears_cache_and_reloads() {
+    use crate::state::document::DocumentPreviewData;
     use media_sort_backend::media::document::DocumentPreview;
 
     let mut state = AppState::new(SettingsStore::default());
     let doc = PathBuf::from("/test/report.docx");
-    let preview = DocumentPreview::PlainText {
+    let preview = DocumentPreviewData::from_backend(&DocumentPreview::PlainText {
         text: "cached".into(),
         truncated: false,
-    };
+    });
     state
         .cache
         .document_cache
         .push((doc.clone(), 1), preview.clone());
-    state.document.current_path = Some(doc);
+    state.document.current_path = Some(doc.clone());
     state.document.page_index = 1;
-    state.document.data = Some(crate::state::document::DocumentPreviewData::from_backend(
-        &preview,
-    ));
+    state.document.data = Some(preview);
+    state.document.in_flight_pages.insert((doc.clone(), 2));
 
     let _ = update(
         &mut state,
@@ -1913,6 +1914,159 @@ fn test_settings_toggle_libreoffice_preview_clears_cache_and_reloads() {
     assert!(state.cache.document_cache.is_empty());
     assert!(state.document.loading);
     assert!(state.document.data.is_none());
+    assert!(!state.document.in_flight_pages.contains(&(doc.clone(), 2)));
+    assert!(state.document.in_flight_pages.contains(&(doc, 1)));
+}
+
+#[test]
+fn test_document_prefetch_loaded_caches_without_clobbering_and_next_page_is_instant() {
+    use crate::state::document::DocumentPreviewData;
+    use media_sort_backend::media::DecodedImage;
+    use media_sort_backend::media::document::DocumentPreview;
+
+    let mut state = AppState::new(SettingsStore::default());
+    let doc = PathBuf::from("/test/multi.pdf");
+    state.document.current_path = Some(doc.clone());
+    state.document.page_index = 0;
+    state.document.loading = true;
+    state.document.in_flight_pages.insert((doc.clone(), 0));
+
+    let page0 = DocumentPreview::PagedImage {
+        image: DecodedImage::new(2, 2, vec![10; 16]),
+        page_index: 0,
+        total_pages: 3,
+    };
+    let page1 = DocumentPreview::PagedImage {
+        image: DecodedImage::new(2, 2, vec![20; 16]),
+        page_index: 1,
+        total_pages: 3,
+    };
+
+    // Active page 0 finishes: populates cache, updates active view, and prefetches page 1.
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLoaded {
+            path: doc.clone(),
+            page_index: 0,
+            result: Ok(page0),
+        }),
+    );
+    assert!(!state.document.loading);
+    assert_eq!(state.document.page_index, 0);
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::PagedImage {
+            page_index: 0,
+            total_pages: 3,
+            ..
+        })
+    ));
+    assert!(!state.document.in_flight_pages.contains(&(doc.clone(), 0)));
+    assert!(state.document.in_flight_pages.contains(&(doc.clone(), 1)));
+    assert!(!state.document.in_flight_pages.contains(&(doc.clone(), 2)));
+
+    // Simulate a separate active load flag to confirm background prefetch leaves loading/data untouched.
+    state.document.loading = true;
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLoaded {
+            path: doc.clone(),
+            page_index: 1,
+            result: Ok(page1),
+        }),
+    );
+    assert!(state.document.loading);
+    assert_eq!(state.document.page_index, 0);
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::PagedImage { page_index: 0, .. })
+    ));
+    assert!(!state.document.in_flight_pages.contains(&(doc.clone(), 1)));
+    assert!(state.cache.document_cache.contains(&(doc.clone(), 1)));
+
+    // Background prefetch error for another page must not overwrite the active view.
+    state.document.in_flight_pages.insert((doc.clone(), 2));
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLoaded {
+            path: doc.clone(),
+            page_index: 2,
+            result: Err("background error".into()),
+        }),
+    );
+    assert!(!state.document.in_flight_pages.contains(&(doc.clone(), 2)));
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::PagedImage { page_index: 0, .. })
+    ));
+
+    // Pressing Next hits the prefetched cache entry instantaneously and prefetches page 2.
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert_eq!(state.document.page_index, 1);
+    assert!(!state.document.loading);
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::PagedImage {
+            page_index: 1,
+            total_pages: 3,
+            ..
+        })
+    ));
+    assert!(state.document.in_flight_pages.contains(&(doc, 2)));
+}
+
+#[test]
+fn test_document_select_cache_hit_and_non_document_resets_in_flight() {
+    use crate::state::document::DocumentPreviewData;
+    use media_sort_backend::media::DecodedImage;
+    use media_sort_backend::media::document::DocumentPreview;
+
+    let mut state = AppState::new(SettingsStore::default());
+    let doc = PathBuf::from("/test/book.pdf");
+    let img = PathBuf::from("/test/photo.jpg");
+    state.media_grid.entries = vec![
+        MediaEntry {
+            path: doc.clone(),
+            media_type: MediaType::Document,
+            file_name: "book.pdf".into(),
+            animated: None,
+        },
+        MediaEntry {
+            path: img,
+            media_type: MediaType::Image,
+            file_name: "photo.jpg".into(),
+            animated: None,
+        },
+    ];
+    state.media_grid.rebuild_lower_names();
+
+    let page0 = DocumentPreviewData::from_backend(&DocumentPreview::PagedImage {
+        image: DecodedImage::new(2, 2, vec![42; 16]),
+        page_index: 0,
+        total_pages: 3,
+    });
+    state.cache.document_cache.push((doc.clone(), 0), page0);
+
+    // Selecting cached document resolves immediately and triggers adjacent prefetch for page 1.
+    let _ = update(&mut state, Message::Media(MediaMessage::SelectEntry(0)));
+    assert_eq!(state.document.current_path.as_ref(), Some(&doc));
+    assert!(!state.document.loading);
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::PagedImage { page_index: 0, .. })
+    ));
+    assert!(state.document.in_flight_pages.contains(&(doc.clone(), 1)));
+
+    // Navigating to in-flight page 1 marks loading while reusing existing in-flight entry.
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert_eq!(state.document.page_index, 1);
+    assert!(state.document.loading);
+    assert!(state.document.in_flight_pages.contains(&(doc, 1)));
+
+    // Selecting an image resets document state including in_flight_pages.
+    let _ = update(&mut state, Message::Media(MediaMessage::SelectEntry(1)));
+    assert!(state.document.current_path.is_none());
+    assert!(state.document.in_flight_pages.is_empty());
 }
 
 mod filesystem_watcher;

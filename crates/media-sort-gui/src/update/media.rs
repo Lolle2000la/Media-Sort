@@ -512,40 +512,44 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             page_index,
             result,
         } => {
-            if state.document.current_path.as_ref() != Some(&path)
-                || state.document.page_index != page_index
-            {
+            state
+                .document
+                .in_flight_pages
+                .remove(&(path.clone(), page_index));
+            if state.document.current_path.as_ref() != Some(&path) {
                 return Task::none();
             }
+            if page_index != state.document.page_index {
+                if let Ok(preview) = result {
+                    let actual_page = actual_page_from_preview(&preview, page_index);
+                    let data = crate::state::document::DocumentPreviewData::from_backend(&preview);
+                    state.cache.document_cache.push((path, actual_page), data);
+                }
+                return Task::none();
+            }
+
             state.document.loading = false;
             match result {
                 Ok(preview) => {
-                    let actual_page = match &preview {
-                        media_sort_backend::media::document::DocumentPreview::PagedImage {
-                            page_index,
-                            ..
-                        } => Some(*page_index),
-                        media_sort_backend::media::document::DocumentPreview::Markdown {
-                            chapter_index,
-                            ..
-                        } => *chapter_index,
-                        _ => None,
-                    };
-                    if let Some(actual) = actual_page {
-                        state.document.page_index = actual;
-                        state
-                            .cache
-                            .document_cache
-                            .push((path, actual), preview.clone());
-                    } else {
-                        state
-                            .cache
-                            .document_cache
-                            .push((path, page_index), preview.clone());
+                    let actual_page = actual_page_from_preview(&preview, page_index);
+                    let data = crate::state::document::DocumentPreviewData::from_backend(&preview);
+                    let total_pages = super::tasks::document_total_pages(&data);
+                    state
+                        .cache
+                        .document_cache
+                        .push((path.clone(), actual_page), data.clone());
+                    state.document.page_index = actual_page;
+                    state.document.data = Some(data);
+                    if let Some(total) = total_pages
+                        && total > 1
+                    {
+                        return super::tasks::prefetch_adjacent_document_pages(
+                            state,
+                            &path,
+                            actual_page,
+                            total,
+                        );
                     }
-                    state.document.data = Some(
-                        crate::state::document::DocumentPreviewData::from_backend(&preview),
-                    );
                 }
                 Err(err) => {
                     tracing::error!("Failed to load document preview: {err}");
@@ -582,6 +586,21 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
     }
 }
 
+fn actual_page_from_preview(
+    preview: &media_sort_backend::media::document::DocumentPreview,
+    fallback_page: usize,
+) -> usize {
+    use media_sort_backend::media::document::DocumentPreview;
+    match preview {
+        DocumentPreview::PagedImage { page_index, .. } => *page_index,
+        DocumentPreview::Markdown {
+            chapter_index: Some(chapter),
+            ..
+        } => *chapter,
+        _ => fallback_page,
+    }
+}
+
 fn navigate_document_page(state: &mut AppState, forward: bool) -> Task<Message> {
     use crate::state::document::DocumentPreviewData;
 
@@ -605,13 +624,13 @@ fn navigate_document_page(state: &mut AppState, forward: bool) -> Task<Message> 
     let Some(path) = state.document.current_path.clone() else {
         return Task::none();
     };
-    let total = match &state.document.data {
-        Some(DocumentPreviewData::PagedImage { total_pages, .. }) => *total_pages,
-        Some(DocumentPreviewData::Markdown {
-            total_chapters: Some(total),
-            ..
-        }) => *total,
-        _ => return Task::none(),
+    let Some(total) = state
+        .document
+        .data
+        .as_ref()
+        .and_then(super::tasks::document_total_pages)
+    else {
+        return Task::none();
     };
     if total == 0 {
         return Task::none();
@@ -633,15 +652,23 @@ fn navigate_document_page(state: &mut AppState, forward: bool) -> Task<Message> 
         .cloned()
     {
         state.document.loading = false;
-        state.document.data = Some(DocumentPreviewData::from_backend(&cached));
-        Task::none()
+        state.document.data = Some(cached);
+        super::tasks::prefetch_adjacent_document_pages(state, &path, new_page, total)
     } else {
         state.document.loading = true;
-        super::tasks::load_document_preview_task(
-            path,
-            new_page,
-            state.settings.advanced.enable_libreoffice_preview,
-        )
+        if state
+            .document
+            .in_flight_pages
+            .insert((path.clone(), new_page))
+        {
+            super::tasks::load_document_preview_task(
+                path,
+                new_page,
+                state.settings.advanced.enable_libreoffice_preview,
+            )
+        } else {
+            Task::none()
+        }
     }
 }
 

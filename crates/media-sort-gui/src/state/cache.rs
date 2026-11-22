@@ -3,8 +3,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use lru::LruCache;
-use media_sort_backend::media::document::DocumentPreview;
 
+use super::document::DocumentPreviewData;
 use super::media_errors::MediaErrorTracker;
 use crate::subscriptions::thumbnail_tracker::ThumbnailVisibilityTracker;
 
@@ -12,7 +12,7 @@ pub struct CacheState {
     pub selected_image: Option<(PathBuf, iced::widget::image::Handle)>,
     pub thumbnail_cache: LruCache<PathBuf, iced::widget::image::Handle>,
     pub image_cache: LruCache<PathBuf, iced::widget::image::Handle>,
-    pub document_cache: LruCache<(PathBuf, usize), DocumentPreview>,
+    pub document_cache: LruCache<(PathBuf, usize), DocumentPreviewData>,
     pub thumbnail_tracker: ThumbnailVisibilityTracker,
     pub media_errors: MediaErrorTracker,
 }

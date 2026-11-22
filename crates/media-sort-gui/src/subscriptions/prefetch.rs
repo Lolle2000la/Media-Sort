@@ -1,4 +1,4 @@
-use media_sort_core::media_type::MediaType;
+use media_sort_core::media_type::{DocumentKind, MediaType};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -7,7 +7,14 @@ use tracing;
 type ThumbnailResult = Result<(u32, u32, Vec<u8>), ThumbnailError>;
 type VideoThumbnailRequest = (PathBuf, std::sync::mpsc::Sender<ThumbnailResult>);
 type DocumentThumbnailResult = Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError>;
-type DocumentThumbnailRequest = (PathBuf, std::sync::mpsc::Sender<DocumentThumbnailResult>);
+type KeepPredicate = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+struct DocumentThumbnailRequest {
+    path: PathBuf,
+    enable_libreoffice: bool,
+    should_keep: Option<KeepPredicate>,
+    response: std::sync::mpsc::Sender<DocumentThumbnailResult>,
+}
 
 const THUMBNAIL_SIZE: u32 = 128;
 
@@ -40,6 +47,7 @@ const THUMBNAIL_QUEUE_CAPACITY: usize = 256;
 const FFMPEG_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MPV_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const DOCUMENT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const OFFICE_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// How long a producer may block on the bounded worker-pool queue before
 /// giving up. A scroll-storm can fill the 256-slot queue; without this cap
 /// a request would block indefinitely while every worker is busy.
@@ -156,19 +164,13 @@ static FFMPEG_THUMBNAIL_WORKER: LazyLock<
     std::sync::Mutex::new(tx)
 });
 
-// Bounded document thumbnail worker pool — handles PDFs, comic archives, EPUB
-// covers, and Office embedded/OS thumbnails without overloading CPU/RAM on large
-// folders.
-static DOCUMENT_THUMBNAIL_WORKER: LazyLock<
-    std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
-> = LazyLock::new(|| {
+fn spawn_document_thumbnail_pool(
+    num_workers: usize,
+    pool_name: &'static str,
+) -> std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>> {
     let (tx, rx) =
         std::sync::mpsc::sync_channel::<DocumentThumbnailRequest>(THUMBNAIL_QUEUE_CAPACITY);
     let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
-    let num_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(2, 4);
 
     for i in 0..num_workers {
         let rx = rx.clone();
@@ -178,57 +180,109 @@ static DOCUMENT_THUMBNAIL_WORKER: LazyLock<
                     let guard = rx.lock().unwrap();
                     guard.recv().ok()
                 };
-                let Some((path, response)) = request else {
+                let Some(req) = request else {
                     break;
                 };
-                let result = match media_sort_backend::media::document::generate_document_thumbnail(
-                    &path,
+                if let Some(ref keep) = req.should_keep
+                    && !keep()
+                {
+                    let _ = req.response.send(Ok(None));
+                    continue;
+                }
+                let result = match media_sort_backend::media::document::generate_document_thumbnail_with_options(
+                    &req.path,
                     THUMBNAIL_SIZE,
                     THUMBNAIL_SIZE,
+                    req.enable_libreoffice,
                 ) {
                     Ok(opt) => Ok(opt.map(|d| d.into_parts())),
                     Err(e) => Err(ThumbnailError::Decode(format!(
                         "Document thumbnail error: {e}"
                     ))),
                 };
-                if response.send(result).is_err() {
+                if req.response.send(result).is_err() {
                     tracing::debug!(
-                        "Document thumbnail worker {i}: response channel closed for {}",
-                        path.display()
+                        "{pool_name} {i}: response channel closed for {}",
+                        req.path.display()
                     );
                 }
             }
         });
     }
     std::sync::Mutex::new(tx)
+}
+
+// Bounded document thumbnail worker pool — handles fast document formats (PDF,
+// comic archives, EPUB covers, Markdown/plain text) without overloading CPU/RAM
+// on large folders.
+static DOCUMENT_THUMBNAIL_WORKER: LazyLock<
+    std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
+> = LazyLock::new(|| {
+    let num_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 4);
+    spawn_document_thumbnail_pool(num_workers, "Document thumbnail worker")
 });
+
+// Dedicated Office/spreadsheet thumbnail worker pool (2 threads) so slow
+// LibreOffice conversions cannot starve fast PDF/CBZ/EPUB thumbnails.
+static OFFICE_THUMBNAIL_WORKER: LazyLock<
+    std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
+> = LazyLock::new(|| spawn_document_thumbnail_pool(2, "Office thumbnail worker"));
 
 fn generate_document_thumbnail_queued(
     path: &std::path::Path,
-) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
-    let (response_tx, response_rx) = std::sync::mpsc::channel();
-    let sender = DOCUMENT_THUMBNAIL_WORKER
-        .lock()
-        .expect("DOCUMENT_THUMBNAIL_WORKER lock is not poisoned")
-        .clone();
-    if send_with_timeout(
-        &sender,
-        (path.to_path_buf(), response_tx),
-        THUMBNAIL_QUEUE_SEND_TIMEOUT,
-    )
-    .is_err()
+    enable_libreoffice: bool,
+    should_keep: Option<KeepPredicate>,
+) -> DocumentThumbnailResult {
+    if let Some(ref keep) = should_keep
+        && !keep()
     {
-        return Err(ThumbnailError::transient(
-            "failed to queue document thumbnail request",
-        ));
+        return Ok(None);
     }
-    match response_rx.recv_timeout(DOCUMENT_RESPONSE_TIMEOUT) {
+
+    let is_office = matches!(
+        DocumentKind::from_path(path),
+        Some(DocumentKind::Office | DocumentKind::Spreadsheet)
+    );
+    let (pool, timeout, label): (
+        &std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
+        std::time::Duration,
+        &'static str,
+    ) = if is_office {
+        (&OFFICE_THUMBNAIL_WORKER, OFFICE_RESPONSE_TIMEOUT, "office")
+    } else {
+        (
+            &DOCUMENT_THUMBNAIL_WORKER,
+            DOCUMENT_RESPONSE_TIMEOUT,
+            "document",
+        )
+    };
+
+    let (response_tx, response_rx) = std::sync::mpsc::channel();
+    let sender = pool
+        .lock()
+        .unwrap_or_else(|e| panic!("{label} thumbnail worker lock poisoned: {e}"))
+        .clone();
+    let request = DocumentThumbnailRequest {
+        path: path.to_path_buf(),
+        enable_libreoffice,
+        should_keep,
+        response: response_tx,
+    };
+    if send_with_timeout(&sender, request, THUMBNAIL_QUEUE_SEND_TIMEOUT).is_err() {
+        return Err(ThumbnailError::transient(format!(
+            "failed to queue {label} thumbnail request"
+        )));
+    }
+    match response_rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ThumbnailError::transient(format!(
-            "document thumbnail request timed out after {DOCUMENT_RESPONSE_TIMEOUT:?}"
+            "{label} thumbnail request timed out after {timeout:?}"
         ))),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ThumbnailError::transient(
-            "document thumbnail worker pool disconnected",
+            format!("{label} thumbnail worker pool disconnected"),
         )),
     }
 }
@@ -276,11 +330,39 @@ fn is_gif_path(path: &std::path::Path) -> bool {
 /// currently only an audio file without embedded cover art. That is a normal,
 /// playable file, not a failure, so it is surfaced as a no-op
 /// (`MediaMessage::ThumbnailCancelled`) rather than `ThumbnailError::Decode`.
+#[allow(dead_code)]
 pub fn generate_thumbnail(
     path: &std::path::Path,
     media_type: MediaType,
-    _animated: Option<bool>,
+    animated: Option<bool>,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
+    generate_thumbnail_with_options(path, media_type, animated, true, None)
+}
+
+/// Generate a thumbnail for the given file with document preview options and an
+/// optional viewport-visibility predicate (`should_keep`).
+///
+/// Office and spreadsheet documents are dispatched onto the dedicated
+/// `OFFICE_THUMBNAIL_WORKER` pool so slow LibreOffice conversions do not block
+/// PDF/comic/EPUB thumbnails on `DOCUMENT_THUMBNAIL_WORKER`. When `should_keep`
+/// returns `false`, queued work is aborted cleanly with `Ok(None)`.
+pub fn generate_thumbnail_with_options(
+    path: &std::path::Path,
+    media_type: MediaType,
+    _animated: Option<bool>,
+    enable_libreoffice: bool,
+    should_keep: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
+    if media_type == MediaType::Document {
+        return generate_document_thumbnail_queued(path, enable_libreoffice, should_keep);
+    }
+
+    if let Some(ref keep) = should_keep
+        && !keep()
+    {
+        return Ok(None);
+    }
+
     if media_type == MediaType::Audio {
         return media_sort_backend::media::thumbnail::generate_thumbnail(
             path,
@@ -289,10 +371,6 @@ pub fn generate_thumbnail(
         )
         .map(|opt| opt.map(|d| d.into_parts()))
         .map_err(|e| ThumbnailError::Decode(format!("Audio cover thumbnail error: {e}")));
-    }
-
-    if media_type == MediaType::Document {
-        return generate_document_thumbnail_queued(path);
     }
 
     if media_type == MediaType::Video && !is_gif_path(path) {
@@ -626,5 +704,38 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_generate_thumbnail_with_options_cancelled_returns_ok_none() {
+        let path = std::path::PathBuf::from("/nonexistent/report.docx");
+        let cancel: std::sync::Arc<dyn Fn() -> bool + Send + Sync> = std::sync::Arc::new(|| false);
+        let result =
+            generate_thumbnail_with_options(&path, MediaType::Document, None, true, Some(cancel));
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn test_office_thumbnail_worker_skips_when_cancelled_in_queue() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // First call (pre-queue) returns true so the job enters OFFICE_THUMBNAIL_WORKER;
+        // second call (inside the worker after recv) returns false so LibreOffice is skipped.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let cancel_in_worker: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || calls_clone.fetch_add(1, Ordering::SeqCst) == 0);
+
+        let path = std::path::PathBuf::from("/nonexistent/slides.pptx");
+        let result = generate_thumbnail_with_options(
+            &path,
+            MediaType::Document,
+            None,
+            true,
+            Some(cancel_in_worker),
+        );
+        assert!(matches!(result, Ok(None)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

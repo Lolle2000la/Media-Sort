@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{Read, Seek};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use media_sort_core::media_type::DocumentKind;
 
@@ -12,6 +14,7 @@ pub mod epub;
 pub mod office;
 pub mod os_preview;
 pub mod pdf;
+pub mod poppler_pipe;
 pub mod soffice_pipe;
 pub mod text;
 
@@ -32,8 +35,8 @@ pub(crate) const MAX_SHEET_COLS: usize = 64;
 /// Maximum slides parsed in the pure-Rust PPTX/ODP fallback preview.
 pub(crate) const MAX_SLIDES: usize = 100;
 /// Target preview bounding box for paged bitmap documents (PDF, comics, soffice pages).
-pub const PREVIEW_TARGET_WIDTH: u32 = 1600;
-pub const PREVIEW_TARGET_HEIGHT: u32 = 2200;
+pub const PREVIEW_TARGET_WIDTH: u32 = 1200;
+pub const PREVIEW_TARGET_HEIGHT: u32 = 1600;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocumentError {
@@ -99,24 +102,39 @@ pub enum DocumentPreview {
     },
 }
 
-/// Generates a bounded thumbnail for `path` when the document format supports an in-memory or OS
-/// thumbnail without spawning heavy external converters. Returns `Ok(None)` cleanly when no
-/// thumbnail is available (e.g. plain text, spreadsheets without embedded previews, Linux Office
-/// files without embedded thumbnails, or encrypted documents).
-pub fn generate_document_thumbnail(
+/// Generates a bounded thumbnail for `path` with explicit converter options.
+///
+/// When `enable_libreoffice` is `true`, Office/spreadsheet formats without an embedded or OS
+/// thumbnail may fall back to headless LibreOffice conversion. Returns `Ok(None)` cleanly when no
+/// thumbnail is available (e.g. plain text, spreadsheets without previews, or encrypted documents).
+pub fn generate_document_thumbnail_with_options(
     path: &Path,
     max_width: u32,
     max_height: u32,
+    enable_libreoffice: bool,
 ) -> Result<Option<DecodedImage>, DocumentError> {
     match DocumentKind::from_path(path) {
         Some(DocumentKind::Pdf) => pdf::render_pdf_thumbnail(path, max_width, max_height),
         Some(DocumentKind::Comic) => comic::extract_comic_thumbnail(path, max_width, max_height),
         Some(DocumentKind::Epub) => epub::extract_epub_thumbnail(path, max_width, max_height),
         Some(DocumentKind::Office) | Some(DocumentKind::Spreadsheet) => {
-            office::extract_office_thumbnail(path, max_width, max_height)
+            office::extract_office_thumbnail(path, max_width, max_height, enable_libreoffice)
         }
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) | None => Ok(None),
     }
+}
+
+/// Generates a bounded thumbnail for `path` using default converter options
+/// (`enable_libreoffice = true`).
+///
+/// Returns `Ok(None)` cleanly when no thumbnail is available (e.g. plain text, spreadsheets without
+/// previews, or encrypted documents).
+pub fn generate_document_thumbnail(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+) -> Result<Option<DecodedImage>, DocumentError> {
+    generate_document_thumbnail_with_options(path, max_width, max_height, true)
 }
 
 /// Loads the interactive preview payload for a document at `page_index` (used for PDF pages,
@@ -334,4 +352,270 @@ pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
 fn trim_leading_zeros(bytes: &[u8]) -> &[u8] {
     let first_non_zero = bytes.iter().position(|&b| b != b'0').unwrap_or(bytes.len());
     &bytes[first_non_zero..]
+}
+
+/// Cache key identifying a specific version of a canonicalized file on disk.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalFileKey {
+    pub(crate) path: PathBuf,
+    pub(crate) file_len: u64,
+    pub(crate) modified_nanos: u64,
+}
+
+impl CanonicalFileKey {
+    pub(crate) fn from_canonical_and_meta(path: PathBuf, meta: &std::fs::Metadata) -> Self {
+        let modified_nanos = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        Self {
+            path,
+            file_len: meta.len(),
+            modified_nanos,
+        }
+    }
+}
+
+/// Returns `true` when the raw path starts with `-` and could be misinterpreted as a CLI option.
+pub(crate) fn path_starts_with_dash(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        path.as_os_str().as_bytes().first() == Some(&b'-')
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        path.as_os_str().encode_wide().next() == Some(u16::from(b'-'))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        path.to_str().is_some_and(|s| s.starts_with('-'))
+    }
+}
+
+/// Scans `PATH` for the first matching regular file among `names`.
+pub(crate) fn find_executable_on_path(names: &[&str]) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Creates a `Command` that suppresses console window creation on Windows.
+pub(crate) fn new_hidden_command(program: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+pub(crate) struct CappedCommandOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) stdout_truncated: bool,
+}
+
+/// Spawns `cmd` with `Stdio::null()` stdin, capped stdout/stderr capture threads, and a hard
+/// `timeout` (killing and reaping the child process if exceeded).
+pub(crate) fn run_command_capped(
+    cmd: &mut Command,
+    timeout: Duration,
+    max_stdout_bytes: u64,
+    max_stderr_bytes: u64,
+    tool_label: &str,
+) -> Result<CappedCommandOutput, DocumentError> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|r| spawn_capped_drain(r, max_stdout_bytes));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|r| spawn_capped_drain(r, max_stderr_bytes));
+
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(DocumentError::Message(format!(
+                    "{tool_label} timed out after {}s",
+                    timeout.as_secs()
+                )));
+            }
+            None => {
+                let elapsed = started.elapsed();
+                let sleep_ms = if elapsed < Duration::from_millis(20) {
+                    1
+                } else if elapsed < Duration::from_millis(200) {
+                    5
+                } else {
+                    15
+                };
+                std::thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }
+    };
+
+    let (stdout, stdout_truncated) = stdout_thread
+        .and_then(|t| t.join().ok())
+        .unwrap_or_default();
+    let (stderr, _) = stderr_thread
+        .and_then(|t| t.join().ok())
+        .unwrap_or_default();
+
+    Ok(CappedCommandOutput {
+        status,
+        stdout,
+        stderr,
+        stdout_truncated,
+    })
+}
+
+fn spawn_capped_drain<R: Read + Send + 'static>(
+    reader: R,
+    max_bytes: u64,
+) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut buf);
+        let truncated = (buf.len() as u64) > max_bytes;
+        if truncated {
+            buf.truncate(usize::try_from(max_bytes).unwrap_or(usize::MAX));
+        }
+        (buf, truncated)
+    })
+}
+
+/// Canonicalizes `path` and converts it to a percent-encoded `file://` URI.
+pub(crate) fn path_to_file_url(path: &Path) -> Result<String, DocumentError> {
+    let canon = std::fs::canonicalize(path)?;
+    Ok(canonical_path_to_file_url(&canon))
+}
+
+/// Converts an already-canonicalized path to a percent-encoded `file://` URI.
+pub(crate) fn canonical_path_to_file_url(canon: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let raw = canon.to_string_lossy();
+        format_file_url(&raw, true)
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            format_unix_file_url(canon.as_os_str().as_bytes())
+        }
+        #[cfg(not(unix))]
+        {
+            let raw = canon.to_string_lossy();
+            format_file_url(&raw, false)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn format_unix_file_url(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity("file://".len() + bytes.len());
+    out.push_str("file://");
+    percent_encode_bytes(bytes, false, &mut out);
+    out
+}
+
+#[cfg(any(not(unix), test))]
+fn format_file_url(raw: &str, is_windows: bool) -> String {
+    let mut out = String::with_capacity("file:///".len() + raw.len());
+    if is_windows {
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            out.push_str("file://");
+            let normalized = unc.replace('\\', "/");
+            percent_encode_bytes(normalized.as_bytes(), false, &mut out);
+            return out;
+        }
+        let stripped = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+        let normalized = stripped.replace('\\', "/");
+        if normalized.starts_with("//") {
+            out.push_str("file:");
+        } else if normalized.starts_with('/') {
+            out.push_str("file://");
+        } else {
+            out.push_str("file:///");
+        }
+        percent_encode_bytes(normalized.as_bytes(), true, &mut out);
+    } else {
+        out.push_str("file://");
+        if !raw.starts_with('/') {
+            out.push('/');
+        }
+        percent_encode_bytes(raw.as_bytes(), false, &mut out);
+    }
+    out
+}
+
+fn percent_encode_bytes(bytes: &[u8], allow_colon: bool, out: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &b in bytes {
+        let keep = b.is_ascii_alphanumeric()
+            || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~')
+            || (allow_colon && b == b':');
+        if keep {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[(b >> 4) as usize]));
+            out.push(char::from(HEX[(b & 0x0F) as usize]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_unix_and_windows_file_urls() {
+        assert_eq!(
+            format_file_url("/tmp/my dir/profile", false),
+            "file:///tmp/my%20dir/profile"
+        );
+        assert_eq!(
+            format_file_url(r"\\?\C:\Users\John Doe\Temp\profile", true),
+            "file:///C:/Users/John%20Doe/Temp/profile"
+        );
+        assert_eq!(
+            format_file_url(r"\\?\UNC\server\share\profile", true),
+            "file://server/share/profile"
+        );
+    }
+
+    #[test]
+    fn detects_leading_dash_paths() {
+        assert!(path_starts_with_dash(Path::new("-flag.docx")));
+        assert!(!path_starts_with_dash(Path::new("/tmp/-flag.docx")));
+    }
 }

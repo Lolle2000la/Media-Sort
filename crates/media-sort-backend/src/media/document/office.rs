@@ -19,14 +19,18 @@ use super::{
 const MAX_SHEETS: usize = 32;
 const CFB_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
-/// Extracts a bounded thumbnail for Office or spreadsheet documents without invoking LibreOffice.
+/// Extracts a bounded thumbnail for Office or spreadsheet documents.
 ///
 /// Checks embedded archive thumbnails first (`Thumbnails/thumbnail.png`, `docProps/thumbnail.*`),
-/// then falls back to the platform OS thumbnail provider (`os_preview::generate_os_thumbnail`).
+/// then falls back to the platform OS thumbnail provider (`os_preview::generate_os_thumbnail`),
+/// and finally (when `enable_libreoffice` is enabled) converts via LibreOffice to a cached PDF
+/// and renders page 0. Errors are logged at debug level and converted to `Ok(None)` so missing or
+/// unsupported Office thumbnails never pollute `media_errors`.
 pub fn extract_office_thumbnail(
     path: &Path,
     max_width: u32,
     max_height: u32,
+    enable_libreoffice: bool,
 ) -> Result<Option<DecodedImage>, DocumentError> {
     let max_width = max_width.max(1);
     let max_height = max_height.max(1);
@@ -40,7 +44,44 @@ pub fn extract_office_thumbnail(
         return Ok(Some(img));
     }
 
-    os_preview::generate_os_thumbnail(path, max_width, max_height)
+    match os_preview::generate_os_thumbnail(path, max_width, max_height) {
+        Ok(Some(img)) => return Ok(Some(img)),
+        Ok(None) => {}
+        Err(err) => {
+            tracing::debug!(
+                path = %path.display(),
+                error = %err,
+                "OS thumbnail lookup failed for Office document"
+            );
+        }
+    }
+
+    if enable_libreoffice && soffice_pipe::is_libreoffice_available() {
+        match soffice_pipe::convert_to_pdf_path(path) {
+            Ok(Some(pdf_path)) => match pdf::render_pdf_thumbnail(&pdf_path, max_width, max_height)
+            {
+                Ok(img) => return Ok(img),
+                Err(err) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        pdf_path = %pdf_path.display(),
+                        error = %err,
+                        "Failed to render PDF thumbnail from LibreOffice output"
+                    );
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "LibreOffice conversion failed while generating Office thumbnail"
+                );
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn extract_embedded_zip_thumbnail(
@@ -159,40 +200,33 @@ pub fn load_spreadsheet_preview(path: &Path) -> Result<DocumentPreview, Document
 
 /// Loads an Office document preview.
 ///
-/// When `enable_libreoffice` is enabled and LibreOffice is available, converts the document to PDF
-/// bytes and renders `page_index` via `hayro`; otherwise (or on conversion failure) falls back to
-/// pure-Rust XML/RTF parsing or OS thumbnails.
+/// When `enable_libreoffice` is enabled and LibreOffice is available, converts the document to a
+/// cached PDF file and renders `page_index` via `pdf::load_pdf_preview`; otherwise (or on
+/// conversion failure) falls back to pure-Rust XML/RTF parsing or OS thumbnails.
 pub fn load_office_preview(
     path: &Path,
     page_index: usize,
     enable_libreoffice: bool,
 ) -> Result<DocumentPreview, DocumentError> {
     if enable_libreoffice && soffice_pipe::is_libreoffice_available() {
-        match soffice_pipe::convert_to_pdf_bytes(path) {
-            Ok(Some(pdf_bytes)) => {
-                match pdf::render_pdf_bytes_page(
-                    pdf_bytes,
-                    page_index,
-                    PREVIEW_TARGET_WIDTH,
-                    PREVIEW_TARGET_HEIGHT,
-                ) {
-                    Ok((image, total_pages)) => {
-                        let clamped = page_index.min(total_pages.saturating_sub(1));
-                        return Ok(DocumentPreview::PagedImage {
-                            image,
-                            page_index: clamped,
-                            total_pages,
-                        });
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %err,
-                            "Failed to render LibreOffice-converted PDF; falling back to pure-Rust parser"
-                        );
-                    }
+        match soffice_pipe::convert_to_pdf_path(path) {
+            Ok(Some(pdf_path)) => match pdf::load_pdf_preview(&pdf_path, page_index) {
+                Ok(preview @ DocumentPreview::PagedImage { .. }) => return Ok(preview),
+                Ok(other) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        preview = ?other,
+                        "LibreOffice-converted PDF produced non-paged preview; falling back to pure-Rust parser"
+                    );
                 }
-            }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "Failed to render LibreOffice-converted PDF; falling back to pure-Rust parser"
+                    );
+                }
+            },
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!(

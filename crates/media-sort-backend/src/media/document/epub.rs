@@ -1,8 +1,9 @@
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesRef, BytesStart, Event};
@@ -10,6 +11,7 @@ use quick_xml::reader::Reader;
 use zip::ZipArchive;
 use zip::result::ZipError;
 
+use super::comic::{ArchiveKey, INDEX_CACHE_CAPACITY, IndexLru, archive_key, lru_get, lru_insert};
 use super::{
     DecodedImage, DocumentError, DocumentPreview, DocumentUnavailableReason,
     MAX_ARCHIVE_ENTRY_BYTES, MAX_XML_ENTRY_BYTES, is_image_entry, sanitize_archive_rel_path,
@@ -19,6 +21,32 @@ use crate::media::format_pipeline::decode_and_resize_bytes;
 /// Cover preview dimensions attached to chapter 0 of an EPUB preview.
 const EPUB_PREVIEW_COVER_MAX_WIDTH: u32 = 320;
 const EPUB_PREVIEW_COVER_MAX_HEIGHT: u32 = 480;
+
+static EPUB_INDEX_CACHE: OnceLock<IndexLru<EpubIndex>> = OnceLock::new();
+
+fn epub_index_cache() -> &'static IndexLru<EpubIndex> {
+    EPUB_INDEX_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(INDEX_CACHE_CAPACITY)))
+}
+
+#[derive(Debug, Clone)]
+struct EpubZipTarget {
+    resolved_path: String,
+    zip_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EpubSpineChapter {
+    resolved_path: String,
+    zip_index: Option<usize>,
+    encrypted: bool,
+}
+
+#[derive(Debug)]
+struct EpubIndex {
+    cover_candidates: Vec<EpubZipTarget>,
+    metadata: BTreeMap<String, String>,
+    spine_chapters: Vec<EpubSpineChapter>,
+}
 
 #[derive(Debug, Clone)]
 struct ManifestItem {
@@ -77,6 +105,108 @@ impl EpubFailure {
     }
 }
 
+type EpubIndexLookup = (
+    ArchiveKey,
+    Arc<EpubIndex>,
+    Option<ZipArchive<BufReader<File>>>,
+);
+
+fn epub_failure_to_preview(err: EpubFailure) -> Result<DocumentPreview, DocumentError> {
+    match err {
+        EpubFailure::Encrypted => Ok(DocumentPreview::Unavailable {
+            reason: DocumentUnavailableReason::Encrypted,
+        }),
+        EpubFailure::NotFound(msg) | EpubFailure::Corrupt(msg) => {
+            Ok(DocumentPreview::Unavailable {
+                reason: DocumentUnavailableReason::UnsupportedOrCorrupt(msg),
+            })
+        }
+        EpubFailure::TooLarge(_) => Ok(DocumentPreview::Unavailable {
+            reason: DocumentUnavailableReason::TooLarge,
+        }),
+        EpubFailure::Io(io_err) => Err(DocumentError::Io(io_err)),
+    }
+}
+
+fn resolve_manifest_zip_index(
+    archive: &ZipArchive<BufReader<File>>,
+    item: &ManifestItem,
+) -> Option<usize> {
+    find_zip_entry_index(archive, &item.resolved_path).or_else(|| {
+        item.fallback_raw_path
+            .as_deref()
+            .and_then(|raw| find_zip_entry_index(archive, raw))
+    })
+}
+
+fn build_epub_index(archive: &ZipArchive<BufReader<File>>, epub: ParsedEpub) -> EpubIndex {
+    let cover_candidates = collect_cover_candidates(&epub)
+        .into_iter()
+        .filter(|item| !epub.encrypted_uris.contains(&item.resolved_path))
+        .filter_map(|item| {
+            resolve_manifest_zip_index(archive, item).map(|zip_index| EpubZipTarget {
+                resolved_path: item.resolved_path.clone(),
+                zip_index,
+            })
+        })
+        .collect();
+
+    let spine_chapters = epub
+        .spine
+        .iter()
+        .filter_map(|idref| epub.manifest.get(idref))
+        .map(|item| EpubSpineChapter {
+            resolved_path: item.resolved_path.clone(),
+            zip_index: resolve_manifest_zip_index(archive, item),
+            encrypted: epub.encrypted_uris.contains(&item.resolved_path),
+        })
+        .collect();
+
+    let mut metadata = BTreeMap::new();
+    metadata.insert("Chapters".into(), epub.spine.len().to_string());
+    if let Some(title) = epub.metadata.title {
+        metadata.insert("Title".into(), title);
+    }
+    if !epub.metadata.creators.is_empty() {
+        metadata.insert("Author".into(), epub.metadata.creators.join(", "));
+    }
+    if let Some(publisher) = epub.metadata.publisher {
+        metadata.insert("Publisher".into(), publisher);
+    }
+    if let Some(language) = epub.metadata.language {
+        metadata.insert("Language".into(), language);
+    }
+    if let Some(date) = epub.metadata.date {
+        metadata.insert("Date".into(), date);
+    }
+    if let Some(identifier) = epub.metadata.identifier {
+        metadata.insert("Identifier".into(), identifier);
+    }
+
+    EpubIndex {
+        cover_candidates,
+        metadata,
+        spine_chapters,
+    }
+}
+
+fn get_or_build_epub_index(path: &Path) -> Result<EpubIndexLookup, EpubFailure> {
+    let key = archive_key(path)?;
+    if let Some(cached) = lru_get(epub_index_cache(), &key) {
+        return Ok((key, cached, None));
+    }
+    let mut archive = open_epub_zip(&key.path)?;
+    let epub = parse_epub_package(&mut archive)?;
+    let index = Arc::new(build_epub_index(&archive, epub));
+    lru_insert(
+        epub_index_cache(),
+        INDEX_CACHE_CAPACITY,
+        key.clone(),
+        Arc::clone(&index),
+    );
+    Ok((key, index, Some(archive)))
+}
+
 /// Extracts and resizes the EPUB cover image to fit inside `max_width` × `max_height`.
 ///
 /// Missing, encrypted, or unreadable covers cleanly return `Ok(None)`.
@@ -85,21 +215,28 @@ pub fn extract_epub_thumbnail(
     max_width: u32,
     max_height: u32,
 ) -> Result<Option<DecodedImage>, DocumentError> {
-    let mut archive = match open_epub_zip(path) {
-        Ok(a) => a,
+    let (key, index, maybe_archive) = match get_or_build_epub_index(path) {
+        Ok(res) => res,
         Err(EpubFailure::Encrypted) => return Ok(None),
         Err(err) => return Err(err.into_document_error()),
     };
 
-    let epub = match parse_epub_package(&mut archive) {
-        Ok(epub) => epub,
-        Err(EpubFailure::Encrypted) => return Ok(None),
-        Err(err) => return Err(err.into_document_error()),
+    if index.cover_candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut archive = match maybe_archive {
+        Some(a) => a,
+        None => match open_epub_zip(&key.path) {
+            Ok(a) => a,
+            Err(EpubFailure::Encrypted) => return Ok(None),
+            Err(err) => return Err(err.into_document_error()),
+        },
     };
 
     Ok(try_decode_epub_cover(
         &mut archive,
-        &epub,
+        &index.cover_candidates,
         max_width,
         max_height,
     ))
@@ -108,42 +245,12 @@ pub fn extract_epub_thumbnail(
 /// Loads chapter `page_index` (clamped to the EPUB spine length) converted to Markdown,
 /// plus an optional cover image (up to `320x480`) when `page_index == 0`.
 pub fn load_epub_preview(path: &Path, page_index: usize) -> Result<DocumentPreview, DocumentError> {
-    let mut archive = match open_epub_zip(path) {
-        Ok(a) => a,
-        Err(EpubFailure::Encrypted) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::Encrypted,
-            });
-        }
-        Err(EpubFailure::Corrupt(msg)) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::UnsupportedOrCorrupt(msg),
-            });
-        }
-        Err(err) => return Err(err.into_document_error()),
+    let (key, index, maybe_archive) = match get_or_build_epub_index(path) {
+        Ok(res) => res,
+        Err(err) => return epub_failure_to_preview(err),
     };
 
-    let epub = match parse_epub_package(&mut archive) {
-        Ok(epub) => epub,
-        Err(EpubFailure::Encrypted) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::Encrypted,
-            });
-        }
-        Err(EpubFailure::NotFound(msg)) | Err(EpubFailure::Corrupt(msg)) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::UnsupportedOrCorrupt(msg),
-            });
-        }
-        Err(EpubFailure::TooLarge(_)) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::TooLarge,
-            });
-        }
-        Err(EpubFailure::Io(err)) => return Err(DocumentError::Io(err)),
-    };
-
-    if epub.spine.is_empty() {
+    if index.spine_chapters.is_empty() {
         return Ok(DocumentPreview::Unavailable {
             reason: DocumentUnavailableReason::UnsupportedOrCorrupt(
                 "EPUB spine contains no readable chapters".to_string(),
@@ -151,48 +258,48 @@ pub fn load_epub_preview(path: &Path, page_index: usize) -> Result<DocumentPrevi
         });
     }
 
-    let total_chapters = epub.spine.len();
+    let total_chapters = index.spine_chapters.len();
     let clamped = page_index.min(total_chapters - 1);
-    let idref = &epub.spine[clamped];
-    let Some(item) = epub.manifest.get(idref) else {
-        return Ok(DocumentPreview::Unavailable {
-            reason: DocumentUnavailableReason::UnsupportedOrCorrupt(
-                "EPUB spine item missing from manifest".to_string(),
-            ),
-        });
-    };
+    let chapter = &index.spine_chapters[clamped];
 
-    if epub.encrypted_uris.contains(&item.resolved_path) {
+    if chapter.encrypted {
         return Ok(DocumentPreview::Unavailable {
             reason: DocumentUnavailableReason::Encrypted,
         });
     }
 
-    let chapter_bytes = match read_manifest_entry_capped(&mut archive, item, MAX_XML_ENTRY_BYTES) {
+    let Some(zip_idx) = chapter.zip_index else {
+        return Ok(DocumentPreview::Unavailable {
+            reason: DocumentUnavailableReason::UnsupportedOrCorrupt(format!(
+                "Missing EPUB entry '{}'",
+                chapter.resolved_path
+            )),
+        });
+    };
+
+    let mut archive = match maybe_archive {
+        Some(a) => a,
+        None => match open_epub_zip(&key.path) {
+            Ok(a) => a,
+            Err(err) => return epub_failure_to_preview(err),
+        },
+    };
+
+    let chapter_bytes = match read_zip_index_capped(
+        &mut archive,
+        zip_idx,
+        &chapter.resolved_path,
+        MAX_XML_ENTRY_BYTES,
+    ) {
         Ok(bytes) => bytes,
-        Err(EpubFailure::Encrypted) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::Encrypted,
-            });
-        }
-        Err(EpubFailure::TooLarge(_)) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::TooLarge,
-            });
-        }
-        Err(EpubFailure::NotFound(msg)) | Err(EpubFailure::Corrupt(msg)) => {
-            return Ok(DocumentPreview::Unavailable {
-                reason: DocumentUnavailableReason::UnsupportedOrCorrupt(msg),
-            });
-        }
-        Err(EpubFailure::Io(err)) => return Err(DocumentError::Io(err)),
+        Err(err) => return epub_failure_to_preview(err),
     };
 
     let markdown = xhtml_to_markdown(&chapter_bytes);
-    let cover = if page_index == 0 {
+    let cover = if page_index == 0 && !index.cover_candidates.is_empty() {
         try_decode_epub_cover(
             &mut archive,
-            &epub,
+            &index.cover_candidates,
             EPUB_PREVIEW_COVER_MAX_WIDTH,
             EPUB_PREVIEW_COVER_MAX_HEIGHT,
         )
@@ -211,45 +318,15 @@ pub fn load_epub_preview(path: &Path, page_index: usize) -> Result<DocumentPrevi
 /// Extracts EPUB package metadata (`Chapters`, `Title`, `Author`, `Publisher`, `Language`,
 /// `Date`, `Identifier`) for the metadata inspector.
 pub fn extract_epub_metadata(path: &Path) -> Result<BTreeMap<String, String>, DocumentError> {
-    let mut fields = BTreeMap::new();
-    let mut archive = match open_epub_zip(path) {
-        Ok(a) => a,
+    match get_or_build_epub_index(path) {
+        Ok((_, index, _)) => Ok(index.metadata.clone()),
         Err(EpubFailure::Encrypted) => {
+            let mut fields = BTreeMap::new();
             fields.insert("Encrypted".into(), "Yes".into());
-            return Ok(fields);
+            Ok(fields)
         }
-        Err(err) => return Err(err.into_document_error()),
-    };
-
-    let epub = match parse_epub_package(&mut archive) {
-        Ok(epub) => epub,
-        Err(EpubFailure::Encrypted) => {
-            fields.insert("Encrypted".into(), "Yes".into());
-            return Ok(fields);
-        }
-        Err(err) => return Err(err.into_document_error()),
-    };
-
-    fields.insert("Chapters".into(), epub.spine.len().to_string());
-    if let Some(title) = epub.metadata.title {
-        fields.insert("Title".into(), title);
+        Err(err) => Err(err.into_document_error()),
     }
-    if !epub.metadata.creators.is_empty() {
-        fields.insert("Author".into(), epub.metadata.creators.join(", "));
-    }
-    if let Some(publisher) = epub.metadata.publisher {
-        fields.insert("Publisher".into(), publisher);
-    }
-    if let Some(language) = epub.metadata.language {
-        fields.insert("Language".into(), language);
-    }
-    if let Some(date) = epub.metadata.date {
-        fields.insert("Date".into(), date);
-    }
-    if let Some(identifier) = epub.metadata.identifier {
-        fields.insert("Identifier".into(), identifier);
-    }
-    Ok(fields)
 }
 
 // ── ZIP & package resolution helpers ──────────────────────────────────
@@ -297,16 +374,12 @@ fn find_zip_entry_index(archive: &ZipArchive<BufReader<File>>, target: &str) -> 
     ci_match
 }
 
-fn read_zip_path_capped(
+fn read_zip_index_capped(
     archive: &mut ZipArchive<BufReader<File>>,
+    idx: usize,
     entry_path: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, EpubFailure> {
-    let Some(idx) = find_zip_entry_index(archive, entry_path) else {
-        return Err(EpubFailure::NotFound(format!(
-            "Missing EPUB entry '{entry_path}'"
-        )));
-    };
     let meta = archive.by_index_data(idx).map_err(map_zip_error)?;
     if meta.encrypted() {
         return Err(EpubFailure::Encrypted);
@@ -335,21 +408,17 @@ fn read_zip_path_capped(
     Ok(buf)
 }
 
-fn read_manifest_entry_capped(
+fn read_zip_path_capped(
     archive: &mut ZipArchive<BufReader<File>>,
-    item: &ManifestItem,
+    entry_path: &str,
     max_bytes: u64,
 ) -> Result<Vec<u8>, EpubFailure> {
-    match read_zip_path_capped(archive, &item.resolved_path, max_bytes) {
-        Err(err @ EpubFailure::NotFound(_)) => {
-            if let Some(fallback) = item.fallback_raw_path.as_deref() {
-                read_zip_path_capped(archive, fallback, max_bytes)
-            } else {
-                Err(err)
-            }
-        }
-        other => other,
-    }
+    let Some(idx) = find_zip_entry_index(archive, entry_path) else {
+        return Err(EpubFailure::NotFound(format!(
+            "Missing EPUB entry '{entry_path}'"
+        )));
+    };
+    read_zip_index_capped(archive, idx, entry_path, max_bytes)
 }
 
 fn parse_epub_package(
@@ -953,15 +1022,17 @@ fn collect_cover_candidates(epub: &ParsedEpub) -> Vec<&ManifestItem> {
 
 fn try_decode_epub_cover(
     archive: &mut ZipArchive<BufReader<File>>,
-    epub: &ParsedEpub,
+    cover_candidates: &[EpubZipTarget],
     max_width: u32,
     max_height: u32,
 ) -> Option<DecodedImage> {
-    for item in collect_cover_candidates(epub) {
-        if epub.encrypted_uris.contains(&item.resolved_path) {
-            continue;
-        }
-        let Ok(bytes) = read_manifest_entry_capped(archive, item, MAX_ARCHIVE_ENTRY_BYTES) else {
+    for candidate in cover_candidates {
+        let Ok(bytes) = read_zip_index_capped(
+            archive,
+            candidate.zip_index,
+            &candidate.resolved_path,
+            MAX_ARCHIVE_ENTRY_BYTES,
+        ) else {
             continue;
         };
         if let Ok(img) = decode_and_resize_bytes(&bytes, max_width, max_height) {
@@ -1601,4 +1672,254 @@ fn resolve_html_entity(entity: &str) -> Option<&'static str> {
         _ => return None,
     };
     Some(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufWriter, Cursor, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use zip::CompressionMethod;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    use super::*;
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempTestDir(PathBuf);
+
+    impl TempTestDir {
+        fn new(prefix: &str) -> Self {
+            let id = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "media-sort-epub-{prefix}-{}-{id}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temp test dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn solid_png_bytes(r: u8, g: u8, b: u8) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([r, g, b, 255]));
+        let mut cursor = Cursor::new(Vec::new());
+        img.write_to(&mut cursor, image::ImageFormat::Png)
+            .expect("encode solid PNG");
+        cursor.into_inner()
+    }
+
+    fn write_epub_entries(path: &Path, entries: &[(&str, &[u8], CompressionMethod)]) {
+        let file = File::create(path).expect("create epub");
+        let mut writer = ZipWriter::new(BufWriter::new(file));
+        for &(name, data, method) in entries {
+            let opts = SimpleFileOptions::default().compression_method(method);
+            writer.start_file(name, opts).expect("start epub entry");
+            writer.write_all(data).expect("write epub entry");
+        }
+        writer
+            .finish()
+            .expect("finish epub")
+            .into_inner()
+            .expect("flush epub");
+    }
+
+    #[test]
+    fn epub_index_cache_hits_on_chapter_turns_and_metadata() {
+        let dir = TempTestDir::new("index_cache");
+        let epub_path = dir.path().join("book.epub");
+        let cover_png = solid_png_bytes(40, 120, 220);
+
+        let container_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+
+        let content_opf = br#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">urn:uuid:epub-cache-test</dc:identifier>
+    <dc:title>Cached Book</dc:title>
+    <dc:creator>Grace Hopper</dc:creator>
+  </metadata>
+  <manifest>
+    <item id="cover-img" href="images/cover.png" media-type="image/png" properties="cover-image"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch3" href="ch3.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+    <itemref idref="ch3"/>
+  </spine>
+</package>"#;
+
+        write_epub_entries(
+            &epub_path,
+            &[
+                (
+                    "mimetype",
+                    b"application/epub+zip",
+                    CompressionMethod::Stored,
+                ),
+                (
+                    "META-INF/container.xml",
+                    container_xml,
+                    CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/content.opf",
+                    content_opf,
+                    CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/images/cover.png",
+                    &cover_png,
+                    CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/ch1.xhtml",
+                    b"<html><body><h1>One</h1><p>First</p></body></html>",
+                    CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/ch2.xhtml",
+                    b"<html><body><h1>Two</h1><p>Second</p></body></html>",
+                    CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/ch3.xhtml",
+                    b"<html><body><h1>Three</h1><p>Third</p></body></html>",
+                    CompressionMethod::Deflated,
+                ),
+            ],
+        );
+
+        let key = archive_key(&epub_path).expect("epub key");
+        assert!(lru_get(epub_index_cache(), &key).is_none());
+
+        let ch0 = load_epub_preview(&epub_path, 0).expect("chapter 0");
+        match ch0 {
+            DocumentPreview::Markdown {
+                markdown,
+                chapter_index,
+                total_chapters,
+                cover,
+            } => {
+                assert_eq!(chapter_index, Some(0));
+                assert_eq!(total_chapters, Some(3));
+                assert!(markdown.contains("# One"));
+                assert!(cover.is_some());
+            }
+            other => panic!("expected Markdown for ch0, got {other:?}"),
+        }
+
+        let cached = lru_get(epub_index_cache(), &key).expect("epub cache populated");
+        assert_eq!(cached.spine_chapters.len(), 3);
+        assert_eq!(cached.cover_candidates.len(), 1);
+        assert_eq!(
+            cached.cover_candidates[0].resolved_path,
+            "OEBPS/images/cover.png"
+        );
+        assert_eq!(
+            cached.metadata.get("Title").map(String::as_str),
+            Some("Cached Book")
+        );
+
+        let ch1 = load_epub_preview(&epub_path, 1).expect("chapter 1");
+        match ch1 {
+            DocumentPreview::Markdown {
+                markdown,
+                chapter_index,
+                total_chapters,
+                cover,
+            } => {
+                assert_eq!(chapter_index, Some(1));
+                assert_eq!(total_chapters, Some(3));
+                assert!(markdown.contains("# Two"));
+                assert!(cover.is_none());
+            }
+            other => panic!("expected Markdown for ch1, got {other:?}"),
+        }
+
+        let ch_clamped = load_epub_preview(&epub_path, 99).expect("clamped chapter");
+        match ch_clamped {
+            DocumentPreview::Markdown {
+                markdown,
+                chapter_index,
+                total_chapters,
+                cover,
+            } => {
+                assert_eq!(chapter_index, Some(2));
+                assert_eq!(total_chapters, Some(3));
+                assert!(markdown.contains("# Three"));
+                assert!(cover.is_none());
+            }
+            other => panic!("expected Markdown for clamped chapter, got {other:?}"),
+        }
+
+        let meta = extract_epub_metadata(&epub_path).expect("cached metadata");
+        assert_eq!(meta.get("Chapters").map(String::as_str), Some("3"));
+        assert_eq!(meta.get("Title").map(String::as_str), Some("Cached Book"));
+        assert_eq!(meta.get("Author").map(String::as_str), Some("Grace Hopper"));
+
+        // Rewriting the archive with different contents/size invalidates the cache key.
+        let updated_opf = br#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Updated Book Title With Different Length</dc:title>
+  </metadata>
+  <manifest>
+    <item id="only" href="only.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="only"/></spine>
+</package>"#;
+        write_epub_entries(
+            &epub_path,
+            &[
+                (
+                    "mimetype",
+                    b"application/epub+zip",
+                    CompressionMethod::Stored,
+                ),
+                (
+                    "META-INF/container.xml",
+                    container_xml,
+                    CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/content.opf",
+                    updated_opf,
+                    CompressionMethod::Deflated,
+                ),
+                (
+                    "OEBPS/only.xhtml",
+                    b"<html><body><p>Updated chapter body</p></body></html>",
+                    CompressionMethod::Deflated,
+                ),
+            ],
+        );
+
+        let updated_meta = extract_epub_metadata(&epub_path).expect("updated metadata");
+        assert_eq!(updated_meta.get("Chapters").map(String::as_str), Some("1"));
+        assert_eq!(
+            updated_meta.get("Title").map(String::as_str),
+            Some("Updated Book Title With Different Length")
+        );
+    }
 }

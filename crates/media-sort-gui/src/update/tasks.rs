@@ -134,18 +134,30 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
                 .get(&(path.clone(), page_index))
                 .cloned()
             {
+                let total_pages = document_total_pages(&cached);
                 state.document.loading = false;
-                state.document.data = Some(
-                    crate::state::document::DocumentPreviewData::from_backend(&cached),
-                );
+                state.document.data = Some(cached);
+                if let Some(total) = total_pages
+                    && total > 1
+                {
+                    tasks.push(prefetch_adjacent_document_pages(
+                        state, &path, page_index, total,
+                    ));
+                }
             } else {
                 state.document.loading = true;
                 state.document.data = None;
-                tasks.push(load_document_preview_task(
-                    path,
-                    page_index,
-                    state.settings.advanced.enable_libreoffice_preview,
-                ));
+                if state
+                    .document
+                    .in_flight_pages
+                    .insert((path.clone(), page_index))
+                {
+                    tasks.push(load_document_preview_task(
+                        path,
+                        page_index,
+                        state.settings.advanced.enable_libreoffice_preview,
+                    ));
+                }
             }
         } else {
             state.document.reset();
@@ -159,6 +171,7 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
 
         tasks.extend(preload_tasks);
 
+        let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
         tasks.extend(
             thumbnail_meta
                 .into_iter()
@@ -169,6 +182,7 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
                         state.cache.thumbnail_tracker.clone_checker(),
                         mt,
                         animated,
+                        enable_libreoffice,
                     )
                 }),
         );
@@ -365,6 +379,7 @@ pub fn load_visible_thumbnails(state: &mut AppState) -> Task<Message> {
         .map(|e| (e.path.clone(), (e.media_type, e.animated)))
         .collect();
 
+    let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
     Task::batch(
         load_queue
             .into_iter()
@@ -382,6 +397,7 @@ pub fn load_visible_thumbnails(state: &mut AppState) -> Task<Message> {
                     state.cache.thumbnail_tracker.clone_checker(),
                     media_type,
                     animated,
+                    enable_libreoffice,
                 )
             }),
     )
@@ -394,21 +410,30 @@ pub fn load_thumbnail(
     >,
     media_type: media_sort_core::media_type::MediaType,
     animated: Option<bool>,
+    enable_libreoffice: bool,
 ) -> Task<Message> {
     Task::perform(
         async move {
             let path_clone = path.clone();
             let tracker = visible_tracker.clone();
             let result = tokio::task::spawn_blocking(move || {
-                if let Ok(guard) = tracker.read()
-                    && !guard.contains(&path_clone)
-                {
+                let path_for_keep = path_clone.clone();
+                let should_keep: std::sync::Arc<dyn Fn() -> bool + Send + Sync> =
+                    std::sync::Arc::new(move || {
+                        tracker
+                            .read()
+                            .map(|guard| guard.contains(&path_for_keep))
+                            .unwrap_or(true)
+                    });
+                if !should_keep() {
                     return Ok(None);
                 }
-                crate::subscriptions::prefetch::generate_thumbnail(
+                crate::subscriptions::prefetch::generate_thumbnail_with_options(
                     &path_clone,
                     media_type,
                     animated,
+                    enable_libreoffice,
+                    Some(should_keep),
                 )
             })
             .await
@@ -566,6 +591,58 @@ pub fn load_full_image(path: std::path::PathBuf, media_type: MediaType) -> Task<
         },
         |(path, res)| Message::Media(MediaMessage::ImageLoaded(path, res)),
     )
+}
+
+/// Returns the total page or chapter count for paged document previews (`PagedImage` or
+/// `Markdown` with explicit chapter metadata).
+pub(crate) fn document_total_pages(
+    data: &crate::state::document::DocumentPreviewData,
+) -> Option<usize> {
+    use crate::state::document::DocumentPreviewData;
+    match data {
+        DocumentPreviewData::PagedImage { total_pages, .. } => Some(*total_pages),
+        DocumentPreviewData::Markdown {
+            total_chapters: Some(total),
+            ..
+        } => Some(*total),
+        _ => None,
+    }
+}
+
+/// Prefetches the next and previous pages adjacent to `current_page` when they are neither
+/// already cached nor already in flight.
+pub fn prefetch_adjacent_document_pages(
+    state: &mut AppState,
+    path: &std::path::Path,
+    current_page: usize,
+    total_pages: usize,
+) -> Task<Message> {
+    if total_pages <= 1 {
+        return Task::none();
+    }
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(next) = current_page.checked_add(1)
+        && next < total_pages
+    {
+        candidates.push(next);
+    }
+    if let Some(prev) = current_page.checked_sub(1)
+        && prev < total_pages
+    {
+        candidates.push(prev);
+    }
+
+    let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
+    let mut tasks = Vec::with_capacity(candidates.len());
+    for page in candidates {
+        let key = (path.to_path_buf(), page);
+        if !state.cache.document_cache.contains(&key)
+            && state.document.in_flight_pages.insert(key.clone())
+        {
+            tasks.push(load_document_preview_task(key.0, page, enable_libreoffice));
+        }
+    }
+    Task::batch(tasks)
 }
 
 pub fn load_document_preview_task(

@@ -2,35 +2,33 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::Duration;
 
-use super::{DocumentError, MAX_PDF_FILE_BYTES, is_sandboxed, read_file_capped};
+use super::{
+    CanonicalFileKey, DocumentError, MAX_PDF_FILE_BYTES, find_executable_on_path, is_sandboxed,
+    new_hidden_command, path_starts_with_dash, path_to_file_url, read_file_capped,
+    run_command_capped,
+};
 
-const PDF_CACHE_CAPACITY: usize = 5;
+const PDF_CACHE_CAPACITY: usize = 32;
 const SOFFICE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDIO_CAPTURE_BYTES: u64 = 64 * 1024;
 
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 static SOFFICE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static SOFFICE_PROFILE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static SOFFICE_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static SOFFICE_EXEC_LOCK: Mutex<()> = Mutex::new(());
 static PDF_CACHE: OnceLock<Mutex<VecDeque<PdfCacheEntry>>> = OnceLock::new();
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CACHE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, PartialEq, Eq)]
-struct PdfCacheKey {
-    path: PathBuf,
-    file_len: u64,
-    modified_nanos: u64,
-}
+type PdfCacheKey = CanonicalFileKey;
 
 struct PdfCacheEntry {
     key: PdfCacheKey,
-    pdf_bytes: Vec<u8>,
+    pdf_path: PathBuf,
 }
 
 struct TempDirGuard(PathBuf);
@@ -50,12 +48,15 @@ pub fn is_libreoffice_available() -> bool {
     find_soffice().is_some()
 }
 
-/// Converts an Office document at `path` to PDF bytes via headless LibreOffice, caching recently
-/// converted PDFs by `(canonical_path, file_len, modified_time)` so page flipping does not
-/// re-invoke `soffice`.
+/// Converts an Office document at `path` to a cached `.pdf` file on disk via headless LibreOffice.
+///
+/// Reuses one process-scoped persistent `UserInstallation` profile under `SOFFICE_EXEC_LOCK` and
+/// maintains a 32-entry LRU disk cache keyed by `(canonical_path, file_len, modified_nanos)` so
+/// thumbnail generation and preview page flipping share the exact same converted PDF without
+/// re-invoking `soffice`.
 ///
 /// Returns `Ok(None)` when LibreOffice is unavailable or the process is sandboxed.
-pub fn convert_to_pdf_bytes(path: &Path) -> Result<Option<Vec<u8>>, DocumentError> {
+pub fn convert_to_pdf_path(path: &Path) -> Result<Option<PathBuf>, DocumentError> {
     if is_sandboxed() {
         return Ok(None);
     }
@@ -71,23 +72,14 @@ pub fn convert_to_pdf_bytes(path: &Path) -> Result<Option<Vec<u8>>, DocumentErro
             "Document exceeds LibreOffice conversion limit ({file_len} > {MAX_PDF_FILE_BYTES} bytes)"
         )));
     }
-    let modified_nanos = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-    let key = PdfCacheKey {
-        path: canonical.clone(),
-        file_len,
-        modified_nanos,
-    };
+    let key = CanonicalFileKey::from_canonical_and_meta(canonical.clone(), &meta);
 
     if let Some(cached) = cache_get(&key) {
         return Ok(Some(cached));
     }
 
-    // Serialize headless LibreOffice invocations because concurrent runs sharing or racing on
-    // profile/UNO locks can fail or deadlock.
+    // Serialize headless LibreOffice invocations because concurrent runs sharing the persistent
+    // profile/UNO locks would fail or deadlock.
     let _exec_guard = SOFFICE_EXEC_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -96,9 +88,20 @@ pub fn convert_to_pdf_bytes(path: &Path) -> Result<Option<Vec<u8>>, DocumentErro
         return Ok(Some(cached));
     }
 
-    let pdf_bytes = run_soffice_conversion(&soffice, &canonical)?;
-    cache_insert(key, pdf_bytes.clone());
-    Ok(Some(pdf_bytes))
+    let pdf_path = run_soffice_conversion(&soffice, &canonical)?;
+    cache_insert(key, pdf_path.clone());
+    Ok(Some(pdf_path))
+}
+
+/// Converts an Office document at `path` to PDF bytes via headless LibreOffice.
+///
+/// Uses [`convert_to_pdf_path`] and reads the resulting cached PDF under `MAX_PDF_FILE_BYTES`.
+/// Returns `Ok(None)` when LibreOffice is unavailable or the process is sandboxed.
+pub fn convert_to_pdf_bytes(path: &Path) -> Result<Option<Vec<u8>>, DocumentError> {
+    let Some(pdf_path) = convert_to_pdf_path(path)? else {
+        return Ok(None);
+    };
+    read_file_capped(&pdf_path, MAX_PDF_FILE_BYTES).map(Some)
 }
 
 fn find_soffice() -> Option<PathBuf> {
@@ -111,15 +114,8 @@ fn find_soffice_uncached() -> Option<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     let names: &[&str] = &["soffice", "libreoffice"];
 
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            for name in names {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
+    if let Some(found) = find_executable_on_path(names) {
+        return Some(found);
     }
 
     #[cfg(target_os = "macos")]
@@ -148,46 +144,94 @@ fn find_soffice_uncached() -> Option<PathBuf> {
     None
 }
 
+fn persistent_profile_dir() -> Result<PathBuf, DocumentError> {
+    let dir = SOFFICE_PROFILE_DIR.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!("media-sort-soffice-profile-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&path);
+        path
+    });
+    if !dir.is_dir() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(dir.clone())
+}
+
+fn persistent_cache_dir() -> Result<PathBuf, DocumentError> {
+    let dir = SOFFICE_CACHE_DIR.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!("media-sort-soffice-cache-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&path);
+        path
+    });
+    if !dir.is_dir() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(dir.clone())
+}
+
 fn pdf_cache() -> &'static Mutex<VecDeque<PdfCacheEntry>> {
     PDF_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(PDF_CACHE_CAPACITY)))
 }
 
-fn cache_get(key: &PdfCacheKey) -> Option<Vec<u8>> {
+fn cache_get(key: &PdfCacheKey) -> Option<PathBuf> {
     let mut cache = pdf_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache_get_from(&mut cache, key)
+}
+
+fn cache_get_from(cache: &mut VecDeque<PdfCacheEntry>, key: &PdfCacheKey) -> Option<PathBuf> {
     let pos = cache.iter().position(|entry| &entry.key == key)?;
     let entry = cache.remove(pos)?;
-    let bytes = entry.pdf_bytes.clone();
-    cache.push_back(entry);
-    Some(bytes)
+    if entry.pdf_path.is_file() {
+        let path = entry.pdf_path.clone();
+        cache.push_back(entry);
+        Some(path)
+    } else {
+        None
+    }
 }
 
-fn cache_insert(key: PdfCacheKey, pdf_bytes: Vec<u8>) {
+fn cache_insert(key: PdfCacheKey, pdf_path: PathBuf) {
     let mut cache = pdf_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(pos) = cache.iter().position(|entry| entry.key == key) {
-        cache.remove(pos);
-    }
-    while cache.len() >= PDF_CACHE_CAPACITY {
-        cache.pop_front();
-    }
-    cache.push_back(PdfCacheEntry { key, pdf_bytes });
+    cache_insert_into(&mut cache, key, pdf_path, PDF_CACHE_CAPACITY);
 }
 
-fn run_soffice_conversion(soffice: &Path, canonical_src: &Path) -> Result<Vec<u8>, DocumentError> {
+fn cache_insert_into(
+    cache: &mut VecDeque<PdfCacheEntry>,
+    key: PdfCacheKey,
+    pdf_path: PathBuf,
+    capacity: usize,
+) {
+    if let Some(pos) = cache.iter().position(|entry| entry.key == key)
+        && let Some(old) = cache.remove(pos)
+        && old.pdf_path != pdf_path
+    {
+        let _ = std::fs::remove_file(&old.pdf_path);
+    }
+    while cache.len() >= capacity {
+        if let Some(evicted) = cache.pop_front() {
+            let _ = std::fs::remove_file(&evicted.pdf_path);
+        }
+    }
+    cache.push_back(PdfCacheEntry { key, pdf_path });
+}
+
+fn run_soffice_conversion(soffice: &Path, canonical_src: &Path) -> Result<PathBuf, DocumentError> {
+    let profile_dir = persistent_profile_dir()?;
+    let cache_dir = persistent_cache_dir()?;
     let work_guard = create_unique_temp_dir()?;
     let work_dir = &work_guard.0;
 
-    let profile_dir = work_dir.join("profile");
     let out_dir = work_dir.join("out");
-    std::fs::create_dir(&profile_dir)?;
     std::fs::create_dir(&out_dir)?;
 
-    // Copy into the isolated work dir under a fixed safe filename (`input.<ext>`). This prevents
-    // leading `-` option injection in `soffice` arguments and keeps LibreOffice `.~lock.*` files
-    // out of the user's sorted directory.
+    // Copy into the isolated staging dir under a fixed safe filename (`input.<ext>`). This
+    // prevents leading `-` option injection in `soffice` arguments and keeps LibreOffice `.~lock.*`
+    // files out of the user's sorted directory.
     let safe_ext = canonical_src
         .extension()
         .and_then(|e| e.to_str())
@@ -213,20 +257,22 @@ fn run_soffice_conversion(soffice: &Path, canonical_src: &Path) -> Result<Vec<u8
         }
     }
 
-    if path_starts_with_dash(&staged_input) || path_starts_with_dash(&out_dir) {
+    if path_starts_with_dash(&staged_input)
+        || path_starts_with_dash(&out_dir)
+        || path_starts_with_dash(&profile_dir)
+    {
         return Err(DocumentError::Message(
             "Refusing to pass '-' prefixed path to LibreOffice".to_string(),
         ));
     }
 
+    // Remove any stale lock left by a previously killed soffice invocation (safe under
+    // SOFFICE_EXEC_LOCK because the profile directory is process-scoped).
+    let _ = std::fs::remove_file(profile_dir.join(".parentlock"));
+
     let profile_url = path_to_file_url(&profile_dir)?;
 
-    let mut cmd = Command::new(soffice);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt as _;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    let mut cmd = new_hidden_command(soffice);
     cmd.arg("--headless")
         .arg("--nologo")
         .arg("--nodefault")
@@ -237,50 +283,35 @@ fn run_soffice_conversion(soffice: &Path, canonical_src: &Path) -> Result<Vec<u8
         .arg("pdf")
         .arg("--outdir")
         .arg(&out_dir)
-        .arg(&staged_input)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg(&staged_input);
 
-    let mut child = cmd.spawn()?;
-    let stdout_thread = child.stdout.take().map(spawn_capped_drain);
-    let stderr_thread = child.stderr.take().map(spawn_capped_drain);
-
-    let deadline = Instant::now() + SOFFICE_TIMEOUT;
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(DocumentError::Message(format!(
-                    "LibreOffice conversion timed out after {}s",
-                    SOFFICE_TIMEOUT.as_secs()
-                )));
-            }
-            None => std::thread::sleep(Duration::from_millis(15)),
+    let output = match run_command_capped(
+        &mut cmd,
+        SOFFICE_TIMEOUT,
+        MAX_STDIO_CAPTURE_BYTES,
+        MAX_STDIO_CAPTURE_BYTES,
+        "LibreOffice",
+    ) {
+        Ok(out) => out,
+        Err(err) => {
+            let _ = std::fs::remove_file(profile_dir.join(".parentlock"));
+            return Err(err);
         }
     };
 
-    let stderr_bytes = stderr_thread
-        .and_then(|t| t.join().ok())
-        .unwrap_or_default();
-    if let Some(t) = stdout_thread {
-        let _ = t.join();
-    }
-
-    if !status.success() {
-        let msg = String::from_utf8_lossy(&stderr_bytes);
+    if !output.status.success() {
+        let _ = std::fs::remove_file(profile_dir.join(".parentlock"));
+        let msg = String::from_utf8_lossy(&output.stderr);
         let detail = msg.trim();
         return Err(DocumentError::Message(if detail.is_empty() {
-            format!("LibreOffice exited with status {status}")
+            format!("LibreOffice exited with status {}", output.status)
         } else {
-            format!("LibreOffice exited with status {status}: {detail}")
+            format!("LibreOffice exited with status {}: {detail}", output.status)
         }));
     }
 
     let expected_pdf = out_dir.join("input.pdf");
-    let pdf_path = if expected_pdf.is_file() {
+    let produced_pdf = if expected_pdf.is_file() {
         expected_pdf
     } else {
         find_first_pdf_in_dir(&out_dir)?.ok_or_else(|| {
@@ -288,15 +319,20 @@ fn run_soffice_conversion(soffice: &Path, canonical_src: &Path) -> Result<Vec<u8
         })?
     };
 
-    read_file_capped(&pdf_path, MAX_PDF_FILE_BYTES)
-}
+    let pdf_len = std::fs::metadata(&produced_pdf)?.len();
+    if pdf_len > MAX_PDF_FILE_BYTES {
+        return Err(DocumentError::Message(format!(
+            "Converted PDF exceeds size limit ({pdf_len} > {MAX_PDF_FILE_BYTES} bytes)"
+        )));
+    }
 
-fn spawn_capped_drain<R: Read + Send + 'static>(reader: R) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = reader.take(MAX_STDIO_CAPTURE_BYTES).read_to_end(&mut buf);
-        buf
-    })
+    let seq = CACHE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cached_pdf = cache_dir.join(format!("doc-{seq}.pdf"));
+    if std::fs::rename(&produced_pdf, &cached_pdf).is_err() {
+        std::fs::copy(&produced_pdf, &cached_pdf)?;
+    }
+
+    Ok(cached_pdf)
 }
 
 fn find_first_pdf_in_dir(dir: &Path) -> Result<Option<PathBuf>, DocumentError> {
@@ -332,122 +368,45 @@ fn create_unique_temp_dir() -> Result<TempDirGuard, DocumentError> {
     ))
 }
 
-fn path_starts_with_dash(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        path.as_os_str().as_bytes().first() == Some(&b'-')
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt as _;
-        path.as_os_str().encode_wide().next() == Some(u16::from(b'-'))
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        path.to_str().is_some_and(|s| s.starts_with('-'))
-    }
-}
-
-fn path_to_file_url(path: &Path) -> Result<String, DocumentError> {
-    let canon = std::fs::canonicalize(path)?;
-    #[cfg(windows)]
-    {
-        let raw = canon.to_string_lossy();
-        Ok(format_file_url(&raw, true))
-    }
-    #[cfg(not(windows))]
-    {
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt as _;
-            Ok(format_unix_file_url(canon.as_os_str().as_bytes()))
-        }
-        #[cfg(not(unix))]
-        {
-            let raw = canon.to_string_lossy();
-            Ok(format_file_url(&raw, false))
-        }
-    }
-}
-
-#[cfg(unix)]
-fn format_unix_file_url(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity("file://".len() + bytes.len());
-    out.push_str("file://");
-    percent_encode_bytes(bytes, false, &mut out);
-    out
-}
-
-#[cfg(any(not(unix), test))]
-fn format_file_url(raw: &str, is_windows: bool) -> String {
-    let mut out = String::with_capacity("file:///".len() + raw.len());
-    if is_windows {
-        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
-            out.push_str("file://");
-            let normalized = unc.replace('\\', "/");
-            percent_encode_bytes(normalized.as_bytes(), false, &mut out);
-            return out;
-        }
-        let stripped = raw.strip_prefix(r"\\?\").unwrap_or(raw);
-        let normalized = stripped.replace('\\', "/");
-        if normalized.starts_with("//") {
-            out.push_str("file:");
-        } else if normalized.starts_with('/') {
-            out.push_str("file://");
-        } else {
-            out.push_str("file:///");
-        }
-        percent_encode_bytes(normalized.as_bytes(), true, &mut out);
-    } else {
-        out.push_str("file://");
-        if !raw.starts_with('/') {
-            out.push('/');
-        }
-        percent_encode_bytes(raw.as_bytes(), false, &mut out);
-    }
-    out
-}
-
-fn percent_encode_bytes(bytes: &[u8], allow_colon: bool, out: &mut String) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for &b in bytes {
-        let keep = b.is_ascii_alphanumeric()
-            || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~')
-            || (allow_colon && b == b':');
-        if keep {
-            out.push(char::from(b));
-        } else {
-            out.push('%');
-            out.push(char::from(HEX[(b >> 4) as usize]));
-            out.push(char::from(HEX[(b & 0x0F) as usize]));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn formats_unix_and_windows_file_urls() {
-        assert_eq!(
-            format_file_url("/tmp/my dir/profile", false),
-            "file:///tmp/my%20dir/profile"
-        );
-        assert_eq!(
-            format_file_url(r"\\?\C:\Users\John Doe\Temp\profile", true),
-            "file:///C:/Users/John%20Doe/Temp/profile"
-        );
-        assert_eq!(
-            format_file_url(r"\\?\UNC\server\share\profile", true),
-            "file://server/share/profile"
-        );
-    }
+    fn disk_cache_lru_evicts_oldest_and_deletes_file() {
+        let guard = create_unique_temp_dir().expect("create temp test dir");
+        let mut cache = VecDeque::new();
 
-    #[test]
-    fn detects_leading_dash_paths() {
-        assert!(path_starts_with_dash(Path::new("-flag.docx")));
-        assert!(!path_starts_with_dash(Path::new("/tmp/-flag.docx")));
+        let make_key = |idx: usize| PdfCacheKey {
+            path: guard.0.join(format!("src-{idx}.docx")),
+            file_len: 100 + idx as u64,
+            modified_nanos: 1,
+        };
+
+        let mut paths = Vec::new();
+        for idx in 0..3 {
+            let p = guard.0.join(format!("cached-{idx}.pdf"));
+            std::fs::write(&p, b"%PDF-1.4\n").expect("write dummy pdf");
+            cache_insert_into(&mut cache, make_key(idx), p.clone(), 2);
+            paths.push(p);
+        }
+
+        // Capacity is 2, so index 0 was evicted and its file removed.
+        assert!(!paths[0].exists());
+        assert!(paths[1].exists());
+        assert!(paths[2].exists());
+        assert!(cache_get_from(&mut cache, &make_key(0)).is_none());
+        assert_eq!(
+            cache_get_from(&mut cache, &make_key(1)),
+            Some(paths[1].clone())
+        );
+
+        // Inserting key 3 now evicts key 2 (since key 1 was just touched).
+        let p3 = guard.0.join("cached-3.pdf");
+        std::fs::write(&p3, b"%PDF-1.4\n").expect("write dummy pdf 3");
+        cache_insert_into(&mut cache, make_key(3), p3.clone(), 2);
+        assert!(paths[1].exists());
+        assert!(!paths[2].exists());
+        assert!(p3.exists());
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use iced::widget::{image, markdown};
@@ -92,14 +93,18 @@ pub struct DocumentPreviewState {
     pub page_index: usize,
     pub loading: bool,
     pub data: Option<DocumentPreviewData>,
+    /// Document `(path, page_index)` keys whose preview render is currently in flight.
+    pub in_flight_pages: HashSet<(PathBuf, usize)>,
 }
 
 impl DocumentPreviewState {
-    /// Clears the active document path, page index, loading flag, and preview payload.
+    /// Clears the active document path, page index, loading flag, preview payload,
+    /// and tracked in-flight page set.
     pub fn reset(&mut self) {
         self.current_path = None;
         self.page_index = 0;
         self.loading = false;
         self.data = None;
+        self.in_flight_pages.clear();
     }
 }

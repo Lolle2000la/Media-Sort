@@ -102,13 +102,24 @@ pub fn handle_settings_message(state: &mut AppState, msg: SettingsMessage) -> Ta
             state.settings.advanced.enable_libreoffice_preview = val;
             state.settings.mark_dirty();
             state.cache.document_cache.clear();
+            state.document.in_flight_pages.clear();
+            let mut tasks = Vec::new();
             if let Some(path) = state.document.current_path.clone() {
                 let page_index = state.document.page_index;
                 state.document.loading = true;
                 state.document.data = None;
-                return super::tasks::load_document_preview_task(path, page_index, val);
+                state
+                    .document
+                    .in_flight_pages
+                    .insert((path.clone(), page_index));
+                tasks.push(super::tasks::load_document_preview_task(
+                    path, page_index, val,
+                ));
             }
-            Task::none()
+            if val {
+                tasks.push(super::tasks::load_visible_thumbnails(state));
+            }
+            Task::batch(tasks)
         }
         SettingsMessage::RestoreDefaultKeyBindings => {
             state.settings.keybindings =

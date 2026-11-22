@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use media_sort_backend::media::DecodedImage;
 use media_sort_backend::media::document::{
-    DocumentPreview, DocumentUnavailableReason, generate_document_thumbnail, load_document_preview,
-    soffice_pipe,
+    DocumentPreview, DocumentUnavailableReason, generate_document_thumbnail,
+    generate_document_thumbnail_with_options, load_document_preview, soffice_pipe,
 };
 use media_sort_backend::metadata::document_meta::extract_document_metadata;
 use zip::write::SimpleFileOptions;
@@ -1474,4 +1474,175 @@ fn test_markdown_plain_text_nul_binary_and_metadata() {
         nul_meta["Document"].get("Encoding").map(String::as_str),
         Some("Binary")
     );
+}
+
+#[test]
+fn test_docx_without_embedded_thumbnail_uses_libreoffice_option() {
+    let dir = TempDir::new("docx_no_thumb");
+    let docx_path = dir.path().join("no_embedded_thumb.docx");
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+</Types>"#;
+
+    let rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+</Relationships>"#;
+
+    let core_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>Thumbnail Fallback Doc</dc:title>
+</cp:coreProperties>"#;
+
+    let document_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Hello LibreOffice Thumbnail</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    write_zip_entries(
+        &docx_path,
+        &[
+            (
+                "[Content_Types].xml",
+                content_types,
+                CompressionMethod::Deflated,
+            ),
+            ("_rels/.rels", rels, CompressionMethod::Deflated),
+            ("docProps/core.xml", core_xml, CompressionMethod::Deflated),
+            (
+                "word/document.xml",
+                document_xml,
+                CompressionMethod::Deflated,
+            ),
+        ],
+    );
+
+    // Without LibreOffice (and with no embedded or XDG/OS thumbnail), returns Ok(None).
+    assert!(
+        generate_document_thumbnail_with_options(&docx_path, 128, 128, false)
+            .expect("disabled libreoffice thumb result")
+            .is_none(),
+        "DOCX without embedded thumbnail should return Ok(None) when libreoffice=false"
+    );
+
+    if soffice_pipe::is_libreoffice_available() {
+        let thumb = generate_document_thumbnail_with_options(&docx_path, 128, 128, true)
+            .expect("enabled libreoffice thumb result")
+            .expect("LibreOffice should render page-0 thumbnail for DOCX without embedded preview");
+        assert!(thumb.width > 0 && thumb.width <= 128);
+        assert!(thumb.height > 0 && thumb.height <= 128);
+        assert_eq!(
+            thumb.rgba.len(),
+            (thumb.width as usize) * (thumb.height as usize) * 4
+        );
+
+        let preview = load_document_preview(&docx_path, 0, true)
+            .expect("docx preview after LibreOffice thumbnail");
+        assert!(
+            matches!(preview, DocumentPreview::PagedImage { page_index: 0, total_pages, .. } if total_pages >= 1),
+            "expected PagedImage from cached LibreOffice PDF, got {preview:?}"
+        );
+    }
+}
+
+#[test]
+fn test_repeated_multipage_pdf_cbz_and_cbt_page_turns() {
+    let dir = TempDir::new("repeat_turns");
+
+    // 1. PDF repeated turns across cached pages 0 <-> 1
+    let pdf_path = dir.path().join("turns.pdf");
+    fs::write(&pdf_path, build_two_page_pdf("Repeat PDF", "Grace Hopper")).expect("write pdf");
+    for (req, expected_rgb) in [
+        (0usize, [255u8, 0, 0]),
+        (1, [0, 0, 255]),
+        (0, [255, 0, 0]),
+        (1, [0, 0, 255]),
+    ] {
+        match load_document_preview(&pdf_path, req, false).expect("pdf repeat preview") {
+            DocumentPreview::PagedImage {
+                image,
+                page_index,
+                total_pages,
+            } => {
+                assert_eq!((page_index, total_pages), (req, 2));
+                assert_solid_color_close(&image, expected_rgb);
+            }
+            other => panic!("expected PagedImage for PDF page {req}, got {other:?}"),
+        }
+    }
+
+    // 2. CBZ repeated turns across cached index 0 -> 1 -> 2 -> 0 -> 2
+    let cbz_path = dir.path().join("turns.cbz");
+    let red = solid_png_bytes(245, 10, 10);
+    let green = solid_png_bytes(10, 240, 10);
+    let blue = solid_png_bytes(10, 10, 245);
+    write_zip_entries(
+        &cbz_path,
+        &[
+            ("page10.png", &blue, CompressionMethod::Deflated),
+            ("page1.png", &red, CompressionMethod::Deflated),
+            ("page2.png", &green, CompressionMethod::Deflated),
+        ],
+    );
+    let cbz_expected = [
+        (0usize, [245u8, 10, 10]),
+        (1, [10, 240, 10]),
+        (2, [10, 10, 245]),
+        (0, [245, 10, 10]),
+        (2, [10, 10, 245]),
+    ];
+    for (req, color) in cbz_expected {
+        match load_document_preview(&cbz_path, req, false).expect("cbz repeat preview") {
+            DocumentPreview::PagedImage {
+                image,
+                page_index,
+                total_pages,
+            } => {
+                assert_eq!((page_index, total_pages), (req, 3));
+                assert_solid_color_close(&image, color);
+            }
+            other => panic!("expected PagedImage for CBZ page {req}, got {other:?}"),
+        }
+    }
+
+    // 3. CBT repeated O(1) seek turns across 0 -> 1 -> 2 -> 0 -> 2
+    let cbt_path = dir.path().join("turns.cbt");
+    {
+        let file = File::create(&cbt_path).expect("create cbt");
+        let mut builder = tar::Builder::new(file);
+        for (name, bytes) in [
+            ("page10.png", &blue),
+            ("page2.png", &green),
+            ("page1.png", &red),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            builder
+                .append_data(&mut header, name, Cursor::new(bytes.as_slice()))
+                .expect("append cbt entry");
+        }
+        builder.finish().expect("finish cbt");
+    }
+    for (req, color) in cbz_expected {
+        match load_document_preview(&cbt_path, req, false).expect("cbt repeat preview") {
+            DocumentPreview::PagedImage {
+                image,
+                page_index,
+                total_pages,
+            } => {
+                assert_eq!((page_index, total_pages), (req, 3));
+                assert_solid_color_close(&image, color);
+            }
+            other => panic!("expected PagedImage for CBT page {req}, got {other:?}"),
+        }
+    }
 }

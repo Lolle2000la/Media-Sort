@@ -3,10 +3,11 @@ use std::path::Path;
 use super::{DecodedImage, DocumentError};
 
 /// Requests a native OS thumbnail for `path` (QuickLook on macOS, `IShellItemImageFactory` on
-/// Windows) scaled to fit within `max_width x max_height`.
+/// Windows, read-only XDG thumbnail cache lookup on Linux) scaled to fit within
+/// `max_width x max_height`.
 ///
-/// Returns `Ok(None)` cleanly when the platform has no thumbnail provider (e.g. Linux, unsupported
-/// formats, missing files, or QuickLook timeouts).
+/// Returns `Ok(None)` cleanly when the platform has no cached/native thumbnail (e.g. uncached
+/// Linux files, unsupported formats, missing files, or QuickLook timeouts).
 pub fn generate_os_thumbnail(
     path: &Path,
     max_width: u32,
@@ -405,11 +406,252 @@ fn platform_thumbnail(
     fetch_shell_thumbnail(path, max_width, max_height)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+fn xdg_thumbnails_base_dir() -> Option<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(xdg).join("thumbnails"));
+    }
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(|home| {
+            std::path::PathBuf::from(home)
+                .join(".cache")
+                .join("thumbnails")
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn xdg_thumbnail_path_in(
+    cache_thumbnails_dir: &Path,
+    source_path: &Path,
+) -> Option<std::path::PathBuf> {
+    const SUBDIRS: [&str; 4] = ["x-large", "xx-large", "large", "normal"];
+    let canonical = std::fs::canonicalize(source_path).ok()?;
+    let source_mtime = std::fs::metadata(&canonical).ok()?.modified().ok()?;
+    let uri = super::canonical_path_to_file_url(&canonical);
+    let filename = format!("{}.png", md5_hex(uri.as_bytes()));
+
+    for subdir in SUBDIRS {
+        let candidate = cache_thumbnails_dir.join(subdir).join(&filename);
+        let Ok(meta) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(thumb_mtime) = meta.modified() else {
+            continue;
+        };
+        if thumb_mtime >= source_mtime {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn platform_thumbnail(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+) -> Result<Option<DecodedImage>, DocumentError> {
+    let Some(base_dir) = xdg_thumbnails_base_dir() else {
+        return Ok(None);
+    };
+    let Some(thumb_path) = xdg_thumbnail_path_in(&base_dir, path) else {
+        return Ok(None);
+    };
+    let Ok(bytes) = super::read_file_capped(&thumb_path, super::MAX_ARCHIVE_ENTRY_BYTES) else {
+        return Ok(None);
+    };
+    match crate::media::format_pipeline::decode_and_resize_bytes(&bytes, max_width, max_height) {
+        Ok(img) => Ok(Some(img)),
+        Err(_) => Ok(None),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn md5_hex(input: &[u8]) -> String {
+    const MD5_S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const MD5_K: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
+    ];
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    let mut msg = Vec::with_capacity(input.len() + 72);
+    msg.extend_from_slice(input);
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    let mut a0: u32 = 0x6745_2301;
+    let mut b0: u32 = 0xefcd_ab89;
+    let mut c0: u32 = 0x98ba_dcfe;
+    let mut d0: u32 = 0x1032_5476;
+
+    for chunk in msg.as_chunks::<64>().0 {
+        let mut m = [0u32; 16];
+        for (word, bytes) in m.iter_mut().zip(chunk.as_chunks::<4>().0.iter()) {
+            *word = u32::from_le_bytes(*bytes);
+        }
+
+        let mut a = a0;
+        let mut b = b0;
+        let mut c = c0;
+        let mut d = d0;
+
+        for (i, (&k, &s)) in MD5_K.iter().zip(MD5_S.iter()).enumerate() {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | ((!b) & d), i),
+                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | (!d)), (7 * i) % 16),
+            };
+            let sum = f.wrapping_add(a).wrapping_add(k).wrapping_add(m[g]);
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(sum.rotate_left(s));
+        }
+
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+
+    let mut hex = String::with_capacity(32);
+    for word in [a0, b0, c0, d0] {
+        for byte in word.to_le_bytes() {
+            hex.push(char::from(HEX[(byte >> 4) as usize]));
+            hex.push(char::from(HEX[(byte & 0x0F) as usize]));
+        }
+    }
+    hex
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn platform_thumbnail(
     _path: &Path,
     _max_width: u32,
     _max_height: u32,
 ) -> Result<Option<DecodedImage>, DocumentError> {
     Ok(None)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "mediasort_xdg_thumb_test_{}_{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("create test temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn md5_matches_rfc1321_vectors() {
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex(b"a"), "0cc175b9c0f1b6a831c399e269772661");
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(
+            md5_hex(b"message digest"),
+            "f96b697d7cb7938d525a2f31aaf161d0"
+        );
+        assert_eq!(
+            md5_hex(b"abcdefghijklmnopqrstuvwxyz"),
+            "c3fcd3d76192e4007dfb496cca67e13b"
+        );
+        assert_eq!(
+            md5_hex(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"),
+            "d174ab98d277d9f5a5611c2c9f419d9f"
+        );
+        assert_eq!(
+            md5_hex(
+                b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
+            ),
+            "57edf4a22be3c955ac49da2e2107b67a"
+        );
+    }
+
+    #[test]
+    fn xdg_thumbnail_path_in_checks_priority_and_freshness() {
+        let dir = TestDir::new();
+        let src = dir.0.join("my report.docx");
+        let src_file = File::create(&src).expect("create source file");
+        let base_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        src_file
+            .set_modified(base_time)
+            .expect("set source modified time");
+        drop(src_file);
+
+        let canonical = std::fs::canonicalize(&src).expect("canonicalize source");
+        let uri = crate::media::document::canonical_path_to_file_url(&canonical);
+        assert!(uri.ends_with("/my%20report.docx"));
+        let thumb_name = format!("{}.png", md5_hex(uri.as_bytes()));
+
+        let cache_dir = dir.0.join("thumbnails");
+        let large_dir = cache_dir.join("large");
+        let xlarge_dir = cache_dir.join("x-large");
+        std::fs::create_dir_all(&large_dir).expect("create large dir");
+        std::fs::create_dir_all(&xlarge_dir).expect("create x-large dir");
+
+        // Stale large thumbnail (older than source) is ignored.
+        let large_thumb = large_dir.join(&thumb_name);
+        let f = File::create(&large_thumb).expect("create stale large thumb");
+        f.set_modified(base_time - Duration::from_secs(10))
+            .expect("set stale mtime");
+        drop(f);
+        assert!(xdg_thumbnail_path_in(&cache_dir, &src).is_none());
+
+        // Fresh large thumbnail matches.
+        let f = File::create(&large_thumb).expect("create fresh large thumb");
+        f.set_modified(base_time).expect("set fresh mtime");
+        drop(f);
+        assert_eq!(xdg_thumbnail_path_in(&cache_dir, &src), Some(large_thumb));
+
+        // Fresh x-large thumbnail takes priority over large.
+        let xlarge_thumb = xlarge_dir.join(&thumb_name);
+        let f = File::create(&xlarge_thumb).expect("create fresh x-large thumb");
+        f.set_modified(base_time + Duration::from_secs(5))
+            .expect("set x-large mtime");
+        drop(f);
+        assert_eq!(xdg_thumbnail_path_in(&cache_dir, &src), Some(xlarge_thumb));
+    }
 }

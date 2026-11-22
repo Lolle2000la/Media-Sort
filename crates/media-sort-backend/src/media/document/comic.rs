@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
-use std::io::{BufReader, ErrorKind, Read};
+use std::io::{BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesRef, Event};
@@ -30,10 +30,196 @@ const MAX_CLI_STDERR_BYTES: u64 = 64 * 1024;
 /// Windows `CREATE_NO_WINDOW` creation flag (`winbase.h`).
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// Sentinel `std::io::Error` message used to abort `rarchive` cleanly after capturing one entry.
+/// Sentinel `std::io::Error` message used to abort `rarchive` cleanly after capturing target entries.
 const RARCHIVE_EARLY_STOP: &str = "media-sort-rarchive-early-stop";
+/// LRU entry cap for per-archive page/package index caches across comic and EPUB modules.
+pub(super) const INDEX_CACHE_CAPACITY: usize = 8;
+/// Total raw page buffer budget for solid archive (`.cb7`/`.cbr`) page window caching (24 MiB).
+const COMIC_PAGE_WINDOW_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
+/// Maximum total bytes accumulated in a single solid archive decompression batch (16 MiB).
+const SOLID_BATCH_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Lookahead span `[clamped .. (clamped + SOLID_UPCOMING_WINDOW_SPAN).min(total)]` for solid pages.
+const SOLID_UPCOMING_WINDOW_SPAN: usize = 10;
+/// Maximum number of upcoming pages opportunistically captured alongside `clamped`.
+const SOLID_UPCOMING_MAX_PAGES: usize = 8;
 
 static CBR_CLI: OnceLock<Option<CbrCli>> = OnceLock::new();
+static CBZ_INDEX_CACHE: OnceLock<IndexLru<CbzPageIndex>> = OnceLock::new();
+static CBT_INDEX_CACHE: OnceLock<IndexLru<Vec<TarPageEntry>>> = OnceLock::new();
+static CB7_INDEX_CACHE: OnceLock<IndexLru<Vec<usize>>> = OnceLock::new();
+static CBR_INDEX_CACHE: OnceLock<IndexLru<CbrPageIndex>> = OnceLock::new();
+static COMIC_PAGE_WINDOW_CACHE: OnceLock<Mutex<WindowCacheState>> = OnceLock::new();
+
+pub(super) type IndexLru<V> = Mutex<VecDeque<(ArchiveKey, Arc<V>)>>;
+
+/// File identity key used to invalidate cached archive indices and page buffers on modification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ArchiveKey {
+    pub(super) path: PathBuf,
+    pub(super) file_len: u64,
+    pub(super) modified_nanos: u64,
+}
+
+/// Builds an [`ArchiveKey`] from the canonicalized path and file metadata of `path`.
+pub(super) fn archive_key(path: &Path) -> std::io::Result<ArchiveKey> {
+    let canonical = std::fs::canonicalize(path)?;
+    let meta = std::fs::metadata(&canonical)?;
+    let file_len = meta.len();
+    let modified_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    Ok(ArchiveKey {
+        path: canonical,
+        file_len,
+        modified_nanos,
+    })
+}
+
+/// Looks up `key` in an [`IndexLru`] cache and promotes hits to most-recently-used.
+pub(super) fn lru_get<V>(cache: &IndexLru<V>, key: &ArchiveKey) -> Option<Arc<V>> {
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pos = guard.iter().position(|(k, _)| k == key)?;
+    let entry = guard.remove(pos)?;
+    let val = Arc::clone(&entry.1);
+    guard.push_back(entry);
+    Some(val)
+}
+
+/// Inserts `(key, value)` into an [`IndexLru`] cache, evicting oldest entries past `capacity`.
+pub(super) fn lru_insert<V>(cache: &IndexLru<V>, capacity: usize, key: ArchiveKey, value: Arc<V>) {
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(pos) = guard.iter().position(|(k, _)| k == &key) {
+        guard.remove(pos);
+    }
+    while guard.len() >= capacity {
+        guard.pop_front();
+    }
+    guard.push_back((key, value));
+}
+
+struct WindowCacheEntry {
+    archive: ArchiveKey,
+    page_index: usize,
+    bytes: Arc<Vec<u8>>,
+}
+
+struct WindowCacheState {
+    entries: VecDeque<WindowCacheEntry>,
+    total_bytes: usize,
+    max_bytes: usize,
+}
+
+impl WindowCacheState {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            total_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, archive: &ArchiveKey, page_index: usize) -> Option<Arc<Vec<u8>>> {
+        let pos = self
+            .entries
+            .iter()
+            .position(|e| &e.archive == archive && e.page_index == page_index)?;
+        let entry = self.entries.remove(pos)?;
+        let bytes = Arc::clone(&entry.bytes);
+        self.entries.push_back(entry);
+        Some(bytes)
+    }
+
+    fn contains(&self, archive: &ArchiveKey, page_index: usize) -> bool {
+        self.entries
+            .iter()
+            .any(|e| &e.archive == archive && e.page_index == page_index)
+    }
+
+    fn insert(&mut self, archive: ArchiveKey, page_index: usize, bytes: Arc<Vec<u8>>) {
+        let entry_len = bytes.len();
+        if entry_len > self.max_bytes {
+            return;
+        }
+        if let Some(pos) = self
+            .entries
+            .iter()
+            .position(|e| e.archive == archive && e.page_index == page_index)
+            && let Some(old) = self.entries.remove(pos)
+        {
+            self.total_bytes = self.total_bytes.saturating_sub(old.bytes.len());
+        }
+        while self.total_bytes.saturating_add(entry_len) > self.max_bytes {
+            let Some(evicted) = self.entries.pop_front() else {
+                break;
+            };
+            self.total_bytes = self.total_bytes.saturating_sub(evicted.bytes.len());
+        }
+        self.total_bytes += entry_len;
+        self.entries.push_back(WindowCacheEntry {
+            archive,
+            page_index,
+            bytes,
+        });
+    }
+}
+
+fn cbz_index_cache() -> &'static IndexLru<CbzPageIndex> {
+    CBZ_INDEX_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(INDEX_CACHE_CAPACITY)))
+}
+
+fn cbt_index_cache() -> &'static IndexLru<Vec<TarPageEntry>> {
+    CBT_INDEX_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(INDEX_CACHE_CAPACITY)))
+}
+
+fn cb7_index_cache() -> &'static IndexLru<Vec<usize>> {
+    CB7_INDEX_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(INDEX_CACHE_CAPACITY)))
+}
+
+fn cbr_index_cache() -> &'static IndexLru<CbrPageIndex> {
+    CBR_INDEX_CACHE.get_or_init(|| Mutex::new(VecDeque::with_capacity(INDEX_CACHE_CAPACITY)))
+}
+
+fn comic_page_window_cache() -> &'static Mutex<WindowCacheState> {
+    COMIC_PAGE_WINDOW_CACHE
+        .get_or_init(|| Mutex::new(WindowCacheState::new(COMIC_PAGE_WINDOW_CACHE_MAX_BYTES)))
+}
+
+fn window_cache_get(key: &ArchiveKey, page_index: usize) -> Option<Arc<Vec<u8>>> {
+    let mut cache = comic_page_window_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.get(key, page_index)
+}
+
+fn window_cache_uncached_pages(key: &ArchiveKey, range: std::ops::Range<usize>) -> Vec<usize> {
+    let cache = comic_page_window_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    range.filter(|&p| !cache.contains(key, p)).collect()
+}
+
+fn store_window_batch(
+    key: &ArchiveKey,
+    clamped: usize,
+    clamped_bytes: Arc<Vec<u8>>,
+    mut upcoming: Vec<(usize, Vec<u8>)>,
+) {
+    // Insert furthest upcoming pages first so closer upcoming pages and `clamped` stay MRU.
+    upcoming.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let mut cache = comic_page_window_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (page_idx, bytes) in upcoming {
+        cache.insert(key.clone(), page_idx, Arc::new(bytes));
+    }
+    cache.insert(key.clone(), clamped, clamped_bytes);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComicFormat {
@@ -171,7 +357,7 @@ pub fn extract_comic_metadata(path: &Path) -> Result<BTreeMap<String, String>, D
 fn extract_comic_page(
     path: &Path,
     page_index: usize,
-) -> Result<(Vec<u8>, usize, usize), ArchiveFailure> {
+) -> Result<(Arc<Vec<u8>>, usize, usize), ArchiveFailure> {
     match ComicFormat::from_path(path)? {
         ComicFormat::Cbz => zip_extract_page(path, page_index),
         ComicFormat::Cb7 => sevenz_extract_page(path, page_index),
@@ -180,20 +366,13 @@ fn extract_comic_page(
     }
 }
 
-fn pick_sorted_page<T>(
-    mut pages: Vec<PageEntry<T>>,
-    page_index: usize,
-) -> Result<(T, usize, usize), ArchiveFailure> {
-    if pages.is_empty() {
-        return Err(ArchiveFailure::UnsupportedOrEmpty(
-            "Comic archive contains no readable images".to_string(),
-        ));
-    }
+fn empty_pages_error() -> ArchiveFailure {
+    ArchiveFailure::UnsupportedOrEmpty("Comic archive contains no readable images".to_string())
+}
+
+fn sort_page_ids<T>(mut pages: Vec<PageEntry<T>>) -> Vec<T> {
     pages.sort_by(|a, b| natural_cmp(&a.sort_name, &b.sort_name));
-    let total_pages = pages.len();
-    let clamped = page_index.min(total_pages - 1);
-    let chosen = pages.swap_remove(clamped);
-    Ok((chosen.id, clamped, total_pages))
+    pages.into_iter().map(|p| p.id).collect()
 }
 
 fn normalize_archive_name(name: &str) -> String {
@@ -329,18 +508,47 @@ fn collect_zip_pages(archive: &ZipArchive<BufReader<File>>) -> (Vec<PageEntry<us
     (pages, any_encrypted)
 }
 
+struct CbzPageIndex {
+    pages: Vec<usize>,
+    any_encrypted: bool,
+}
+
 fn zip_extract_page(
     path: &Path,
     page_index: usize,
-) -> Result<(Vec<u8>, usize, usize), ArchiveFailure> {
-    let mut archive = open_zip_archive(path)?;
-    let (pages, any_encrypted) = collect_zip_pages(&archive);
-    if pages.is_empty() && any_encrypted {
-        return Err(ArchiveFailure::Encrypted);
+) -> Result<(Arc<Vec<u8>>, usize, usize), ArchiveFailure> {
+    let key = archive_key(path)?;
+    let mut archive = open_zip_archive(&key.path)?;
+    let index = if let Some(cached) = lru_get(cbz_index_cache(), &key) {
+        cached
+    } else {
+        let (pages, any_encrypted) = collect_zip_pages(&archive);
+        let sorted = CbzPageIndex {
+            pages: sort_page_ids(pages),
+            any_encrypted,
+        };
+        let arc = Arc::new(sorted);
+        lru_insert(
+            cbz_index_cache(),
+            INDEX_CACHE_CAPACITY,
+            key,
+            Arc::clone(&arc),
+        );
+        arc
+    };
+
+    if index.pages.is_empty() {
+        return Err(if index.any_encrypted {
+            ArchiveFailure::Encrypted
+        } else {
+            empty_pages_error()
+        });
     }
-    let (chosen_idx, clamped, total) = pick_sorted_page(pages, page_index)?;
+    let total = index.pages.len();
+    let clamped = page_index.min(total - 1);
+    let chosen_idx = index.pages[clamped];
     let bytes = read_zip_index_capped(&mut archive, chosen_idx, MAX_ARCHIVE_ENTRY_BYTES)?;
-    Ok((bytes, clamped, total))
+    Ok((Arc::new(bytes), clamped, total))
 }
 
 fn zip_metadata(path: &Path) -> Result<(usize, Option<Vec<u8>>), ArchiveFailure> {
@@ -413,12 +621,32 @@ fn open_sevenz_archive(path: &Path) -> Result<(File, sevenz_rust2::Archive), Arc
     Ok((file, archive))
 }
 
-fn read_sevenz_entry_capped(
+struct SevenzBatchOutcome {
+    target_bytes: Vec<u8>,
+    upcoming_captured: Vec<(usize, Vec<u8>)>,
+}
+
+fn should_stop_solid_batch(
+    target_done: bool,
+    remaining_targets: usize,
+    captured_upcoming: usize,
+    batch_bytes: usize,
+    budget_reached: bool,
+) -> bool {
+    target_done
+        && (remaining_targets == 0
+            || captured_upcoming >= SOLID_UPCOMING_MAX_PAGES
+            || batch_bytes >= SOLID_BATCH_MAX_BYTES
+            || budget_reached)
+}
+
+fn read_sevenz_batch_entries(
     file: &mut File,
     archive: &sevenz_rust2::Archive,
     file_index: usize,
     max_bytes: u64,
-) -> Result<Vec<u8>, ArchiveFailure> {
+    upcoming_pages: &[(usize, usize)],
+) -> Result<SevenzBatchOutcome, ArchiveFailure> {
     if archive.is_file_encrypted(file_index) {
         return Err(ArchiveFailure::Encrypted);
     }
@@ -428,7 +656,10 @@ fn read_sevenz_entry_capped(
         )));
     };
     if !entry.has_stream() {
-        return Ok(Vec::new());
+        return Ok(SevenzBatchOutcome {
+            target_bytes: Vec::new(),
+            upcoming_captured: Vec::new(),
+        });
     }
     if entry.size() > max_bytes {
         return Err(ArchiveFailure::TooLarge(format!(
@@ -444,10 +675,36 @@ fn read_sevenz_entry_capped(
         .copied()
         .flatten()
     else {
-        return Ok(Vec::new());
+        return Ok(SevenzBatchOutcome {
+            target_bytes: Vec::new(),
+            upcoming_captured: Vec::new(),
+        });
     };
 
     let target_ptr = entry as *const sevenz_rust2::ArchiveEntry;
+    let target_declared_size = entry.size();
+    let mut upcoming_targets: Vec<(*const sevenz_rust2::ArchiveEntry, usize)> = upcoming_pages
+        .iter()
+        .filter_map(|&(page_idx, f_idx)| {
+            if archive
+                .stream_map
+                .file_block_index
+                .get(f_idx)
+                .copied()
+                .flatten()
+                != Some(block_index)
+                || archive.is_file_encrypted(f_idx)
+            {
+                return None;
+            }
+            let e = archive.files.get(f_idx)?;
+            if !e.has_stream() || e.size() > MAX_ARCHIVE_ENTRY_BYTES {
+                return None;
+            }
+            Some((e as *const sevenz_rust2::ArchiveEntry, page_idx))
+        })
+        .collect();
+
     let password = sevenz_rust2::Password::empty();
     let decoder = sevenz_rust2::BlockDecoder::new_with_memory_limit(
         1,
@@ -458,25 +715,100 @@ fn read_sevenz_entry_capped(
         file,
     );
 
-    let mut outcome: Option<Result<Vec<u8>, ArchiveFailure>> = None;
+    let mut target_outcome: Option<Result<Vec<u8>, ArchiveFailure>> = None;
+    let mut upcoming_captured: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut batch_bytes: usize = 0;
+    let mut budget_reached = false;
+
     let res = decoder.for_each_entries(&mut |cur_entry, reader| {
         if std::ptr::eq(cur_entry, target_ptr) {
             let name = cur_entry.name().to_string();
             let read_res = read_stream_capped(reader, Some(cur_entry.size()), &name, max_bytes);
-            outcome = Some(read_res);
-            Ok(false)
-        } else {
-            Ok(true)
+            let keep_going = match &read_res {
+                Ok(bytes) => {
+                    batch_bytes = batch_bytes.saturating_add(bytes.len());
+                    !should_stop_solid_batch(
+                        true,
+                        upcoming_targets.len(),
+                        upcoming_captured.len(),
+                        batch_bytes,
+                        budget_reached,
+                    )
+                }
+                Err(_) => false,
+            };
+            target_outcome = Some(read_res);
+            return Ok(keep_going);
         }
+
+        if let Some(pos) = upcoming_targets
+            .iter()
+            .position(|(ptr, _)| std::ptr::eq(cur_entry, *ptr))
+        {
+            let (_, page_idx) = upcoming_targets.swap_remove(pos);
+            let reserved = if target_outcome.is_some() {
+                0
+            } else {
+                target_declared_size
+            };
+            let used_plus_reserved = (batch_bytes as u64).saturating_add(reserved);
+            if upcoming_captured.len() < SOLID_UPCOMING_MAX_PAGES
+                && used_plus_reserved.saturating_add(cur_entry.size())
+                    <= SOLID_BATCH_MAX_BYTES as u64
+            {
+                let remaining_cap = (SOLID_BATCH_MAX_BYTES as u64)
+                    .saturating_sub(used_plus_reserved)
+                    .min(MAX_ARCHIVE_ENTRY_BYTES);
+                let name = cur_entry.name().to_string();
+                match read_stream_capped(reader, Some(cur_entry.size()), &name, remaining_cap) {
+                    Ok(bytes) => {
+                        batch_bytes = batch_bytes.saturating_add(bytes.len());
+                        upcoming_captured.push((page_idx, bytes));
+                    }
+                    Err(_) => {
+                        if target_outcome.is_some() {
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else if target_outcome.is_some() {
+                budget_reached = true;
+            }
+        }
+
+        let target_ok = matches!(target_outcome, Some(Ok(_)));
+        Ok(!should_stop_solid_batch(
+            target_ok,
+            upcoming_targets.len(),
+            upcoming_captured.len(),
+            batch_bytes,
+            budget_reached,
+        ))
     });
 
-    if let Some(read_res) = outcome {
-        return read_res;
+    match target_outcome {
+        Some(Ok(target_bytes)) => Ok(SevenzBatchOutcome {
+            target_bytes,
+            upcoming_captured,
+        }),
+        Some(Err(err)) => Err(err),
+        None => {
+            res.map_err(map_sevenz_error)?;
+            Err(ArchiveFailure::Error(DocumentError::Message(
+                "Target entry missing from 7z compression block".to_string(),
+            )))
+        }
     }
-    res.map_err(map_sevenz_error)?;
-    Err(ArchiveFailure::Error(DocumentError::Message(
-        "Target entry missing from 7z compression block".to_string(),
-    )))
+}
+
+fn read_sevenz_entry_capped(
+    file: &mut File,
+    archive: &sevenz_rust2::Archive,
+    file_index: usize,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ArchiveFailure> {
+    read_sevenz_batch_entries(file, archive, file_index, max_bytes, &[])
+        .map(|outcome| outcome.target_bytes)
 }
 
 fn collect_sevenz_pages(archive: &sevenz_rust2::Archive) -> Vec<PageEntry<usize>> {
@@ -495,11 +827,56 @@ fn collect_sevenz_pages(archive: &sevenz_rust2::Archive) -> Vec<PageEntry<usize>
 fn sevenz_extract_page(
     path: &Path,
     page_index: usize,
-) -> Result<(Vec<u8>, usize, usize), ArchiveFailure> {
-    let (mut file, archive) = open_sevenz_archive(path)?;
-    let pages = collect_sevenz_pages(&archive);
-    let (chosen_idx, clamped, total) = pick_sorted_page(pages, page_index)?;
-    let bytes = read_sevenz_entry_capped(&mut file, &archive, chosen_idx, MAX_ARCHIVE_ENTRY_BYTES)?;
+) -> Result<(Arc<Vec<u8>>, usize, usize), ArchiveFailure> {
+    let key = archive_key(path)?;
+    let (pages, opened) = if let Some(cached) = lru_get(cb7_index_cache(), &key) {
+        (cached, None)
+    } else {
+        let (file, archive) = open_sevenz_archive(&key.path)?;
+        let sorted = Arc::new(sort_page_ids(collect_sevenz_pages(&archive)));
+        lru_insert(
+            cb7_index_cache(),
+            INDEX_CACHE_CAPACITY,
+            key.clone(),
+            Arc::clone(&sorted),
+        );
+        (sorted, Some((file, archive)))
+    };
+
+    if pages.is_empty() {
+        return Err(empty_pages_error());
+    }
+    let total = pages.len();
+    let clamped = page_index.min(total - 1);
+
+    if let Some(cached_bytes) = window_cache_get(&key, clamped) {
+        return Ok((cached_bytes, clamped, total));
+    }
+
+    let (mut file, archive) = match opened {
+        Some(pair) => pair,
+        None => open_sevenz_archive(&key.path)?,
+    };
+
+    let chosen_idx = pages[clamped];
+    let window_end = clamped
+        .saturating_add(SOLID_UPCOMING_WINDOW_SPAN)
+        .min(total);
+    let upcoming_pages: Vec<(usize, usize)> =
+        window_cache_uncached_pages(&key, (clamped + 1)..window_end)
+            .into_iter()
+            .map(|p| (p, pages[p]))
+            .collect();
+
+    let outcome = read_sevenz_batch_entries(
+        &mut file,
+        &archive,
+        chosen_idx,
+        MAX_ARCHIVE_ENTRY_BYTES,
+        &upcoming_pages,
+    )?;
+    let bytes = Arc::new(outcome.target_bytes);
+    store_window_batch(&key, clamped, Arc::clone(&bytes), outcome.upcoming_captured);
     Ok((bytes, clamped, total))
 }
 
@@ -531,6 +908,13 @@ fn sevenz_metadata(path: &Path) -> Result<(usize, Option<Vec<u8>>), ArchiveFailu
 
 // ── CBT (TAR) ─────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TarPageEntry {
+    offset: u64,
+    size: u64,
+    name: String,
+}
+
 fn tar_entry_name<R: Read>(entry: &tar::Entry<'_, R>) -> String {
     if let Ok(path) = entry.path() {
         path.to_string_lossy().into_owned()
@@ -547,45 +931,64 @@ fn is_tar_regular_file<R: Read>(entry: &tar::Entry<'_, R>) -> bool {
 fn tar_extract_page(
     path: &Path,
     page_index: usize,
-) -> Result<(Vec<u8>, usize, usize), ArchiveFailure> {
-    let mut pages = Vec::new();
-    {
-        let file = File::open(path)?;
+) -> Result<(Arc<Vec<u8>>, usize, usize), ArchiveFailure> {
+    let key = archive_key(path)?;
+    let pages = if let Some(cached) = lru_get(cbt_index_cache(), &key) {
+        cached
+    } else {
+        let file = File::open(&key.path)?;
         let mut archive = tar::Archive::new(BufReader::new(file));
         let entries = archive.entries_with_seek()?;
-        for (idx, entry_res) in entries.enumerate() {
+        let mut collected = Vec::new();
+        for entry_res in entries {
             let entry = entry_res?;
             if !is_tar_regular_file(&entry) {
                 continue;
             }
-            let name = tar_entry_name(&entry);
-            if is_image_entry(&name) {
-                pages.push(PageEntry {
-                    id: idx,
-                    sort_name: normalize_archive_name(&name),
+            let raw_name = tar_entry_name(&entry);
+            if is_image_entry(&raw_name) {
+                collected.push(TarPageEntry {
+                    offset: entry.raw_file_position(),
+                    size: entry.size(),
+                    name: normalize_archive_name(&raw_name),
                 });
             }
         }
+        collected.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+        let arc = Arc::new(collected);
+        lru_insert(
+            cbt_index_cache(),
+            INDEX_CACHE_CAPACITY,
+            key.clone(),
+            Arc::clone(&arc),
+        );
+        arc
+    };
+
+    if pages.is_empty() {
+        return Err(empty_pages_error());
     }
+    let total = pages.len();
+    let clamped = page_index.min(total - 1);
+    let target = &pages[clamped];
 
-    let (target_idx, clamped, total) = pick_sorted_page(pages, page_index)?;
-
-    let file = File::open(path)?;
-    let mut archive = tar::Archive::new(BufReader::new(file));
-    let entries = archive.entries_with_seek()?;
-    for (idx, entry_res) in entries.enumerate() {
-        let entry = entry_res?;
-        if idx == target_idx {
-            let name = tar_entry_name(&entry);
-            let declared = entry.size();
-            let bytes = read_stream_capped(entry, Some(declared), &name, MAX_ARCHIVE_ENTRY_BYTES)?;
-            return Ok((bytes, clamped, total));
-        }
+    let mut file = File::open(&key.path)?;
+    file.seek(SeekFrom::Start(target.offset))?;
+    let bytes = read_stream_capped(
+        file.take(target.size),
+        Some(target.size),
+        &target.name,
+        MAX_ARCHIVE_ENTRY_BYTES,
+    )?;
+    if bytes.len() as u64 != target.size {
+        return Err(ArchiveFailure::Error(DocumentError::Io(
+            std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                format!("Truncated TAR comic entry '{}'", target.name),
+            ),
+        )));
     }
-
-    Err(ArchiveFailure::Error(DocumentError::Message(
-        "Target image entry disappeared from TAR comic archive".to_string(),
-    )))
+    Ok((Arc::new(bytes), clamped, total))
 }
 
 fn tar_metadata(path: &Path) -> Result<(usize, Option<Vec<u8>>), ArchiveFailure> {
@@ -624,49 +1027,159 @@ fn tar_metadata(path: &Path) -> Result<(usize, Option<Vec<u8>>), ArchiveFailure>
 
 // ── CBR (RAR via rarchive + host CLI fallback when !is_sandboxed()) ────
 
-struct RarchiveSingleEntrySink {
-    target_ptr: *const rarchive::Entry,
-    target_name: String,
-    max_bytes: u64,
-    buf: Vec<u8>,
-    done: bool,
-    too_large: Option<String>,
+enum CbrPageIndex {
+    Rarchive {
+        pages: Vec<usize>,
+        any_encrypted: bool,
+    },
+    Cli {
+        pages: Vec<(String, bool)>,
+        any_encrypted: bool,
+    },
 }
 
-impl rarchive::Sink for RarchiveSingleEntrySink {
+struct UpcomingRarTarget {
+    ptr: *const rarchive::Entry,
+    page_idx: usize,
+}
+
+struct ActiveRarCapture {
+    ptr: *const rarchive::Entry,
+    page_idx: usize,
+    is_clamped: bool,
+    name: String,
+    max_bytes: u64,
+    buf: Vec<u8>,
+}
+
+struct RarchiveBatchSink {
+    target_ptr: *const rarchive::Entry,
+    target_name: String,
+    target_declared_size: u64,
+    max_bytes: u64,
+    upcoming_targets: Vec<UpcomingRarTarget>,
+    active: Option<ActiveRarCapture>,
+    target_buf: Option<Vec<u8>>,
+    too_large: Option<String>,
+    upcoming_captured: Vec<(usize, Vec<u8>)>,
+    batch_bytes: usize,
+    budget_reached: bool,
+}
+
+impl RarchiveBatchSink {
+    fn should_stop_early(&self) -> bool {
+        should_stop_solid_batch(
+            self.target_buf.is_some(),
+            self.upcoming_targets.len(),
+            self.upcoming_captured.len(),
+            self.batch_bytes,
+            self.budget_reached,
+        )
+    }
+}
+
+impl rarchive::Sink for RarchiveBatchSink {
     fn begin(&mut self, entry: &rarchive::Entry) -> std::io::Result<bool> {
-        if self.done || !std::ptr::eq(entry, self.target_ptr) {
-            return Ok(false);
+        if self.should_stop_early() {
+            return Err(std::io::Error::other(RARCHIVE_EARLY_STOP));
         }
-        if entry.size > self.max_bytes {
-            let msg = format!(
-                "Archive entry '{}' exceeds size limit ({} > {} bytes)",
-                self.target_name, entry.size, self.max_bytes
-            );
-            self.too_large = Some(msg.clone());
-            return Err(std::io::Error::new(ErrorKind::InvalidData, msg));
+
+        if self.target_buf.is_none() && std::ptr::eq(entry, self.target_ptr) {
+            if entry.size > self.max_bytes {
+                let msg = format!(
+                    "Archive entry '{}' exceeds size limit ({} > {} bytes)",
+                    self.target_name, entry.size, self.max_bytes
+                );
+                self.too_large = Some(msg.clone());
+                return Err(std::io::Error::new(ErrorKind::InvalidData, msg));
+            }
+            let prealloc = usize::try_from(entry.size).unwrap_or(0).min(1024 * 1024);
+            self.active = Some(ActiveRarCapture {
+                ptr: entry,
+                page_idx: 0,
+                is_clamped: true,
+                name: self.target_name.clone(),
+                max_bytes: self.max_bytes,
+                buf: Vec::with_capacity(prealloc),
+            });
+            return Ok(true);
         }
-        let prealloc = usize::try_from(entry.size).unwrap_or(0).min(1024 * 1024);
-        self.buf.reserve(prealloc);
-        Ok(true)
+
+        if let Some(pos) = self
+            .upcoming_targets
+            .iter()
+            .position(|t| std::ptr::eq(entry, t.ptr))
+        {
+            let target = self.upcoming_targets.swap_remove(pos);
+            let reserved = if self.target_buf.is_some() {
+                0
+            } else {
+                self.target_declared_size
+            };
+            let used_plus_reserved = (self.batch_bytes as u64).saturating_add(reserved);
+            if self.upcoming_captured.len() < SOLID_UPCOMING_MAX_PAGES
+                && entry.size <= MAX_ARCHIVE_ENTRY_BYTES
+                && used_plus_reserved.saturating_add(entry.size) <= SOLID_BATCH_MAX_BYTES as u64
+            {
+                let remaining_cap = (SOLID_BATCH_MAX_BYTES as u64)
+                    .saturating_sub(used_plus_reserved)
+                    .min(MAX_ARCHIVE_ENTRY_BYTES);
+                let prealloc = usize::try_from(entry.size).unwrap_or(0).min(1024 * 1024);
+                self.active = Some(ActiveRarCapture {
+                    ptr: entry,
+                    page_idx: target.page_idx,
+                    is_clamped: false,
+                    name: entry.name.clone(),
+                    max_bytes: remaining_cap,
+                    buf: Vec::with_capacity(prealloc),
+                });
+                return Ok(true);
+            }
+            if self.target_buf.is_some() {
+                self.budget_reached = true;
+                return Err(std::io::Error::other(RARCHIVE_EARLY_STOP));
+            }
+        }
+
+        Ok(false)
     }
 
     fn data(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        if self.buf.len() as u64 + bytes.len() as u64 > self.max_bytes {
-            let msg = format!(
-                "Archive entry '{}' decompressed size exceeded {} bytes",
-                self.target_name, self.max_bytes
-            );
-            self.too_large = Some(msg.clone());
-            return Err(std::io::Error::new(ErrorKind::InvalidData, msg));
+        let Some(active) = self.active.as_mut() else {
+            return Ok(());
+        };
+        if active.buf.len() as u64 + bytes.len() as u64 > active.max_bytes {
+            if active.is_clamped {
+                let msg = format!(
+                    "Archive entry '{}' decompressed size exceeded {} bytes",
+                    active.name, active.max_bytes
+                );
+                self.too_large = Some(msg.clone());
+                return Err(std::io::Error::new(ErrorKind::InvalidData, msg));
+            }
+            self.active = None;
+            if self.target_buf.is_some() {
+                self.budget_reached = true;
+                return Err(std::io::Error::other(RARCHIVE_EARLY_STOP));
+            }
+            return Ok(());
         }
-        self.buf.extend_from_slice(bytes);
+        active.buf.extend_from_slice(bytes);
         Ok(())
     }
 
     fn end(&mut self, entry: &rarchive::Entry) -> std::io::Result<()> {
-        if std::ptr::eq(entry, self.target_ptr) {
-            self.done = true;
+        if let Some(active) = self.active.take()
+            && std::ptr::eq(entry, active.ptr)
+        {
+            self.batch_bytes = self.batch_bytes.saturating_add(active.buf.len());
+            if active.is_clamped {
+                self.target_buf = Some(active.buf);
+            } else {
+                self.upcoming_captured.push((active.page_idx, active.buf));
+            }
+        }
+        if self.should_stop_early() {
             return Err(std::io::Error::other(RARCHIVE_EARLY_STOP));
         }
         Ok(())
@@ -724,11 +1237,20 @@ fn map_rarchive_error(err: rarchive::Error) -> (ArchiveFailure, RarFallbackPolic
     }
 }
 
-fn extract_rarchive_entry(
+struct RarBatchOutcome {
+    target_bytes: Vec<u8>,
+    upcoming_captured: Vec<(usize, Vec<u8>)>,
+}
+
+type RarBatchResult = Result<RarBatchOutcome, (ArchiveFailure, RarFallbackPolicy)>;
+type RarExtractResult = Result<(Arc<Vec<u8>>, usize, usize), (ArchiveFailure, RarFallbackPolicy)>;
+
+fn extract_rarchive_batch(
     archive: &rarchive::Archive,
     entry_idx: usize,
     max_bytes: u64,
-) -> Result<Vec<u8>, (ArchiveFailure, RarFallbackPolicy)> {
+    upcoming_pages: &[(usize, usize)],
+) -> RarBatchResult {
     let entries = archive.entries();
     let Some(entry) = entries.get(entry_idx) else {
         return Err((
@@ -741,21 +1263,55 @@ fn extract_rarchive_entry(
     if entry.encrypted {
         return Err((ArchiveFailure::Encrypted, RarFallbackPolicy::NeverCli));
     }
+    if entry.size > max_bytes {
+        return Err((
+            ArchiveFailure::TooLarge(format!(
+                "Archive entry '{}' exceeds size limit ({} > {} bytes)",
+                entry.name, entry.size, max_bytes
+            )),
+            RarFallbackPolicy::NeverCli,
+        ));
+    }
 
-    let mut sink = RarchiveSingleEntrySink {
+    let upcoming_targets = upcoming_pages
+        .iter()
+        .filter_map(|&(page_idx, e_idx)| {
+            let e = entries.get(e_idx)?;
+            if e.encrypted || e.size > MAX_ARCHIVE_ENTRY_BYTES {
+                return None;
+            }
+            Some(UpcomingRarTarget {
+                ptr: e as *const rarchive::Entry,
+                page_idx,
+            })
+        })
+        .collect();
+
+    let mut sink = RarchiveBatchSink {
         target_ptr: entry as *const rarchive::Entry,
         target_name: entry.name.clone(),
+        target_declared_size: entry.size,
         max_bytes,
-        buf: Vec::new(),
-        done: false,
+        upcoming_targets,
+        active: None,
+        target_buf: None,
         too_large: None,
+        upcoming_captured: Vec::new(),
+        batch_bytes: 0,
+        budget_reached: false,
     };
 
     match archive.extract(&mut sink) {
-        Ok(()) => Ok(sink.buf),
+        Ok(()) => Ok(RarBatchOutcome {
+            target_bytes: sink.target_buf.unwrap_or_default(),
+            upcoming_captured: sink.upcoming_captured,
+        }),
         Err(err) => {
-            if sink.done {
-                return Ok(sink.buf);
+            if let Some(target_bytes) = sink.target_buf {
+                return Ok(RarBatchOutcome {
+                    target_bytes,
+                    upcoming_captured: sink.upcoming_captured,
+                });
             }
             if let Some(msg) = sink.too_large {
                 return Err((ArchiveFailure::TooLarge(msg), RarFallbackPolicy::NeverCli));
@@ -763,6 +1319,14 @@ fn extract_rarchive_entry(
             Err(map_rarchive_error(err))
         }
     }
+}
+
+fn extract_rarchive_entry(
+    archive: &rarchive::Archive,
+    entry_idx: usize,
+    max_bytes: u64,
+) -> Result<Vec<u8>, (ArchiveFailure, RarFallbackPolicy)> {
+    extract_rarchive_batch(archive, entry_idx, max_bytes, &[]).map(|o| o.target_bytes)
 }
 
 fn collect_rarchive_pages(archive: &rarchive::Archive) -> (Vec<PageEntry<usize>>, bool) {
@@ -788,20 +1352,118 @@ fn collect_rarchive_pages(archive: &rarchive::Archive) -> (Vec<PageEntry<usize>>
 fn rar_extract_page(
     path: &Path,
     page_index: usize,
-) -> Result<(Vec<u8>, usize, usize), ArchiveFailure> {
-    let try_rarchive =
-        || -> Result<(Vec<u8>, usize, usize), (ArchiveFailure, RarFallbackPolicy)> {
-            let mut archive = rarchive::Archive::open(path).map_err(map_rarchive_error)?;
-            archive.set_memory_budget(RARCHIVE_MEM_LIMIT_BYTES);
-            let (pages, any_encrypted) = collect_rarchive_pages(&archive);
-            if pages.is_empty() && any_encrypted {
-                return Err((ArchiveFailure::Encrypted, RarFallbackPolicy::NeverCli));
-            }
-            let (chosen_idx, clamped, total) = pick_sorted_page(pages, page_index)
-                .map_err(|e| (e, RarFallbackPolicy::NeverCli))?;
-            let bytes = extract_rarchive_entry(&archive, chosen_idx, MAX_ARCHIVE_ENTRY_BYTES)?;
-            Ok((bytes, clamped, total))
+) -> Result<(Arc<Vec<u8>>, usize, usize), ArchiveFailure> {
+    let key = archive_key(path)?;
+    let cached_index = lru_get(cbr_index_cache(), &key);
+
+    if let Some(ref index) = cached_index {
+        let (total, any_encrypted) = match index.as_ref() {
+            CbrPageIndex::Rarchive {
+                pages,
+                any_encrypted,
+            } => (pages.len(), *any_encrypted),
+            CbrPageIndex::Cli {
+                pages,
+                any_encrypted,
+            } => (pages.len(), *any_encrypted),
         };
+        if total == 0 {
+            return Err(if any_encrypted {
+                ArchiveFailure::Encrypted
+            } else {
+                empty_pages_error()
+            });
+        }
+        let clamped = page_index.min(total - 1);
+        if let Some(cached_bytes) = window_cache_get(&key, clamped) {
+            return Ok((cached_bytes, clamped, total));
+        }
+        if let CbrPageIndex::Cli { pages, .. } = index.as_ref() {
+            if !is_sandboxed()
+                && let Some(cli) = find_cbr_cli()
+            {
+                let (chosen_name, is_enc) = &pages[clamped];
+                if *is_enc {
+                    return Err(ArchiveFailure::Encrypted);
+                }
+                let canonical = canonical_safe_archive_path(path)?;
+                let bytes = Arc::new(cli.extract_single_entry(
+                    &canonical,
+                    chosen_name,
+                    MAX_ARCHIVE_ENTRY_BYTES,
+                )?);
+                store_window_batch(&key, clamped, Arc::clone(&bytes), Vec::new());
+                return Ok((bytes, clamped, total));
+            }
+            return Err(ArchiveFailure::UnsupportedOrEmpty(
+                "CBR CLI helper unavailable".to_string(),
+            ));
+        }
+    }
+
+    let try_rarchive = || -> RarExtractResult {
+        let mut archive = rarchive::Archive::open(&key.path).map_err(map_rarchive_error)?;
+        archive.set_memory_budget(RARCHIVE_MEM_LIMIT_BYTES);
+        let index = match cached_index {
+            Some(idx) => idx,
+            None => {
+                let (pages, any_encrypted) = collect_rarchive_pages(&archive);
+                let sorted = Arc::new(CbrPageIndex::Rarchive {
+                    pages: sort_page_ids(pages),
+                    any_encrypted,
+                });
+                lru_insert(
+                    cbr_index_cache(),
+                    INDEX_CACHE_CAPACITY,
+                    key.clone(),
+                    Arc::clone(&sorted),
+                );
+                sorted
+            }
+        };
+        let CbrPageIndex::Rarchive {
+            pages,
+            any_encrypted,
+        } = index.as_ref()
+        else {
+            return Err((empty_pages_error(), RarFallbackPolicy::NeverCli));
+        };
+        if pages.is_empty() {
+            return Err((
+                if *any_encrypted {
+                    ArchiveFailure::Encrypted
+                } else {
+                    empty_pages_error()
+                },
+                RarFallbackPolicy::NeverCli,
+            ));
+        }
+        let total = pages.len();
+        let clamped = page_index.min(total - 1);
+        if let Some(cached_bytes) = window_cache_get(&key, clamped) {
+            return Ok((cached_bytes, clamped, total));
+        }
+
+        let chosen_idx = pages[clamped];
+        let window_end = clamped
+            .saturating_add(SOLID_UPCOMING_WINDOW_SPAN)
+            .min(total);
+        let upcoming_pages: Vec<(usize, usize)> =
+            window_cache_uncached_pages(&key, (clamped + 1)..window_end)
+                .into_iter()
+                .map(|p| (p, pages[p]))
+                .collect();
+
+        let outcome = extract_rarchive_batch(
+            &archive,
+            chosen_idx,
+            MAX_ARCHIVE_ENTRY_BYTES,
+            &upcoming_pages,
+        )?;
+        let bytes = Arc::new(outcome.target_bytes);
+        store_window_batch(&key, clamped, Arc::clone(&bytes), outcome.upcoming_captured);
+        Ok((bytes, clamped, total))
+    };
 
     match try_rarchive() {
         Ok(res) => Ok(res),
@@ -810,7 +1472,7 @@ fn rar_extract_page(
             if !is_sandboxed()
                 && let Some(cli) = find_cbr_cli()
             {
-                return cli.extract_page(path, page_index);
+                return cli.extract_page(path, &key, page_index);
             }
             Err(failure)
         }
@@ -1212,8 +1874,9 @@ impl CbrCli {
     fn extract_page(
         &self,
         path: &Path,
+        key: &ArchiveKey,
         page_index: usize,
-    ) -> Result<(Vec<u8>, usize, usize), ArchiveFailure> {
+    ) -> Result<(Arc<Vec<u8>>, usize, usize), ArchiveFailure> {
         let canonical = canonical_safe_archive_path(path)?;
         let entries = self.list_entries(&canonical)?;
         let mut any_encrypted = false;
@@ -1230,14 +1893,44 @@ impl CbrCli {
                 });
             }
         }
-        if pages.is_empty() && any_encrypted {
-            return Err(ArchiveFailure::Encrypted);
+        let sorted = sort_page_ids(pages);
+        let cli_index = Arc::new(CbrPageIndex::Cli {
+            pages: sorted,
+            any_encrypted,
+        });
+        lru_insert(
+            cbr_index_cache(),
+            INDEX_CACHE_CAPACITY,
+            key.clone(),
+            Arc::clone(&cli_index),
+        );
+
+        let CbrPageIndex::Cli {
+            pages: ref sorted,
+            any_encrypted,
+        } = *cli_index
+        else {
+            return Err(empty_pages_error());
+        };
+        if sorted.is_empty() {
+            return Err(if any_encrypted {
+                ArchiveFailure::Encrypted
+            } else {
+                empty_pages_error()
+            });
         }
-        let ((chosen_name, is_enc), clamped, total) = pick_sorted_page(pages, page_index)?;
+        let total = sorted.len();
+        let clamped = page_index.min(total - 1);
+        let (ref chosen_name, is_enc) = sorted[clamped];
         if is_enc {
             return Err(ArchiveFailure::Encrypted);
         }
-        let bytes = self.extract_single_entry(&canonical, &chosen_name, MAX_ARCHIVE_ENTRY_BYTES)?;
+        let bytes = Arc::new(self.extract_single_entry(
+            &canonical,
+            chosen_name,
+            MAX_ARCHIVE_ENTRY_BYTES,
+        )?);
+        store_window_batch(key, clamped, Arc::clone(&bytes), Vec::new());
         Ok((bytes, clamped, total))
     }
 
@@ -1460,5 +2153,292 @@ fn parse_comic_info_xml(bytes: &[u8], fields: &mut BTreeMap<String, String>) {
             Err(_) => break,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufWriter, Cursor, Write};
+    use std::sync::atomic::AtomicU64;
+
+    use zip::CompressionMethod;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    use super::*;
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempTestDir(PathBuf);
+
+    impl TempTestDir {
+        fn new(prefix: &str) -> Self {
+            let id = TEST_DIR_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "media-sort-comic-{prefix}-{}-{id}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temp test dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_zip_entries(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).expect("create zip");
+        let mut writer = ZipWriter::new(BufWriter::new(file));
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for &(name, data) in entries {
+            writer.start_file(name, opts).expect("start zip entry");
+            writer.write_all(data).expect("write zip entry");
+        }
+        writer
+            .finish()
+            .expect("finish zip")
+            .into_inner()
+            .expect("flush zip");
+    }
+
+    fn write_tar_entries(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).expect("create tar");
+        let mut builder = tar::Builder::new(file);
+        for &(name, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            builder
+                .append_data(&mut header, name, Cursor::new(data))
+                .expect("append tar entry");
+        }
+        builder.finish().expect("finish tar");
+    }
+
+    #[test]
+    fn cbt_cached_o1_seek_across_multi_page_tar() {
+        let dir = TempTestDir::new("cbt_o1");
+        let cbt_path = dir.path().join("book.cbt");
+        let long_name = format!(
+            "z_chapter/{}/page3.png",
+            "very_long_subdirectory_segment_to_force_gnu_longname_extension".repeat(2)
+        );
+        let p1 = b"PAGE-1-DATA";
+        let p2 = b"PAGE-2-PAYLOAD-LONGER";
+        let p3 = b"PAGE-3-LONGNAME-DATA";
+        let p10 = b"PAGE-10-FINAL";
+
+        write_tar_entries(
+            &cbt_path,
+            &[
+                ("page10.png", p10),
+                (
+                    "ComicInfo.xml",
+                    b"<ComicInfo><Title>Tar</Title></ComicInfo>",
+                ),
+                (&long_name, p3),
+                ("page2.png", p2),
+                ("page1.png", p1),
+            ],
+        );
+
+        let key = archive_key(&cbt_path).expect("tar archive key");
+        assert!(lru_get(cbt_index_cache(), &key).is_none());
+
+        let (bytes0, clamped0, total0) = tar_extract_page(&cbt_path, 0).expect("page 0");
+        assert_eq!(bytes0.as_slice(), p1);
+        assert_eq!((clamped0, total0), (0, 4));
+
+        // Cache must now hold sorted offsets directly usable via O(1) seek.
+        let cached = lru_get(cbt_index_cache(), &key).expect("cbt cache populated");
+        assert_eq!(cached.len(), 4);
+        assert_eq!(cached[0].name, "page1.png");
+        assert_eq!(cached[1].name, "page2.png");
+        assert_eq!(cached[2].name, "page10.png");
+        assert_eq!(cached[3].name, long_name);
+
+        let expected: [(usize, usize, &[u8]); 5] =
+            [(0, 0, p1), (1, 1, p2), (2, 2, p10), (3, 3, p3), (99, 3, p3)];
+        for (req, exp_clamped, exp_bytes) in expected {
+            let (bytes, clamped, total) = tar_extract_page(&cbt_path, req).expect("cached seek");
+            assert_eq!(total, 4);
+            assert_eq!(clamped, exp_clamped);
+            assert_eq!(bytes.as_slice(), exp_bytes);
+        }
+
+        // Modifying the file invalidates the ArchiveKey even at the same path.
+        write_tar_entries(
+            &cbt_path,
+            &[("page1.png", b"UPDATED-PAGE-1-DIFFERENT-SIZE")],
+        );
+        let (updated, clamped, total) = tar_extract_page(&cbt_path, 0).expect("updated tar");
+        assert_eq!((clamped, total), (0, 1));
+        assert_eq!(updated.as_slice(), b"UPDATED-PAGE-1-DIFFERENT-SIZE");
+    }
+
+    #[test]
+    fn cbz_cached_index_page_turns() {
+        let dir = TempTestDir::new("cbz_cache");
+        let cbz_path = dir.path().join("issue.cbz");
+        let p1 = b"cbz-page-1";
+        let p2 = b"cbz-page-2";
+        let p10 = b"cbz-page-10";
+
+        write_zip_entries(
+            &cbz_path,
+            &[
+                ("page10.png", p10),
+                ("ComicInfo.xml", b"<ComicInfo/>"),
+                ("page2.png", p2),
+                ("page1.png", p1),
+            ],
+        );
+
+        let key = archive_key(&cbz_path).expect("cbz archive key");
+        assert!(lru_get(cbz_index_cache(), &key).is_none());
+
+        let (bytes0, clamped0, total0) = zip_extract_page(&cbz_path, 0).expect("cbz page 0");
+        assert_eq!(bytes0.as_slice(), p1);
+        assert_eq!((clamped0, total0), (0, 3));
+        assert!(lru_get(cbz_index_cache(), &key).is_some());
+
+        for (req, exp_clamped, exp_bytes) in [
+            (1, 1, p2.as_slice()),
+            (2, 2, p10.as_slice()),
+            (50, 2, p10.as_slice()),
+        ] {
+            let (bytes, clamped, total) =
+                zip_extract_page(&cbz_path, req).expect("cbz cached turn");
+            assert_eq!((clamped, total), (exp_clamped, 3));
+            assert_eq!(bytes.as_slice(), exp_bytes);
+        }
+
+        // Overwrite with a different-sized archive to verify key invalidation.
+        write_zip_entries(&cbz_path, &[("only.png", b"only-page-updated")]);
+        let (bytes, clamped, total) = zip_extract_page(&cbz_path, 0).expect("updated cbz");
+        assert_eq!((clamped, total), (0, 1));
+        assert_eq!(bytes.as_slice(), b"only-page-updated");
+    }
+
+    #[test]
+    fn comic_page_window_cache_enforces_24_mib_lru_cap() {
+        let mut cache = WindowCacheState::new(COMIC_PAGE_WINDOW_CACHE_MAX_BYTES);
+        let key = ArchiveKey {
+            path: PathBuf::from("/virtual/solid.cb7"),
+            file_len: 1234,
+            modified_nanos: 5678,
+        };
+        let nine_mib = 9 * 1024 * 1024;
+
+        cache.insert(key.clone(), 0, Arc::new(vec![0u8; nine_mib]));
+        cache.insert(key.clone(), 1, Arc::new(vec![1u8; nine_mib]));
+        assert_eq!(cache.total_bytes, 2 * nine_mib);
+
+        // Inserting a 3rd 9 MiB page (27 MiB > 24 MiB) must evict page 0.
+        cache.insert(key.clone(), 2, Arc::new(vec![2u8; nine_mib]));
+        assert_eq!(cache.total_bytes, 2 * nine_mib);
+        assert!(!cache.contains(&key, 0));
+        assert!(cache.contains(&key, 1));
+        assert!(cache.contains(&key, 2));
+
+        // Reading page 1 promotes it to MRU, so inserting page 3 evicts page 2 instead.
+        assert!(cache.get(&key, 1).is_some());
+        cache.insert(key.clone(), 3, Arc::new(vec![3u8; nine_mib]));
+        assert!(cache.contains(&key, 1));
+        assert!(!cache.contains(&key, 2));
+        assert!(cache.contains(&key, 3));
+        assert!(cache.total_bytes <= COMIC_PAGE_WINDOW_CACHE_MAX_BYTES);
+
+        // Entries larger than the 24 MiB cap are skipped without evicting existing entries.
+        let oversized = COMIC_PAGE_WINDOW_CACHE_MAX_BYTES + 1;
+        cache.insert(key.clone(), 4, Arc::new(vec![4u8; oversized]));
+        assert!(!cache.contains(&key, 4));
+        assert!(cache.contains(&key, 1));
+        assert!(cache.contains(&key, 3));
+    }
+
+    #[test]
+    fn cbr_batch_window_caches_upcoming_pages_and_never_stops_before_clamped() {
+        let dir = TempTestDir::new("cbr_window");
+
+        // Forward order: page 0 caches page 0 + 8 upcoming (0..=8), leaving 9..12 uncached.
+        let fwd_path = dir.path().join("forward.cbr");
+        let fwd_data: Vec<(String, Vec<u8>)> = (1..=12)
+            .map(|i| {
+                (
+                    format!("page{i:02}.png"),
+                    format!("fwd-page-{i:02}").into_bytes(),
+                )
+            })
+            .collect();
+        let fwd_refs: Vec<(&str, &[u8])> = fwd_data
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        write_zip_entries(&fwd_path, &fwd_refs);
+
+        let fwd_key = archive_key(&fwd_path).expect("fwd key");
+        let (bytes0, clamped0, total0) = rar_extract_page(&fwd_path, 0).expect("fwd page 0");
+        assert_eq!((clamped0, total0), (0, 12));
+        assert_eq!(bytes0.as_slice(), b"fwd-page-01");
+
+        {
+            let guard = comic_page_window_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for p in 0..=8 {
+                assert!(
+                    guard.contains(&fwd_key, p),
+                    "expected forward page {p} in window cache"
+                );
+            }
+            for p in 9..12 {
+                assert!(
+                    !guard.contains(&fwd_key, p),
+                    "did not expect forward page {p} in window cache yet"
+                );
+            }
+        }
+
+        // Subsequent page turn hits window cache and matches payload.
+        let (bytes5, clamped5, total5) = rar_extract_page(&fwd_path, 5).expect("fwd page 5");
+        assert_eq!((clamped5, total5), (5, 12));
+        assert_eq!(bytes5.as_slice(), b"fwd-page-06");
+
+        // Reverse archive order: page01 is the LAST entry in the archive.
+        // Requesting page 0 must NOT stop early after capturing 8 upcoming entries before it.
+        let rev_path = dir.path().join("reverse.cbr");
+        let rev_data: Vec<(String, Vec<u8>)> = (1..=12)
+            .rev()
+            .map(|i| {
+                (
+                    format!("page{i:02}.png"),
+                    format!("rev-page-{i:02}").into_bytes(),
+                )
+            })
+            .collect();
+        let rev_refs: Vec<(&str, &[u8])> = rev_data
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        write_zip_entries(&rev_path, &rev_refs);
+
+        let rev_key = archive_key(&rev_path).expect("rev key");
+        let (rev_bytes0, rev_clamped0, rev_total0) =
+            rar_extract_page(&rev_path, 0).expect("reverse page 0");
+        assert_eq!((rev_clamped0, rev_total0), (0, 12));
+        assert_eq!(rev_bytes0.as_slice(), b"rev-page-01");
+        assert!(
+            window_cache_get(&rev_key, 0).is_some(),
+            "clamped target must be cached even when encountered last"
+        );
     }
 }
