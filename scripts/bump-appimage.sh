@@ -756,9 +756,10 @@ done
 # moved at all.
 #
 # It is deliberately independent of versions.env's DAV1D_VERSION (the Windows
-# job stays on the release that survives MSVC's stdatomic.h, 1.5.5, while the
-# AppImage may sit elsewhere), so it is resolved against its own pin -- forward
-# only, so a pin ahead of the newest soaked release is kept, not dragged back.
+# job needs a release whose stdatomic.h survives the MSVC toolset -- the floor is
+# recorded in the pin file, next to the value -- while the AppImage may sit
+# elsewhere), so it is resolved against its own pin -- forward only, so a pin
+# ahead of the newest soaked release is kept, not dragged back.
 if is_selected dav1d; then
   [ -f "$CI_PINS_FILE" ] || die "no such pin file: $CI_PINS_FILE"
   ci_pinned=$(ci_pin_get "$CI_PINS_FILE" DAV1D_TAG)
