@@ -226,6 +226,13 @@ infrastructure — nothing here is published automatically.
    carry `x-checker-data`, so Flathub's external data checker bumps the tag
    *and* the vendor archive's url+sha256.
 
+   When you submit, point the vendor source's `url` at the same tag you are
+   submitting and its `sha256` at that release's `cargo-vendor.tar.gz` (download
+   it and `sha256sum` it, or run the checker); the checker only keeps both
+   sources in sync for later releases, and the committed upstream template still
+   names the previous release because `release.sh` tags before `release.yml`
+   builds and attaches the asset.
+
    `v3.0.1` predates that asset, and the manifest pins its tarball's sha256. The
    pinned value is reproducible **only** when the tarball is built from that tag
    with the current `scripts/build-cargo-vendor.sh` (the script does not exist in
