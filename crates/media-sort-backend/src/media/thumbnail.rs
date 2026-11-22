@@ -32,6 +32,9 @@ pub fn generate_thumbnail(
 /// Dimensions of the image a thumbnail would be made from, or `Ok(None)` when
 /// there is no image (an audio file without embedded cover art).
 pub fn thumbnail_dimensions(path: &Path) -> Result<Option<(u32, u32)>, image::ImageError> {
+    if super::svg::is_svg_path(path) {
+        return super::svg::svg_dimensions(path).map(Some);
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())

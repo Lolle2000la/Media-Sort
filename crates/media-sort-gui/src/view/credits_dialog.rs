@@ -145,6 +145,7 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
         ("quick-xml", "https://github.com/tafia/quick-xml"),
         ("quote", "https://github.com/dtolnay/quote"),
         ("rarchive", "https://github.com/gelenmedya/rarchive"),
+        ("resvg", "https://github.com/linebender/resvg"),
         (
             "RFD (Rust File Dialogs)",
             "https://github.com/PolyMeilex/rfd",

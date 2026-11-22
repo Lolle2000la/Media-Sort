@@ -562,6 +562,10 @@ mod tests {
             "webp",
             "tiff",
             "bmp",
+            "svg",
+            "SVG",
+            "svgz",
+            "SVGZ",
             "pdf",
             "PDF",
             "cbz",
@@ -578,6 +582,14 @@ mod tests {
         assert_eq!(
             detect_media_type_hashset(Path::new("report.pdf"), true),
             MediaType::Document
+        );
+        assert_eq!(
+            detect_media_type_hashset(Path::new("icon.svg"), true),
+            MediaType::Image
+        );
+        assert_eq!(
+            detect_media_type_hashset(Path::new("icon.svgz"), true),
+            MediaType::Image
         );
     }
 

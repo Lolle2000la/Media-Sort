@@ -30,6 +30,8 @@ tar.workspace = true
 calamine.workspace = true
 csv.workspace = true
 rarchive.workspace = true
+resvg.workspace = true
+flate2.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg.workspace = true

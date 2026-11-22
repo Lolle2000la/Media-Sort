@@ -84,6 +84,8 @@ tar = { version = "0.4", default-features = false }
 calamine = "0.38"
 csv = "1.4"
 rarchive = "0.1"
+resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+flate2 = "1"
 
 [profile.release]
 opt-level = 3

@@ -660,6 +660,14 @@ mod tests {
             detect_media_type(Path::new("test.bmp"), true),
             MediaType::Image
         );
+        assert_eq!(
+            detect_media_type(Path::new("vector.svg"), true),
+            MediaType::Image
+        );
+        assert_eq!(
+            detect_media_type(Path::new("icon.SVGZ"), true),
+            MediaType::Image
+        );
     }
 
     #[test]
