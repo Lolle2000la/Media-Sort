@@ -273,10 +273,6 @@ jobs:
               choco install -y nasm
             fi
             choco install -y pkgconfiglite
-            # system-deps defaults BUILD_INTERNAL to "never" and hard-fails
-            # when pkg-config is absent (always on Windows runners); force
-            # the vendored meson build instead.
-            echo "SYSTEM_DEPS_DAV1D_BUILD_INTERNAL=always" >> "$GITHUB_ENV"
             # On aarch64-pc-windows-msvc, build dav1d with clang-cl instead of
             # cl: dav1d's meson needs gas-preprocessor.pl for MSVC ARM64 asm
             # (not installed), but skips that path when cc.get_id() ==
@@ -286,6 +282,21 @@ jobs:
               echo "CC=clang-cl" >> "$GITHUB_ENV"
               echo "CXX=clang-cl" >> "$GITHUB_ENV"
             fi
+
+      # dav1d-sys 0.8.3's build script swallows its own clone/compile failures,
+      # so a failed dav1d build surfaces later as "LNK1181: cannot open input
+      # file 'dav1d.lib'". The shared action builds the library from the pin in
+      # scripts/ci-pins.env (one bump moves ci.yml and release.yml together) and
+      # points system-deps at it. A caller that exported CC=clang-cl -- the
+      # aarch64 leg's setup step above does, for dav1d's ARM64 `.S` files --
+      # keeps it.
+      #
+      # This workflow restores no cache (see the note below), so the archive is
+      # rebuilt from the pinned commit on every release: a signed artifact must
+      # never depend on a cached build.
+      - name: Build dav1d (Windows)
+        if: startsWith(matrix.os, 'windows')
+        uses: ./.github/actions/build-dav1d-windows
 
       # SECURITY: never add actions/cache (or any cache restore) to this
       # workflow. Cache archives are unsigned and writable from branches; a

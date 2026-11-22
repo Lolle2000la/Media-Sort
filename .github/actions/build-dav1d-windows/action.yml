@@ -1,0 +1,148 @@
+name: Build dav1d (Windows)
+description: >
+  Build dav1d's static library for the Windows Rust builds and hand it to
+  `system-deps`, so `dav1d-sys`' build script never clones or compiles anything.
+
+# Shared by .github/workflows/ci.yml (the Windows test job, x64), its
+# `dav1d-arm64` smoke job (arm64, every CI run) and .github/workflows/release.yml
+# (x64 and aarch64), so the three cannot drift apart. Callers keep the parts this
+# action does not own: the checkout, the MSVC environment, meson/ninja and the
+# `nasm`/`pkgconfiglite` tools.
+#
+# Why the prebuild exists at all: dav1d-sys 0.8.3's build script shells out to
+# git/meson/ninja through a helper that never inspects an exit status -- it only
+# panics when the process cannot be spawned -- so a failed clone or compile is
+# silently treated as success: cargo marks the build script fresh, no dav1d.lib
+# appears, and the link then dies with "LNK1181: cannot open input file
+# 'dav1d.lib'" (ci jobs 134899537045 and 137216198289). The clone it repeats
+# comes from code.videolan.org, so retrying the compile step does not clear it.
+# Building the same static library here, from the commit pinned in
+# scripts/ci-pins.env and fetched from github.com, with `set -e` around
+# meson/ninja, makes a failure loud and retryable; `SYSTEM_DEPS_*` then points
+# the crate's build script at the install tree. The pin has a floor instead of
+# tracking the tag dav1d-sys builds: `scripts/ci-pins.env` records why.
+#
+# ARM64: dav1d's meson needs gas-preprocessor.pl for MSVC ARM64 asm (not
+# installed on the runners), and skips that path when cc.get_id() == 'clang-cl'
+# (meson >= 0.58), using clang's integrated assembler for the `.S` files
+# instead. A caller that needs that exports `CC=clang-cl` (and `CXX`) before
+# this action runs; the script names `cl` only when `CC` is unset, so the export
+# survives. No inputs: the checkout supplies `scripts/ci-pins.env`, and the
+# environment supplies the compiler.
+
+runs:
+  using: composite
+  steps:
+    # 20 min per attempt (ci.yml's copy used 10): one attempt downloads the tag
+    # archive, configures meson and compiles the library for whichever
+    # architecture the runner is, so this leaves room for a cold ninja start.
+    # The retry is for the network-shaped failures -- the archive download, a
+    # flaky pip-installed meson -- while a genuine compile error costs three
+    # attempts before the step goes red, with its exit code intact.
+    - name: Build dav1d (retry on transient network failures)
+      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+      with:
+        timeout_minutes: 20
+        max_attempts: 3
+        retry_wait_seconds: 20
+        shell: bash
+        command: |
+          set -euo pipefail
+          # retry@v4 runs `command` in a different working directory than
+          # GITHUB_WORKSPACE (it cannot honor working-directory).
+          cd "$GITHUB_WORKSPACE"
+          # meson resolves the MSVC linker by bare name, and git-bash puts
+          # C:\Program Files\Git\usr\bin -- coreutils' `link.exe`, which is
+          # not a linker -- ahead of the MSVC dirs, so `meson setup` dies
+          # with "Found GNU link.exe instead of MSVC link.exe". Promote the
+          # first PATH entry that really holds MSVC's linker, exactly as the
+          # callers' compile steps do for rustc. Doing it here rather than
+          # through GITHUB_PATH is deliberate: bash re-prepends /usr/bin on
+          # startup, so only an in-step export reorders the PATH that the
+          # meson child actually sees.
+          msvc_link_dir=""
+          while IFS= read -r entry; do
+            case "$entry" in
+              ''|/usr/bin|/bin) continue ;;
+            esac
+            if [ -f "$entry/link.exe" ]; then
+              msvc_link_dir="$entry"
+              break
+            fi
+          done <<< "$(printf '%s\n' "$PATH" | tr ':' '\n')"
+          [ -n "$msvc_link_dir" ] \
+            || { echo "::error::no MSVC linker found on PATH"; exit 1; }
+          export PATH="$msvc_link_dir:$PATH"
+          # Name the compiler explicitly instead of letting meson resolve one
+          # from PATH. That keeps ccache/sccache -- the image ships ccache in
+          # C:\Strawberry\c\bin -- out of build.ninja, so the log shows the
+          # compiler that actually ran; with CC set meson parses the entry
+          # rather than probing for a cache. Only when the caller left CC
+          # unset: an ARM64 caller exports CC=clang-cl before calling, and that
+          # export is what makes dav1d's ARM64 `.S` files build (see the header).
+          if [ -z "${CC:-}" ]; then
+            CC_WIN="$(cygpath -w "$msvc_link_dir")/cl.exe"
+            [ -f "$CC_WIN" ] || { echo "::error::$CC_WIN not found"; exit 1; }
+            export CC="$CC_WIN"
+          fi
+          # The pin lives in scripts/ci-pins.env, not inline in the workflows:
+          # the weekly bump (.github/workflows/appimage-bump.yml) pushes with
+          # GITHUB_TOKEN or a Contents+Pull-requests PAT, and neither can
+          # create or modify a file under .github/workflows/ (that needs the
+          # `workflows` permission), so a pin written inline could never be
+          # moved automatically. `set -e` aborts this step when the file is
+          # missing or does not parse, and both values are asserted below, so a
+          # broken pin file fails here instead of building nothing.
+          [ -f scripts/ci-pins.env ] \
+            || { echo "::error::scripts/ci-pins.env is missing"; exit 1; }
+          set -a
+          . ./scripts/ci-pins.env
+          set +a
+          [ -n "${DAV1D_TAG:-}" ] \
+            || { echo "::error::scripts/ci-pins.env does not define DAV1D_TAG"; exit 1; }
+          [ -n "${DAV1D_COMMIT:-}" ] \
+            || { echo "::error::scripts/ci-pins.env does not define DAV1D_COMMIT"; exit 1; }
+          # The prefix is a stable absolute path, because it is baked into the
+          # build script's cached rustc-link-search that a restored target/
+          # reuses, and it carries the commit so that bumping the pin changes
+          # SYSTEM_DEPS_DAV1D_SEARCH_NATIVE/INCLUDE and re-runs the system-deps
+          # probe instead of being absorbed by a warm cache.
+          prefix="$GITHUB_WORKSPACE/dav1d-static-$DAV1D_COMMIT"
+          rm -rf "$prefix" dav1d-src dav1d-build dav1d.tar.gz
+          curl -fsSL -o dav1d.tar.gz \
+            "https://github.com/videolan/dav1d/archive/$DAV1D_COMMIT.tar.gz"
+          mkdir dav1d-src
+          tar xzf dav1d.tar.gz -C dav1d-src --strip-components=1
+          grep -q "version: '$DAV1D_TAG'" dav1d-src/meson.build \
+            || { echo "::error::$DAV1D_COMMIT is not dav1d $DAV1D_TAG"; exit 1; }
+          meson setup -Ddefault_library=static --prefix "$prefix" \
+            dav1d-build dav1d-src
+          ninja -C dav1d-build
+          meson install -C dav1d-build
+          # meson uses its documented "classic" naming, under which an MSVC
+          # static library is `libdav1d.a` (its FAQ explains the libfoo.a
+          # choice), while `cargo:rustc-link-lib=dav1d` makes link.exe look
+          # for `dav1d.lib`. That mismatch is the "LNK1181: cannot open input
+          # file 'dav1d.lib'" this whole step started from. `-Dnamingscheme=platform`
+          # is not a way out: for a plain `library()` call the platform values
+          # are overwritten by the name_prefix/name_suffix fallbacks in
+          # StaticLibrary.determine_default_prefix_and_suffix, and meson still
+          # installs libdav1d.a (verified on the x64 runner). So publish
+          # whatever archive was installed under the name the Rust link asks
+          # for -- on whichever architecture this runner is.
+          lib="$prefix/lib/dav1d.lib"
+          if [ ! -f "$lib" ]; then
+            built="$(find "$prefix/lib" -maxdepth 1 -type f \
+              \( -name '*.a' -o -name '*.lib' \) -print -quit)"
+            [ -n "$built" ] \
+              || { echo "::error::no static archive was installed into $prefix/lib"; exit 1; }
+            cp "$built" "$lib"
+          fi
+          {
+            echo "SYSTEM_DEPS_DAV1D_BUILD_INTERNAL=never"
+            echo "SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG=1"
+            echo "SYSTEM_DEPS_DAV1D_LIB=dav1d"
+            echo "SYSTEM_DEPS_DAV1D_LINK=static"
+            echo "SYSTEM_DEPS_DAV1D_SEARCH_NATIVE=$prefix/lib"
+            echo "SYSTEM_DEPS_DAV1D_INCLUDE=$prefix/include"
+          } >> "$GITHUB_ENV"
