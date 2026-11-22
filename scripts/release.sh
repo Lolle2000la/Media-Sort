@@ -119,9 +119,16 @@ command -v curl >/dev/null || die "curl not found on PATH (required to fetch the
 # it can create the pinned venv the script installs them into.
 PY="${PYTHON:-python3}"
 command -v "$PY" >/dev/null 2>&1 || die "Python interpreter '$PY' not found (required to regenerate flatpak/cargo-sources.json)"
-if ! "$PY" -c 'import aiohttp, tomlkit' >/dev/null 2>&1 \
-   && ! "$PY" -m venv --help >/dev/null 2>&1; then
-  die "'$PY' has neither aiohttp/tomlkit nor a working 'venv' module; install python3-venv or set PYTHON to an interpreter that can provision them"
+if ! "$PY" -c 'import aiohttp, tomlkit' >/dev/null 2>&1; then
+  # `python3 -m venv --help` exits 0 even when python3-venv is missing (Debian/
+  # Ubuntu); only a real creation fails, in ensurepip. Probe for real, quietly,
+  # and leave nothing behind.
+  VENV_PROBE="$(mktemp -d)" || die "cannot create a temporary directory to probe '$PY'"
+  if ! "$PY" -m venv "$VENV_PROBE/venv" >/dev/null 2>&1; then
+    rm -rf "$VENV_PROBE"
+    die "'$PY' has neither aiohttp/tomlkit nor a working 'venv' module; install python3-venv or set PYTHON to an interpreter that can provision them"
+  fi
+  rm -rf "$VENV_PROBE"
 fi
 
 cd "$(git rev-parse --show-toplevel)" || die "not inside a git repository"

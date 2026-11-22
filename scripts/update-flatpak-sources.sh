@@ -78,7 +78,7 @@ OUT_FILE="flatpak/cargo-sources.json"
 
 [ -f "$LOCK_FILE" ] || infra_err "$LOCK_FILE not found in $REPO_ROOT"
 
-WORK_DIR="$(mktemp -d)"
+WORK_DIR="$(mktemp -d)" || infra_err "cannot create a temporary directory"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 

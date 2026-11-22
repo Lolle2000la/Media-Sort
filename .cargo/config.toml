@@ -9,9 +9,11 @@
 # it. Toolchains before 1.100 warn about the unknown key and ignore it, so the
 # 1.98 MSRV keeps working; CI runs stable (>= 1.100). The AppImage container
 # still pins Rust 1.99.1 (packaging/appimage/versions.env, bumped by the
-# appimage-bump workflow) and so ignores the key -- harmless, it builds the
-# committed lock and never re-resolves. Take a too-new version deliberately for
-# one command with CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow.
+# appimage-bump workflow) and so ignores the key -- harmless only because the
+# container builds without `--locked` and relies on release.sh refreshing the
+# lock before tagging; changing that would let it silently re-resolve. Take a
+# too-new version deliberately for one command with
+# CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow.
 [registry]
 global-min-publish-age = "14 days"
 
