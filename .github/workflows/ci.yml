@@ -289,7 +289,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          timeout_minutes: 30
+          timeout_minutes: 10
           max_attempts: 3
           retry_wait_seconds: 20
           shell: bash
@@ -298,15 +298,39 @@ jobs:
             # retry@v4 runs `command` in a different working directory than
             # GITHUB_WORKSPACE (it cannot honor working-directory).
             cd "$GITHUB_WORKSPACE"
+            # meson resolves the MSVC linker by bare name, and git-bash puts
+            # C:\Program Files\Git\usr\bin -- coreutils' `link.exe`, which is
+            # not a linker -- ahead of the MSVC dirs, so `meson setup` dies
+            # with "Found GNU link.exe instead of MSVC link.exe". Promote the
+            # first PATH entry that really holds MSVC's linker, exactly as the
+            # compile step below does for rustc. Doing it here rather than
+            # through GITHUB_PATH is deliberate: bash re-prepends /usr/bin on
+            # startup, so only an in-step export reorders the PATH that the
+            # meson child actually sees.
+            msvc_link_dir=""
+            while IFS= read -r entry; do
+              case "$entry" in
+                ''|/usr/bin|/bin) continue ;;
+              esac
+              if [ -f "$entry/link.exe" ]; then
+                msvc_link_dir="$entry"
+                break
+              fi
+            done <<< "$(printf '%s\n' "$PATH" | tr ':' '\n')"
+            if [ -n "$msvc_link_dir" ]; then
+              export PATH="$msvc_link_dir:$PATH"
+            fi
             # 1.5.0 is the tag dav1d-sys 0.8.3 builds; DAV1D_COMMIT is that
             # tag's peeled sha, so the archive cannot move under us the way a
             # tag can. Bump both together with the crate.
             DAV1D_TAG=1.5.0
             DAV1D_COMMIT=32cf02af50f32af108a3b281c452788dccdac648
-            # A stable absolute path on purpose: it is baked into the build
-            # script's cached rustc-link-search, which a restored target/
-            # reuses on later runs.
-            prefix="$GITHUB_WORKSPACE/dav1d-static"
+            # The prefix is a stable absolute path, because it is baked into
+            # the build script's cached rustc-link-search that a restored
+            # target/ reuses, and it carries the commit so that bumping the
+            # pin changes SYSTEM_DEPS_DAV1D_SEARCH_NATIVE/INCLUDE and re-runs
+            # the system-deps probe instead of being absorbed by a warm cache.
+            prefix="$GITHUB_WORKSPACE/dav1d-static-$DAV1D_COMMIT"
             rm -rf "$prefix" dav1d-src dav1d-build dav1d.tar.gz
             curl -fsSL -o dav1d.tar.gz \
               "https://github.com/videolan/dav1d/archive/$DAV1D_COMMIT.tar.gz"
@@ -344,10 +368,11 @@ jobs:
           key: ${{ matrix.os }}-fixtures-${{ hashFiles('crates/benchmarks/src/fixture_gen.rs', 'resources/MockState/mock 1.jpg') }}
 
       # Compiling is split from executing so that only the compile is retried:
-      # a toolchain or network flake building the vendored libjpeg-turbo (and
-      # the prebuilt dav1d, downloaded by the step above) is retried, while a
-      # genuine test failure still fails the run below immediately instead of
-      # being retried until it looks green.
+      # a toolchain flake in the cargo build, a network flake fetching crates,
+      # or a retried libjpeg-turbo build is retried, while a genuine test
+      # failure still fails the run below immediately instead of being retried
+      # until it looks green. dav1d is already built by the step above, so this
+      # only consumes that install tree.
       - name: Build Test Binaries (retry on transient network failures)
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         env:
