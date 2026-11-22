@@ -3,7 +3,9 @@
   "extends": ["config:recommended"],
   "labels": ["dependencies"],
   "timezone": "Europe/Berlin",
-  "dependencyDashboard": true,
+  "dependencyDashboard": {
+    "enabled": true
+  },
   "osvVulnerabilityAlerts": true,
   "minimumReleaseAge": "14 days",
   "lockFileMaintenance": {
