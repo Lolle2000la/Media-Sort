@@ -112,6 +112,17 @@ fi
 TAG="v$VERSION"
 
 command -v cargo >/dev/null || die "cargo not found on PATH"
+command -v curl >/dev/null || die "curl not found on PATH (required to fetch the Flatpak cargo-sources generator)"
+
+# The release commit regenerates flatpak/cargo-sources.json, so the interpreter
+# must be able to run the generator: either it already imports the two deps, or
+# it can create the pinned venv the script installs them into.
+PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || die "Python interpreter '$PY' not found (required to regenerate flatpak/cargo-sources.json)"
+if ! "$PY" -c 'import aiohttp, tomlkit' >/dev/null 2>&1 \
+   && ! "$PY" -m venv --help >/dev/null 2>&1; then
+  die "'$PY' has neither aiohttp/tomlkit nor a working 'venv' module; install python3-venv or set PYTHON to an interpreter that can provision them"
+fi
 
 cd "$(git rev-parse --show-toplevel)" || die "not inside a git repository"
 

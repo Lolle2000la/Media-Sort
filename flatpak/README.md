@@ -237,9 +237,10 @@ regenerated automatically rather than hand-edited:
 The script fetches `flatpak-cargo-generator.py` from
 [flatpak-builder-tools](https://github.com/flatpak/flatpak-builder-tools)
 (`cargo/`, pinned to a commit in the script) and needs `aiohttp` and `tomlkit`;
-when the interpreter lacks them it builds a throwaway venv. Run it by hand after
-changing `Cargo.lock` (or to verify a tagged tree), with `--check` to compare
-without writing:
+it installs both at pinned versions into a throwaway venv, so nothing has to be
+installed beforehand (only a `$PYTHON` that already imports both skips the venv).
+Run it by hand after changing `Cargo.lock` (or to verify a tagged tree), with
+`--check` to compare without writing:
 
 ```bash
 bash scripts/update-flatpak-sources.sh          # rewrite flatpak/cargo-sources.json

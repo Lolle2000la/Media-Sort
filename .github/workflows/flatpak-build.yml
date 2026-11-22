@@ -50,12 +50,9 @@ jobs:
         # flatpak/cargo-sources.json is regenerated (and committed) at release
         # time, so CI regenerates it here from the lock instead of demanding a
         # second commit: this validates a dependency change against the offline
-        # build from the checked-out lock alone. Installing the generator's deps
-        # here lets scripts/update-flatpak-sources.sh reuse this interpreter
-        # instead of building a venv.
-        run: |
-          pip install --quiet --disable-pip-version-check aiohttp tomlkit
-          bash scripts/update-flatpak-sources.sh
+        # build from the checked-out lock alone. The script pins the generator's
+        # deps and installs them into its own venv from this python3.
+        run: bash scripts/update-flatpak-sources.sh
 
       - name: Install flatpak-builder and the runtime
         run: |
