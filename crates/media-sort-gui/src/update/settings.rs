@@ -93,6 +93,23 @@ pub fn handle_settings_message(state: &mut AppState, msg: SettingsMessage) -> Ta
             state.settings.mark_dirty();
             Task::none()
         }
+        SettingsMessage::ToggleShowDocumentsByDefault(val) => {
+            state.settings.general.show_documents_by_default = val;
+            state.settings.mark_dirty();
+            Task::none()
+        }
+        SettingsMessage::ToggleLibreOfficePreview(val) => {
+            state.settings.advanced.enable_libreoffice_preview = val;
+            state.settings.mark_dirty();
+            state.cache.document_cache.clear();
+            if let Some(path) = state.document.current_path.clone() {
+                let page_index = state.document.page_index;
+                state.document.loading = true;
+                state.document.data = None;
+                return super::tasks::load_document_preview_task(path, page_index, val);
+            }
+            Task::none()
+        }
         SettingsMessage::RestoreDefaultKeyBindings => {
             state.settings.keybindings =
                 media_sort_core::settings::keybindings::KeyBindings::default();
@@ -141,6 +158,8 @@ pub fn handle_settings_loaded(
     match *result {
         Ok(settings) => {
             state.settings = settings;
+            state.media_grid.type_filter.documents =
+                state.settings.general.show_documents_by_default;
             #[cfg(target_os = "windows")]
             {
                 if state.settings.general.integration_with_windows

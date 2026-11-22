@@ -57,6 +57,14 @@ Media Sort enthält vorkonfigurierte visuelle Designs zur Anpassung der Benutzer
 
 ---
 
+### Dokumente
+
+#### Dokumente standardmäßig anzeigen
+
+- **Verhalten:** Standardmäßig aktiviert (`true`). Steuert, ob der sitzungsaktive Filter-Chip **Dokumente** beim Öffnen eines Ordners standardmäßig aktiviert ist. Deaktivieren Sie diese Option, wenn Dokumentdateien (PDF, EPUB, Comic-Archive, Office-Dokumente, Tabellenkalkulationen, Markdown und Klartext) standardmäßig ausgeblendet bleiben und nur bei Bedarf über die Filterleiste eingeblendet werden sollen (siehe [Konfigurationsdatei](../../advanced/config-file/) für den Schlüssel `show_documents_by_default`).
+
+---
+
 ### Updates
 
 :::note
@@ -98,6 +106,14 @@ Die Registerkarte **Erweitert** enthält Optionen für fortgeschrittene Nutzer, 
 #### Hardware-Videodekodierung deaktivieren
 
 - **Verhalten:** Standardmäßig verwendet Media Sort hardwarebeschleunigte Videodekodierung (mpv-Modus `hwdec=auto-copy`) und rendert Videoframes in ihrer nativen Auflösung. Wenn ein Video nicht dekodiert werden kann oder fehlerhaft dargestellt wird, erzwingt diese Option die Software-Dekodierung (`hwdec=no`). Frames werden dann in einer begrenzten Auflösung (960×540) gerendert, damit die CPU-Dekodierung flüssig bleibt. Die Änderung wird sofort wirksam.
+
+---
+
+### Dokumente
+
+#### LibreOffice für die Vorschau von Office-Dokumenten verwenden
+
+- **Verhalten:** Standardmäßig aktiviert (`true`). Wenn außerhalb von Flatpak-/Snap-Sandboxes eine lokale `soffice`/`libreoffice`-Installation erkannt wird, rendert Media Sort die Vorschau von Word-, PowerPoint- und OpenDocument-Dateien (`.doc`, `.docx`, `.odt`, `.ppt`, `.pptx`, `.odp`, `.rtf`) über eine Headless-PDF-Konvertierung mit LibreOffice. Wenn die Option deaktiviert ist – oder LibreOffice nicht gefunden wird bzw. die App in einer Sandbox läuft –, greift Media Sort auf die reine Rust-XML-/Textextraktion zurück.
 
 ---
 

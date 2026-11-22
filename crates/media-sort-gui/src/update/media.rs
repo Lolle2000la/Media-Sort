@@ -24,9 +24,12 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
 
             let filtered = state.media_grid.filtered_entries();
             if filtered.is_empty() {
+                drop(filtered);
                 state.media_grid.selected_index = None;
                 state.metadata.current = None;
                 state.cache.selected_image = None;
+                state.video.select(None);
+                state.document.reset();
                 Task::none()
             } else {
                 let target_index = previously_selected_path
@@ -458,7 +461,198 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             }
             Task::none()
         }
+        MediaMessage::ToggleTypeFilter(ty) => {
+            let previously_selected_path = state.media_grid.selected_index.and_then(|idx| {
+                state
+                    .media_grid
+                    .filtered_entries()
+                    .get(idx)
+                    .map(|entry| entry.path.clone())
+            });
+
+            state.media_grid.type_filter.toggle(ty);
+
+            let filtered = state.media_grid.filtered_entries();
+            if filtered.is_empty() {
+                drop(filtered);
+                state.media_grid.selected_index = None;
+                state.metadata.current = None;
+                state.cache.selected_image = None;
+                state.video.select(None);
+                if let Some(ref player) = state.audio.player {
+                    player.stop();
+                }
+                state.audio.playing = false;
+                state.audio.position = 0.0;
+                state.audio.duration = 0.0;
+                state.audio.selected_cover = None;
+                state.document.reset();
+                Task::none()
+            } else {
+                let preserved_idx = previously_selected_path.and_then(|prev_path| {
+                    filtered.iter().position(|entry| entry.path == prev_path)
+                });
+                drop(filtered);
+                if let Some(idx) = preserved_idx {
+                    state.media_grid.selected_index = Some(idx);
+                    Task::batch(vec![
+                        super::tasks::load_visible_thumbnails(state),
+                        super::tasks::scroll_to_selected_entry(state, idx),
+                    ])
+                } else {
+                    Task::batch(vec![
+                        super::tasks::load_visible_thumbnails(state),
+                        super::tasks::select_and_load_entry(state, 0),
+                    ])
+                }
+            }
+        }
+        MediaMessage::DocumentLoaded {
+            path,
+            page_index,
+            result,
+        } => {
+            if state.document.current_path.as_ref() != Some(&path)
+                || state.document.page_index != page_index
+            {
+                return Task::none();
+            }
+            state.document.loading = false;
+            match result {
+                Ok(preview) => {
+                    let actual_page = match &preview {
+                        media_sort_backend::media::document::DocumentPreview::PagedImage {
+                            page_index,
+                            ..
+                        } => Some(*page_index),
+                        media_sort_backend::media::document::DocumentPreview::Markdown {
+                            chapter_index,
+                            ..
+                        } => *chapter_index,
+                        _ => None,
+                    };
+                    if let Some(actual) = actual_page {
+                        state.document.page_index = actual;
+                        state
+                            .cache
+                            .document_cache
+                            .push((path, actual), preview.clone());
+                    } else {
+                        state
+                            .cache
+                            .document_cache
+                            .push((path, page_index), preview.clone());
+                    }
+                    state.document.data = Some(
+                        crate::state::document::DocumentPreviewData::from_backend(&preview),
+                    );
+                }
+                Err(err) => {
+                    tracing::error!("Failed to load document preview: {err}");
+                    state.document.data =
+                        Some(crate::state::document::DocumentPreviewData::Error(err));
+                }
+            }
+            Task::none()
+        }
+        MediaMessage::DocumentPrevPage => navigate_document_page(state, false),
+        MediaMessage::DocumentNextPage => navigate_document_page(state, true),
+        MediaMessage::DocumentSelectSheet(idx) => {
+            if let Some(crate::state::document::DocumentPreviewData::Spreadsheet {
+                sheets,
+                active_sheet,
+            }) = &mut state.document.data
+                && idx < sheets.len()
+            {
+                *active_sheet = idx;
+            }
+            Task::none()
+        }
+        MediaMessage::DocumentLinkClicked(uri) => {
+            if is_safe_http_url(&uri) {
+                #[cfg(not(test))]
+                if let Err(e) = open::that_detached(&uri) {
+                    tracing::error!("Failed to open document link externally: {e}");
+                }
+            } else {
+                tracing::warn!("Ignored non-http(s) document link");
+            }
+            Task::none()
+        }
     }
+}
+
+fn navigate_document_page(state: &mut AppState, forward: bool) -> Task<Message> {
+    use crate::state::document::DocumentPreviewData;
+
+    if let Some(DocumentPreviewData::Slides {
+        slides,
+        slide_index,
+    }) = &mut state.document.data
+    {
+        if slides.is_empty() {
+            return Task::none();
+        }
+        *slide_index = if forward {
+            (*slide_index + 1).min(slides.len() - 1)
+        } else {
+            slide_index.saturating_sub(1)
+        };
+        state.document.page_index = *slide_index;
+        return Task::none();
+    }
+
+    let Some(path) = state.document.current_path.clone() else {
+        return Task::none();
+    };
+    let total = match &state.document.data {
+        Some(DocumentPreviewData::PagedImage { total_pages, .. }) => *total_pages,
+        Some(DocumentPreviewData::Markdown {
+            total_chapters: Some(total),
+            ..
+        }) => *total,
+        _ => return Task::none(),
+    };
+    if total == 0 {
+        return Task::none();
+    }
+    let new_page = if forward {
+        (state.document.page_index + 1).min(total - 1)
+    } else {
+        state.document.page_index.saturating_sub(1)
+    };
+    if new_page == state.document.page_index {
+        return Task::none();
+    }
+
+    state.document.page_index = new_page;
+    if let Some(cached) = state
+        .cache
+        .document_cache
+        .get(&(path.clone(), new_page))
+        .cloned()
+    {
+        state.document.loading = false;
+        state.document.data = Some(DocumentPreviewData::from_backend(&cached));
+        Task::none()
+    } else {
+        state.document.loading = true;
+        super::tasks::load_document_preview_task(
+            path,
+            new_page,
+            state.settings.advanced.enable_libreoffice_preview,
+        )
+    }
+}
+
+pub(crate) fn is_safe_http_url(uri: &str) -> bool {
+    if uri.is_empty() || uri.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let bytes = uri.as_bytes();
+    let is_http = bytes.len() > 7 && bytes[..7].eq_ignore_ascii_case(b"http://");
+    let is_https = bytes.len() > 8 && bytes[..8].eq_ignore_ascii_case(b"https://");
+    is_http || is_https
 }
 
 /// Surfaces refused actions to the user. `TargetExists` gets a status

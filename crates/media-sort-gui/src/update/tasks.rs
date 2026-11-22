@@ -119,11 +119,42 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
             }
         }
 
-        if let Some(handle) = state.cache.image_cache.get(&path) {
-            state.cache.selected_image = Some((path, handle.clone()));
-        } else {
+        if media_type == MediaType::Document {
             state.cache.selected_image = None;
-            tasks.push(load_full_image(path, media_type));
+            let page_index = if state.document.current_path.as_ref() == Some(&path) {
+                state.document.page_index
+            } else {
+                0
+            };
+            state.document.current_path = Some(path.clone());
+            state.document.page_index = page_index;
+            if let Some(cached) = state
+                .cache
+                .document_cache
+                .get(&(path.clone(), page_index))
+                .cloned()
+            {
+                state.document.loading = false;
+                state.document.data = Some(
+                    crate::state::document::DocumentPreviewData::from_backend(&cached),
+                );
+            } else {
+                state.document.loading = true;
+                state.document.data = None;
+                tasks.push(load_document_preview_task(
+                    path,
+                    page_index,
+                    state.settings.advanced.enable_libreoffice_preview,
+                ));
+            }
+        } else {
+            state.document.reset();
+            if let Some(handle) = state.cache.image_cache.get(&path) {
+                state.cache.selected_image = Some((path, handle.clone()));
+            } else {
+                state.cache.selected_image = None;
+                tasks.push(load_full_image(path, media_type));
+            }
         }
 
         tasks.extend(preload_tasks);
@@ -147,6 +178,7 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
         state.metadata.current = None;
         state.cache.selected_image = None;
         state.video.select(None);
+        state.document.reset();
 
         state.settings.general.last_selected_media = None;
         state.settings.mark_dirty();
@@ -536,6 +568,36 @@ pub fn load_full_image(path: std::path::PathBuf, media_type: MediaType) -> Task<
     )
 }
 
+pub fn load_document_preview_task(
+    path: std::path::PathBuf,
+    page_index: usize,
+    enable_libreoffice: bool,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let path_clone = path.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                media_sort_backend::media::document::load_document_preview(
+                    &path_clone,
+                    page_index,
+                    enable_libreoffice,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+            (path, page_index, result)
+        },
+        |(path, page_index, result)| {
+            Message::Media(MediaMessage::DocumentLoaded {
+                path,
+                page_index,
+                result,
+            })
+        },
+    )
+}
+
 pub fn load_metadata(state: &AppState, index: usize) -> Task<Message> {
     let entries = state.media_grid.filtered_entries();
     let Some(entry) = entries.get(index) else {
@@ -554,6 +616,10 @@ pub fn load_metadata(state: &AppState, index: usize) -> Task<Message> {
                 }
                 MediaType::Audio => {
                     media_sort_backend::metadata::audio_meta::extract_audio_metadata(&path)
+                        .map_err(|e| e.to_string())
+                }
+                MediaType::Document => {
+                    media_sort_backend::metadata::document_meta::extract_document_metadata(&path)
                         .map_err(|e| e.to_string())
                 }
                 MediaType::Video => {

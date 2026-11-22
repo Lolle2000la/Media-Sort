@@ -1,6 +1,7 @@
 mod audio;
 mod cache;
 mod create_folder_modal;
+pub mod document;
 pub mod drag_drop;
 mod folder;
 mod folder_inspection;
@@ -13,6 +14,7 @@ mod settings_ui;
 pub use audio::AudioPlaybackState;
 pub use cache::CacheState;
 pub use create_folder_modal::CreateFolderModalState;
+pub use document::DocumentPreviewState;
 pub use drag_drop::DragDropState;
 pub use folder::FolderState;
 pub use media_grid::{MediaGridScrollState, MediaGridState, SearchState};
@@ -60,6 +62,7 @@ pub struct AppState {
     pub create_folder: CreateFolderModalState,
     pub video: iced_mpv::VideoState,
     pub audio: AudioPlaybackState,
+    pub document: DocumentPreviewState,
     pub cache: CacheState,
     pub metadata: MetadataPanelState,
     pub settings_ui: SettingsUiState,
@@ -131,13 +134,14 @@ impl AppState {
             ..Default::default()
         };
 
-        let media_grid = MediaGridState {
+        let mut media_grid = MediaGridState {
             search: SearchState {
                 placeholder: search_placeholder,
                 ..Default::default()
             },
             ..Default::default()
         };
+        media_grid.type_filter.documents = settings.general.show_documents_by_default;
 
         let rename = RenameModalState {
             placeholder: rename_placeholder,
@@ -166,6 +170,7 @@ impl AppState {
             create_folder,
             video: iced_mpv::VideoState::default(),
             audio: AudioPlaybackState::new(),
+            document: DocumentPreviewState::default(),
             cache: CacheState::new(),
             metadata,
             settings_ui: SettingsUiState::default(),
@@ -228,6 +233,8 @@ impl AppState {
         self.folder.selected_folder_idx = None;
         self.cache.selected_image = None;
         self.cache.image_cache.clear();
+        self.cache.document_cache.clear();
+        self.document.reset();
         self.video.select(None);
         self.cache.media_errors.clear();
         if let Some(ref player) = self.audio.player {
@@ -263,10 +270,10 @@ impl AppState {
         self.media_grid.scan_buffer.clear();
         self.media_grid.pending_refresh = false;
         self.media_grid.refresh_select_path = None;
-        // Clear video state so a late FrameReady from the previously-selected
-        // video can't repopulate the video state during the rescan (the
-        // previously-selected path would otherwise match a stale mpv frame).
+        // Clear video and document state so stale frames or document previews
+        // cannot linger during the rescan.
         self.video.select(None);
+        self.document.reset();
         self.media_grid.scan_receiver = Some(scan_media_files(&folder));
         self.media_grid.pending_select_index = Some(select_idx);
     }
@@ -607,11 +614,16 @@ pub(crate) fn detect_media_type(path: &std::path::Path, animate_gifs: bool) -> M
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let media_type = [MediaType::Image, MediaType::Video, MediaType::Audio]
-        .into_iter()
-        .find(|ty| ty.extensions().contains(&ext.as_str()))
-        .or_else(|| MediaRegistry::determine_type(&ext))
-        .unwrap_or(MediaType::Image);
+    let media_type = [
+        MediaType::Image,
+        MediaType::Audio,
+        MediaType::Document,
+        MediaType::Video,
+    ]
+    .into_iter()
+    .find(|ty| ty.extensions().contains(&ext.as_str()))
+    .or_else(|| MediaRegistry::determine_type(&ext))
+    .unwrap_or(MediaType::Image);
     if media_type == MediaType::Video && ext == "gif" {
         if media_sort_backend::media::image_decoder::is_animated_gif(path) == Some(false) {
             return MediaType::Image;
@@ -695,6 +707,22 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_media_type_document() {
+        for ext in [
+            "pdf", "cbz", "cb7", "cbt", "cbr", "epub", "xlsx", "xlsm", "xlsb", "xls", "ods",
+            "docx", "odt", "pptx", "odp", "doc", "ppt", "rtf", "txt", "md", "markdown", "csv",
+            "tsv", "PDF", "Md",
+        ] {
+            let name = format!("sample.{ext}");
+            assert_eq!(
+                detect_media_type(Path::new(&name), true),
+                MediaType::Document,
+                "expected {name} to classify as Document"
+            );
+        }
+    }
+
+    #[test]
     fn test_detect_media_type_unknown_fallback() {
         assert_eq!(
             detect_media_type(Path::new("test.xyz"), true),
@@ -702,7 +730,7 @@ mod tests {
         );
         assert_eq!(detect_media_type(Path::new("test"), true), MediaType::Image);
         assert_eq!(
-            detect_media_type(Path::new("test.doc"), true),
+            detect_media_type(Path::new("test.unknown"), true),
             MediaType::Image
         );
     }
@@ -808,6 +836,63 @@ mod tests {
         state.media_grid.search.query = "nonexistent".into();
         let results = state.media_grid.filtered_entries();
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_media_type_filter_and_type_counts() {
+        let mut settings = SettingsStore::default();
+        settings.general.show_documents_by_default = false;
+        let mut state = AppState::new(settings);
+        assert!(!state.media_grid.type_filter.documents);
+        assert!(state.media_grid.type_filter.images);
+
+        state.media_grid.entries = vec![
+            MediaEntry {
+                path: "/photo.jpg".into(),
+                media_type: MediaType::Image,
+                file_name: "photo.jpg".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/clip.mp4".into(),
+                media_type: MediaType::Video,
+                file_name: "clip.mp4".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/song.mp3".into(),
+                media_type: MediaType::Audio,
+                file_name: "song.mp3".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/report.pdf".into(),
+                media_type: MediaType::Document,
+                file_name: "report.pdf".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/notes.md".into(),
+                media_type: MediaType::Document,
+                file_name: "notes.md".into(),
+                animated: None,
+            },
+        ];
+
+        assert_eq!(state.media_grid.type_counts(), [1, 1, 1, 2]);
+        assert_eq!(state.media_grid.filtered_entries().len(), 3);
+
+        state.media_grid.type_filter.toggle(MediaType::Document);
+        assert!(state.media_grid.type_filter.is_enabled(MediaType::Document));
+        assert_eq!(state.media_grid.filtered_entries().len(), 5);
+
+        state.media_grid.search.query = "report".into();
+        let combined = state.media_grid.filtered_entries();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].file_name, "report.pdf");
+
+        state.media_grid.type_filter.toggle(MediaType::Document);
+        assert!(state.media_grid.filtered_entries().is_empty());
     }
 
     #[test]

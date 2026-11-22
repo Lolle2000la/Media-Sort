@@ -1,5 +1,6 @@
 use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Color, Element, Length};
+use media_sort_core::media_type::MediaType;
 
 use crate::message::{FolderMessage, MediaMessage, Message, SettingsMessage};
 use crate::state::AppState;
@@ -122,6 +123,7 @@ pub fn main_layout_view(state: &AppState) -> Element<'_, Message> {
         row![move_btn, copy_btn].spacing(4),
         container(preview).height(Length::Fill).width(Length::Fill),
         search_rename_row,
+        filter_chips_view(state),
         grid,
         delete_btn,
     ]
@@ -248,4 +250,37 @@ fn divider_view<'a>(on_press: Message) -> Element<'a, Message> {
     .on_press(on_press)
     .interaction(iced::mouse::Interaction::ResizingHorizontally)
     .into()
+}
+
+fn filter_chips_view(state: &AppState) -> Element<'_, Message> {
+    let [img_count, vid_count, aud_count, doc_count] = state.media_grid.type_counts();
+    let chips = [
+        (MediaType::Image, state.l10n.tr("filter-images"), img_count),
+        (MediaType::Video, state.l10n.tr("filter-video"), vid_count),
+        (MediaType::Audio, state.l10n.tr("filter-audio"), aud_count),
+        (
+            MediaType::Document,
+            state.l10n.tr("filter-documents"),
+            doc_count,
+        ),
+    ]
+    .into_iter()
+    .map(|(ty, label, count)| {
+        let active = state.media_grid.type_filter.is_enabled(ty);
+        iced::widget::button(text(format!("{label} ({count})")).size(11))
+            .padding([3, 8])
+            .style(if active {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            })
+            .on_press(Message::Media(MediaMessage::ToggleTypeFilter(ty)))
+            .into()
+    });
+
+    row(chips)
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .wrap()
+        .into()
 }

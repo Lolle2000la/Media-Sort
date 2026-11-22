@@ -35,6 +35,7 @@ Steuert das visuelle Erscheinungsbild, die Sprache, das Update-Verhalten und das
 - **`last_selected_media`** (String/null): Der absolute Pfad des zuletzt ausgewählten Mediums.
 - **`animate_gifs`** (Boolean): Steuert, ob GIF-Bilder in Vorschauen und Rastern animiert werden. (Standard: `true`)
 - **`session_pinned_folders`** (Boolean): Behandelt angeheftete Ordner als Sitzungszustand: Diese Instanz übernimmt weder angeheftete Ordner von anderen laufenden Instanzen noch teilt sie ihre eigenen mit ihnen. (Standard: `false`, d. h. angeheftete Ordner werden geteilt)
+- **`show_documents_by_default`** (Boolean): Steuert, ob der sitzungsaktive Filter-Chip **Dokumente** beim Öffnen eines Ordners standardmäßig aktiviert ist. (Standard: `true`)
 - **`folder_tree_width`** (Zahl): Die Breite des linken Ordner-Navigations-Panels in Pixeln. (Standard: `240`)
 - **`check_for_updates_on_startup`** (Boolean, nur Windows/macOS-Bundles): Automatische Update-Prüfung beim Start aktivieren/deaktivieren. (Standard: `true`)
 - **`install_prerelease_builds`** (Boolean, nur Windows/macOS-Bundles): Bezieht Vorabversionen (Alpha/Beta) in die Update-Prüfung ein. (Standard: `false`)
@@ -47,6 +48,7 @@ Steuert das visuelle Erscheinungsbild, die Sprache, das Update-Verhalten und das
 Enthält Optionen für fortgeschrittene Nutzer, die die Medien-Dekodierung betreffen:
 
 - **`disable_hardware_decoding`** (Boolean): Erzwingt Software-Videodekodierung (`hwdec=no`). Bei `false` (Standard) wird Hardware-Dekodierung (`hwdec=auto-copy`) verwendet und Videoframes werden in nativer Auflösung gerendert. Bei `true` werden Frames auf 960×540 begrenzt, damit die CPU-Dekodierung flüssig bleibt. (Standard: `false`)
+- **`enable_libreoffice_preview`** (Boolean): Wenn `true` und außerhalb von Flatpak-/Snap-Sandboxes eine lokale `soffice`/`libreoffice`-Installation erkannt wird, rendert Media Sort Word-, PowerPoint- und OpenDocument-Vorschauen über eine Headless-PDF-Konvertierung statt über die reine Rust-XML-/Textextraktion. (Standard: `true`)
 
 ---
 

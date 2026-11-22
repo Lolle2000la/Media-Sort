@@ -275,6 +275,10 @@ pub fn handle_key_captured(
         }
     }
 
+    if let Some(doc_msg) = document_nav_message(state, key, ctrl, shift, alt) {
+        return Task::done(Message::Media(doc_msg));
+    }
+
     match key {
         Key::Character(c) if c.is_ascii_digit() && c != '0' && alt && !ctrl && !shift => {
             let digit = c.to_digit(10).expect("c is checked to be an ascii digit") as u8;
@@ -284,4 +288,44 @@ pub fn handle_key_captured(
     }
 
     Task::none()
+}
+
+pub(crate) fn document_nav_message(
+    state: &AppState,
+    key: Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) -> Option<MediaMessage> {
+    if ctrl || shift || alt || !can_navigate_document(state) {
+        return None;
+    }
+    match key {
+        Key::PageUp => Some(MediaMessage::DocumentPrevPage),
+        Key::PageDown => Some(MediaMessage::DocumentNextPage),
+        _ => None,
+    }
+}
+
+fn can_navigate_document(state: &AppState) -> bool {
+    #[cfg(feature = "velopack")]
+    if state.show_update_prompt {
+        return false;
+    }
+    if state.rename.path.is_some()
+        || state.create_folder.creating_folder_parent.is_some()
+        || state.media_grid.search.focused
+        || !matches!(state.settings_ui, SettingsUiState::Hidden)
+        || state.show_credits
+    {
+        return false;
+    }
+    let Some(idx) = state.media_grid.selected_index else {
+        return false;
+    };
+    state
+        .media_grid
+        .filtered_entries()
+        .get(idx)
+        .is_some_and(|e| e.media_type == media_sort_core::media_type::MediaType::Document)
 }

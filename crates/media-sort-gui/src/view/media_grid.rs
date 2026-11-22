@@ -36,11 +36,13 @@ pub fn media_grid_view(state: &AppState) -> Element<'_, Message> {
 
     if filtered.is_empty() {
         return container(
-            text(if state.media_grid.search.query.is_empty() {
-                state.l10n.tr("ui-no-images")
-            } else {
-                state.l10n.tr("ui-no-results")
-            })
+            text(
+                if state.media_grid.entries.is_empty() && state.media_grid.search.query.is_empty() {
+                    state.l10n.tr("ui-no-images")
+                } else {
+                    state.l10n.tr("ui-no-results")
+                },
+            )
             .size(14),
         )
         .center_x(Length::Fill)
@@ -105,63 +107,70 @@ pub fn media_grid_view(state: &AppState) -> Element<'_, Message> {
         let i = local_i + start;
         let is_selected = state.media_grid.selected_index == Some(i);
 
-        let thumbnail_content: Element<'_, Message> = if let Some(handle) =
-            state.cache.thumbnail_cache.peek(&entry.path)
-        {
-            let img = iced::widget::image(handle.clone())
-                .width(Length::Fill)
-                .height(Length::Fill);
-
-            let maybe_icon = match entry.media_type {
-                media_sort_core::media_type::MediaType::Video => Some(lucide_icons::Icon::Film),
-                media_sort_core::media_type::MediaType::Audio => Some(lucide_icons::Icon::Music),
-                _ => None,
-            };
-
-            if let Some(icon) = maybe_icon {
-                let icon_overlay = container(
-                    text(char::from(icon))
-                        .font(iced::Font::with_name("lucide"))
-                        .size(16)
-                        .color(Color::from_rgb(0.95, 0.95, 0.95)),
-                )
-                .padding([2, 4])
-                .style(|_theme| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgba(
-                        0.0, 0.0, 0.0, 0.8,
-                    ))),
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        width: 0.0,
-                        color: Color::TRANSPARENT,
-                    },
-                    ..iced::widget::container::Style::default()
-                });
-
-                let overlay = container(icon_overlay)
+        let thumbnail_content: Element<'_, Message> =
+            if let Some(handle) = state.cache.thumbnail_cache.peek(&entry.path) {
+                let img = iced::widget::image(handle.clone())
                     .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(Alignment::End)
-                    .align_y(Alignment::Start)
-                    .padding(2);
+                    .height(Length::Fill);
 
-                iced::widget::stack![img, overlay].into()
+                let maybe_badge = match entry.media_type {
+                    media_sort_core::media_type::MediaType::Video => {
+                        Some((lucide_icons::Icon::Film, 16.0, 0.8))
+                    }
+                    media_sort_core::media_type::MediaType::Audio => {
+                        Some((lucide_icons::Icon::Music, 16.0, 0.8))
+                    }
+                    media_sort_core::media_type::MediaType::Document => {
+                        Some((document_icon(&entry.path), 11.0, 0.7))
+                    }
+                    media_sort_core::media_type::MediaType::Image => None,
+                };
+
+                if let Some((icon, icon_size, bg_alpha)) = maybe_badge {
+                    let icon_overlay = container(
+                        text(char::from(icon))
+                            .font(iced::Font::with_name("lucide"))
+                            .size(icon_size)
+                            .color(Color::from_rgb(0.95, 0.95, 0.95)),
+                    )
+                    .padding([2, 4])
+                    .style(move |_theme| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgba(
+                            0.0, 0.0, 0.0, bg_alpha,
+                        ))),
+                        border: iced::Border {
+                            radius: 2.0.into(),
+                            width: 0.0,
+                            color: Color::TRANSPARENT,
+                        },
+                        ..iced::widget::container::Style::default()
+                    });
+
+                    let overlay = container(icon_overlay)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(Alignment::End)
+                        .align_y(Alignment::Start)
+                        .padding(2);
+
+                    iced::widget::stack![img, overlay].into()
+                } else {
+                    img.into()
+                }
             } else {
-                img.into()
-            }
-        } else {
-            let fallback_icon = match entry.media_type {
-                media_sort_core::media_type::MediaType::Audio => lucide_icons::Icon::Music,
-                media_sort_core::media_type::MediaType::Video => lucide_icons::Icon::Film,
-                media_sort_core::media_type::MediaType::Image => lucide_icons::Icon::Image,
-            };
+                let fallback_icon = match entry.media_type {
+                    media_sort_core::media_type::MediaType::Audio => lucide_icons::Icon::Music,
+                    media_sort_core::media_type::MediaType::Video => lucide_icons::Icon::Film,
+                    media_sort_core::media_type::MediaType::Image => lucide_icons::Icon::Image,
+                    media_sort_core::media_type::MediaType::Document => document_icon(&entry.path),
+                };
 
-            text(char::from(fallback_icon))
-                .font(iced::Font::with_name("lucide"))
-                .size(24)
-                .color(Color::from_rgb(0.5, 0.5, 0.6))
-                .into()
-        };
+                text(char::from(fallback_icon))
+                    .font(iced::Font::with_name("lucide"))
+                    .size(24)
+                    .color(Color::from_rgb(0.5, 0.5, 0.6))
+                    .into()
+            };
 
         let thumbnail_stacked: Element<'_, Message> = if is_selected {
             let check_badge = container(
@@ -330,6 +339,37 @@ pub fn media_grid_view(state: &AppState) -> Element<'_, Message> {
     )
     .width(Length::Fill)
     .into()
+}
+
+fn document_icon(path: &std::path::Path) -> lucide_icons::Icon {
+    use media_sort_core::media_type::DocumentKind;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match DocumentKind::from_path(path) {
+        Some(DocumentKind::Pdf) => lucide_icons::Icon::FileText,
+        Some(DocumentKind::Comic) => lucide_icons::Icon::FileArchive,
+        Some(DocumentKind::Epub) => lucide_icons::Icon::BookOpen,
+        Some(DocumentKind::Spreadsheet) => lucide_icons::Icon::FileSpreadsheet,
+        Some(DocumentKind::Office) => {
+            if matches!(ext.as_str(), "pptx" | "odp" | "ppt") {
+                lucide_icons::Icon::Presentation
+            } else {
+                lucide_icons::Icon::FileText
+            }
+        }
+        Some(DocumentKind::Markdown) => lucide_icons::Icon::FileCode,
+        Some(DocumentKind::PlainText) => {
+            if matches!(ext.as_str(), "csv" | "tsv") {
+                lucide_icons::Icon::FileSpreadsheet
+            } else {
+                lucide_icons::Icon::FileText
+            }
+        }
+        None => lucide_icons::Icon::FileText,
+    }
 }
 
 #[cfg(test)]

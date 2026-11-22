@@ -6,6 +6,10 @@ use tracing;
 
 type ThumbnailResult = Result<(u32, u32, Vec<u8>), ThumbnailError>;
 type VideoThumbnailRequest = (PathBuf, std::sync::mpsc::Sender<ThumbnailResult>);
+type DocumentThumbnailResult = Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError>;
+type DocumentThumbnailRequest = (PathBuf, std::sync::mpsc::Sender<DocumentThumbnailResult>);
+
+const THUMBNAIL_SIZE: u32 = 128;
 
 /// Failure of a thumbnail generation request.
 ///
@@ -35,6 +39,7 @@ impl ThumbnailError {
 const THUMBNAIL_QUEUE_CAPACITY: usize = 256;
 const FFMPEG_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MPV_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const DOCUMENT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long a producer may block on the bounded worker-pool queue before
 /// giving up. A scroll-storm can fill the 256-slot queue; without this cap
 /// a request would block indefinitely while every worker is busy.
@@ -151,6 +156,83 @@ static FFMPEG_THUMBNAIL_WORKER: LazyLock<
     std::sync::Mutex::new(tx)
 });
 
+// Bounded document thumbnail worker pool — handles PDFs, comic archives, EPUB
+// covers, and Office embedded/OS thumbnails without overloading CPU/RAM on large
+// folders.
+static DOCUMENT_THUMBNAIL_WORKER: LazyLock<
+    std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
+> = LazyLock::new(|| {
+    let (tx, rx) =
+        std::sync::mpsc::sync_channel::<DocumentThumbnailRequest>(THUMBNAIL_QUEUE_CAPACITY);
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+    let num_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 4);
+
+    for i in 0..num_workers {
+        let rx = rx.clone();
+        std::thread::spawn(move || {
+            loop {
+                let request = {
+                    let guard = rx.lock().unwrap();
+                    guard.recv().ok()
+                };
+                let Some((path, response)) = request else {
+                    break;
+                };
+                let result = match media_sort_backend::media::document::generate_document_thumbnail(
+                    &path,
+                    THUMBNAIL_SIZE,
+                    THUMBNAIL_SIZE,
+                ) {
+                    Ok(opt) => Ok(opt.map(|d| d.into_parts())),
+                    Err(e) => Err(ThumbnailError::Decode(format!(
+                        "Document thumbnail error: {e}"
+                    ))),
+                };
+                if response.send(result).is_err() {
+                    tracing::debug!(
+                        "Document thumbnail worker {i}: response channel closed for {}",
+                        path.display()
+                    );
+                }
+            }
+        });
+    }
+    std::sync::Mutex::new(tx)
+});
+
+fn generate_document_thumbnail_queued(
+    path: &std::path::Path,
+) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
+    let (response_tx, response_rx) = std::sync::mpsc::channel();
+    let sender = DOCUMENT_THUMBNAIL_WORKER
+        .lock()
+        .expect("DOCUMENT_THUMBNAIL_WORKER lock is not poisoned")
+        .clone();
+    if send_with_timeout(
+        &sender,
+        (path.to_path_buf(), response_tx),
+        THUMBNAIL_QUEUE_SEND_TIMEOUT,
+    )
+    .is_err()
+    {
+        return Err(ThumbnailError::transient(
+            "failed to queue document thumbnail request",
+        ));
+    }
+    match response_rx.recv_timeout(DOCUMENT_RESPONSE_TIMEOUT) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ThumbnailError::transient(format!(
+            "document thumbnail request timed out after {DOCUMENT_RESPONSE_TIMEOUT:?}"
+        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ThumbnailError::transient(
+            "document thumbnail worker pool disconnected",
+        )),
+    }
+}
+
 fn generate_video_thumbnail_frame(
     player: &mut iced_mpv::MpvContext,
     path: &std::path::Path,
@@ -200,9 +282,17 @@ pub fn generate_thumbnail(
     _animated: Option<bool>,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
     if media_type == MediaType::Audio {
-        return media_sort_backend::media::thumbnail::generate_thumbnail(path, 128, 128)
-            .map(|opt| opt.map(|d| d.into_parts()))
-            .map_err(|e| ThumbnailError::Decode(format!("Audio cover thumbnail error: {e}")));
+        return media_sort_backend::media::thumbnail::generate_thumbnail(
+            path,
+            THUMBNAIL_SIZE,
+            THUMBNAIL_SIZE,
+        )
+        .map(|opt| opt.map(|d| d.into_parts()))
+        .map_err(|e| ThumbnailError::Decode(format!("Audio cover thumbnail error: {e}")));
+    }
+
+    if media_type == MediaType::Document {
+        return generate_document_thumbnail_queued(path);
     }
 
     if media_type == MediaType::Video && !is_gif_path(path) {
@@ -517,6 +607,22 @@ mod tests {
             Ok(None) => {}
             Ok(Some(_)) => panic!("tag-less WAV has no cover art; expected no thumbnail"),
             Err(e) => panic!("tag-less WAV must not be a thumbnail failure: {e:?}"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_generate_thumbnail_text_document_returns_ok_none() {
+        let dir = std::env::temp_dir().join("mediasort_test_doc_no_thumb");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, b"hello document").unwrap();
+
+        match generate_thumbnail(&path, MediaType::Document, None) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("plain text has no thumbnail; expected Ok(None)"),
+            Err(e) => panic!("plain text must not fail thumbnail generation: {e:?}"),
         }
 
         std::fs::remove_dir_all(&dir).ok();

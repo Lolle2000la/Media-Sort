@@ -57,6 +57,14 @@ Media Sort includes pre-configured visual themes to customize the interface. Sel
 
 ---
 
+### Documents
+
+#### Show documents by default
+
+- **Behavior:** Enabled by default (`true`). Controls whether the active-session **Documents** filter chip starts enabled when opening a folder. Disable this if you prefer to hide document files (PDF, EPUB, comic archives, Office documents, spreadsheets, Markdown, and plain text) by default and only reveal them on demand via the filter bar (see [Configuration File](../../advanced/config-file/) for the `show_documents_by_default` key).
+
+---
+
 ### Updates
 
 :::note
@@ -98,6 +106,14 @@ The **Advanced** tab covers options for advanced users that affect media decodin
 #### Disable hardware video decoding
 
 - **Behavior:** By default, Media Sort uses hardware-accelerated video decoding (mpv's `hwdec=auto-copy` mode) and renders video frames at their native resolution. If a video fails to decode or renders incorrectly, enable this option to force software decoding (`hwdec=no`); frames are then rendered at a capped resolution (960×540) to keep CPU decoding fast. The change takes effect immediately.
+
+---
+
+### Documents
+
+#### Use LibreOffice for Office document previews
+
+- **Behavior:** Enabled by default (`true`). When a host `soffice`/`libreoffice` installation is detected outside Flatpak/Snap sandboxes, Media Sort renders Word, PowerPoint, and OpenDocument previews (`.doc`, `.docx`, `.odt`, `.ppt`, `.pptx`, `.odp`, `.rtf`) by converting them to PDF in the background via headless LibreOffice. When disabled, or when LibreOffice is not available or running inside a sandbox, Media Sort falls back to pure-Rust XML/text preview extraction.
 
 ---
 

@@ -131,6 +131,16 @@ fn resize_with_fir(
     Ok(DecodedImage::new(dst_w, dst_h, resized))
 }
 
+/// Decodes encoded image bytes using size/memory limits and resizes to fit `max_width x max_height`.
+pub(crate) fn decode_and_resize_bytes(
+    bytes: &[u8],
+    max_width: u32,
+    max_height: u32,
+) -> Result<DecodedImage, image::ImageError> {
+    let img = super::image_decoder::decode_bytes_with_limits(bytes)?;
+    resize_with_fir(&img.to_rgba8(), max_width, max_height)
+}
+
 fn jpeg_image(
     path: &Path,
     max_width: u32,

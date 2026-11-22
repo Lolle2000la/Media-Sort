@@ -237,7 +237,7 @@ Note: `app::update()` (`crates/media-sort-gui/src/app.rs:10`) delegates to the `
 | `actions/` | `ReversibleAction` trait + `MoveAction`, `RenameAction`, `DeleteAction`, `CopyAction`. **Symlink policy:** all action constructors refuse symbolic-link sources (`ActionError::SourceIsSymlink`), checked via the shared `path_utils::is_symlink` helper BEFORE and AFTER `canonicalize()` — `canonicalize()` would resolve the link and silently act on its TARGET (drag & drop accepts arbitrary OS paths), and the post-canonicalize re-check closes the swap window. `CopyAction::execute()` re-checks the source immediately before `fs::copy` (which follows links). Destination folders are always canonicalized at construction, so actions into a symlinked folder land in the real target directory. `MoveAction` refuses an existing destination (`TargetExists`), enforced at construction AND inside `execute()`/`rollback()` — `rename(2)` silently replaces, and Undo/Redo must not clobber a file that appeared at the old path since the move; destination checks use `symlink_metadata()` so dangling symlinks count as existing. Create-folder input is validated with `RenameAction::validate_stem` (rejects `/`, `\\`, `.`, `..`, OS-illegal chars). |
 | `history.rs` | Undo/redo with `done`/`undone` stacks of `Box<dyn ReversibleAction>` |
 | `l10n.rs` | Fluent-backed localization, auto-detects system locale, `tr()` for lookups |
-| `media_type.rs` | `MediaType` enum (Image/Video/Audio), global `MediaRegistry` (OnceLock), extension lists |
+| `media_type.rs` | `MediaType` enum (`Image`/`Video`/`Audio`/`Document`), `DocumentKind` (`Pdf`/`Comic`/`Epub`/`Spreadsheet`/`Office`/`Markdown`/`PlainText`), global `MediaRegistry` (`OnceLock`), extension lists |
 | `models.rs` | `MediaEntry`, `FolderNode` (with `FolderKind` icon classification: `Default`/`Git`/`Symlink`/`Locked`, plus `symlink_target` for display), `PinnedFolder` data types |
 | `path_utils.rs` | Cross-platform path comparison utilities, `is_symlink` (single source of truth for the symlink-refusal policy), `atomic_write` (unique-temp + fsync + rename — used by the settings store), `unique_temp_path` (shared by the settings store and the updater; pid + counter keeps two app instances from racing on a shared temp name) |
 | `settings/` | `SettingsStore` + sub-modules: `advanced`, `general`, `keybindings`, `metadata_panel`, `pinned_folders`, `window_position` |
@@ -253,10 +253,12 @@ Note: `app::update()` (`crates/media-sort-gui/src/app.rs:10`) delegates to the `
 | `media/format_pipeline.rs` | Per-format thumbnail/preview dispatch (private, shared by thumbnail.rs + image_decoder.rs) |
 | `media/image_decoder.rs` | Full-resolution image loading via `image` crate; `load_preview()` (capped preview decode) |
 | `media/audio_decoder.rs` | `AudioPlayer` using `rodio` output + `symphonia` decoding. With the `pulse` feature, `audio_decoder/pulse.rs` writes to PulseAudio directly instead of a cpal device (the Flatpak enables it; see the Flatpak section) |
+| `media/document.rs` + `media/document/` | Document thumbnails, paged/structured previews (`DocumentPreview`), and metadata extraction across `pdf.rs` (`hayro`), `comic.rs` (`zip`/`sevenz-rust2`/`tar`/`rarchive` + host `unrar`/`7z` outside sandbox), `epub.rs`, `office.rs` (`calamine` + XML/ODF + `soffice_pipe`), `text.rs`, `os_preview.rs` (macOS QuickLook / Windows Shell), and `soffice_pipe.rs` (headless LibreOffice PDF bridge outside sandbox) |
 | `media/thumbnail.rs` | Thumbnail generation (dispatches into format_pipeline) |
 | `metadata/image_meta.rs` | EXIF extraction via `kamadak-exif` |
 | `metadata/audio_meta.rs` | Audio tags via `id3`/`metaflac`/`mp4ameta` |
 | `metadata/video_meta.rs` | Video metadata extraction |
+| `metadata/document_meta.rs` | Document metadata (`File` + `Document` sections: `Kind`, pages/chapters/sheets/slides, PDF/EPUB/Office/ComicInfo/text fields) |
 | `platform/desktop_portal.rs` | Linux sandbox integration: `in_flatpak()` (the single Flatpak check, re-exported by `filesystem/trash/portal.rs`) and the `org.freedesktop.portal.OpenURI` actions that hand a file to the host's default handler / file manager, which the sandbox's session-bus policy makes the only route |
 | `platform/windows_shell.rs` | Windows Shell integration: registers/unregisters the "Open with Media Sort" Explorer context-menu entries in the registry |
 
@@ -326,12 +328,12 @@ Transient user feedback (refused drops, update failures, create-folder errors) g
 
 `SettingsStore` (`crates/media-sort-core/src/settings/store.rs:54`) has 6 sub-structs:
 
-- `GeneralSettings` — locale, dark mode, reopen folder, update checks, GIF animation, folder tree width, per-session pinned folders
+- `GeneralSettings` — locale, dark mode, reopen folder, update checks, GIF animation, folder tree width, per-session pinned folders, `show_documents_by_default` (`true` by default; seeds the active-session Documents filter chip when opening a folder)
 - `KeyBindings` — all user-configurable shortcuts
 - `MetadataPanelSettings` — expanded state and panel width
 - `PinnedFoldersSettings` — list of pinned folder paths as strings
 - `WindowPosition` — left, top, width, height
-- `AdvancedSettings` — `disable_hardware_decoding` (video playback only, see the video pipeline section)
+- `AdvancedSettings` — `disable_hardware_decoding` (video playback only, see the video pipeline section) and `enable_libreoffice_preview` (`true` by default; enables headless LibreOffice PDF conversion for Office previews outside sandboxes)
 
 Saves are **atomic** (temp file + rename); a symlinked config path is resolved first so the rename lands on the real target and the user's symlink stays intact.
 
@@ -369,7 +371,7 @@ The entire pipeline depends on `libmpv-sys` at build time and a working `libmpv`
 
 Both `ffmpeg` and mpv invocations go through **bounded worker pools** in `subscriptions/prefetch.rs`: `FFMPEG_THUMBNAIL_WORKER` spawns `available_parallelism().clamp(2, 16)` worker threads (ffmpeg is a lightweight short-lived subprocess, so the cap is sized to fit a typical visible set in 1–2 batches); `VIDEO_THUMBNAIL_WORKER` (mpv) spawns `available_parallelism().clamp(2, 4)` (each `MpvContext` is heavyweight — holds GPU resources, libmpv handle, persistent state). Both pull from a shared `mpsc` receiver (Arc-Mutex guarded, mirroring the watch-pool pattern). The queues are **bounded** (`sync_channel`, 256 slots), queue sends use a 5 s deadline (`send_with_timeout` — `SyncSender::send_timeout` is unstable on the MSRV toolchain), and response waits use timeouts, so a scroll-storm cannot grow memory unboundedly and requesters un-hang when a pool's workers all failed to start (e.g. no libmpv). The caps prevent scroll-storm fan-out from spawning N simultaneous subprocesses (default tokio blocking-pool ceiling is 512); see `benches/perf_candidates.rs` Group G for the wall-time/resource tradeoff (8-way burst on this dev host: 121 ms unbounded at peak=8 procs vs 170 ms bounded-to-4 at peak=4 procs; 20-way burst: see `g_extract_concurrent_*_20` variants for the visible-set-scale case that motivated cap=16 over cap=4).
 
-**Thumbnail failure semantics:** `prefetch::ThumbnailError` distinguishes `Decode` (real file problem — recorded in `media_errors`, persistent "failed" badge) from `Transient` (queue timeout, dead pool, ffmpeg/mpv request timeout — NOT recorded, so the card stays un-thumbnailed and the next viewport pass re-queues it; recording timeouts would permanently badge a slow-but-valid video and block retries for the session). A third, non-error outcome covers "there is no image to show": `prefetch::generate_thumbnail` returns `Ok(None)` (surfaced as `MediaMessage::ThumbnailCancelled`) when an audio file has no embedded cover art, and the backend's `thumbnail::generate_thumbnail`/`thumbnail_image` returns `Ok(None)` for the same case. "No cover art" is a normal, playable file, NOT a decode failure: it must never be recorded in `media_errors` (that would show the preview pane's "file not supported" box and block playback). It used to fall back to decoding the audio file itself as an image, which failed with "the file extension `.wav` was not recognized as an image format". Genuinely corrupt embedded cover art still returns `Decode`/`Err`.
+**Thumbnail failure semantics:** `prefetch::ThumbnailError` distinguishes `Decode` (real file problem — recorded in `media_errors`, persistent "failed" badge) from `Transient` (queue timeout, dead pool, ffmpeg/mpv request timeout — NOT recorded, so the card stays un-thumbnailed and the next viewport pass re-queues it; recording timeouts would permanently badge a slow-but-valid video and block retries for the session). A third, non-error outcome covers "there is no image to show": `prefetch::generate_thumbnail` returns `Ok(None)` (surfaced as `MediaMessage::ThumbnailCancelled`) when an audio file has no embedded cover art or when a document has no in-memory/OS thumbnail (plain text, Markdown, spreadsheets without embedded previews, Linux Office files without embedded thumbnails, encrypted documents, or QuickLook timeouts), and the backend's `thumbnail::generate_thumbnail`/`thumbnail_image`/`document::generate_document_thumbnail` returns `Ok(None)` for those cases. **`Ok(None)` thumbnails must NEVER record errors in `media_errors`** (doing so would falsely mark valid, previewable/playable files as unsupported). "No cover art" used to fall back to decoding the audio file itself as an image, which failed with "the file extension `.wav` was not recognized as an image format". Genuinely corrupt embedded cover art or corrupt PDF/archive payloads still return `Decode`/`Err`.
 
 ## Audio player
 
@@ -387,11 +389,28 @@ Grid thumbnails are static first-frame RGBA handles either way, so `prefetch.rs:
 
 At the file system level the `image` crate can decode GIF natively. The mpv path is also available if the installed mpv supports GIF demuxing.
 
+## Document pipeline
+
+Documents are classified as `MediaType::Document` (`NATIVE_DOCUMENT_EXTS` in `media-sort-core/src/media_type.rs`) and subdivided into `DocumentKind` variants for icons, metadata, thumbnails, and preview dispatch:
+
+- **`Pdf` (`.pdf`)** — Pure-Rust rendering and metadata extraction via `hayro` (`document/pdf.rs`), wrapped in `catch_unwind` so malformed PDFs surface clean `DocumentError`/`Unavailable` states instead of panicking.
+- **`Comic` (`.cbz`, `.cb7`, `.cbt`, `.cbr`)** — Pure-Rust archive parsing via `zip` (`.cbz`), `sevenz-rust2` (`.cb7`, 512 MiB dictionary cap), `tar` (`.cbt`), and `rarchive` (`.cbr`, 256 MiB memory cap) with natural page sorting and `ComicInfo.xml` metadata (`document/comic.rs`). For `.cbr` archives that `rarchive` cannot decode (e.g. RAR5 / unsupported variants) when running outside Flatpak/Snap (`!is_sandboxed()`), falls back to host `unrar`/`7z` with `CREATE_NO_WINDOW` (`0x0800_0000`) on Windows, `--` / `-`-prefix argument safety, a 15 s timeout with child kill, and capped stdout/stderr capture.
+- **`Epub` (`.epub`)** — Pure-Rust `zip` + `quick-xml` container/OPF/spine parsing (`document/epub.rs`) extracting cover thumbnails, HTML-to-Markdown chapter text, and Dublin Core metadata.
+- **`Spreadsheet` (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.ods`)** — Pure-Rust `calamine` sheet extraction (`document/office.rs`, capped at `MAX_SHEETS` = 32, `MAX_SHEET_ROWS` = 500, `MAX_SHEET_COLS` = 64); thumbnails check embedded ZIP previews (`Thumbnails/thumbnail.png`, `docProps/thumbnail.*`) and fall back to `os_preview`.
+- **`Office` (`.docx`, `.odt`, `.pptx`, `.odp`, `.doc`, `.ppt`, `.rtf`)** — When `advanced.enable_libreoffice_preview` is `true` (the default) and `!is_sandboxed()`, `document/soffice_pipe.rs` detects a host `soffice`/`libreoffice` binary (`OnceLock`), converts the document to PDF under a 30 s timeout (`CREATE_NO_WINDOW` on Windows, child kill on timeout, `-`-prefix path rejection), caches the converted PDF bytes in-memory (5-entry LRU keyed by `(canonical_path, len, mtime)`), and renders pages via `hayro`. When disabled, unavailable, or sandboxed, `office.rs` falls back to pure-Rust XML/text/slide extraction (`.docx`/`.odt`/`.pptx`/`.odp`/`.rtf`; legacy binary `.doc`/`.ppt` report `NoPreviewBackend` when LibreOffice is absent). Thumbnails never invoke LibreOffice: they check embedded ZIP thumbnails first and fall back to `os_preview`.
+- **`Markdown` (`.md`, `.markdown`) & `PlainText` (`.txt`, `.csv`, `.tsv`)** — Bounded UTF-8 reads (`MAX_TEXT_PREVIEW_BYTES` = 256 KiB, `MAX_TEXT_PREVIEW_LINES` = 2,000), `csv` table parsing for `.csv`/`.tsv`, and binary/NUL detection (`document/text.rs`).
+
+**OS native thumbnails (`document/os_preview.rs`):** On macOS (`QLThumbnailGenerator` via `objc2-quick-look-thumbnailing`) and Windows (`IShellItemImageFactory` via `windows`), Office/spreadsheet documents without embedded archive thumbnails request a bounded OS shell thumbnail; Linux returns `Ok(None)`.
+
+**Safety & error semantics:** All file and archive reads enforce explicit size caps (`MAX_PDF_FILE_BYTES` = 128 MiB, `MAX_ARCHIVE_ENTRY_BYTES` = 32 MiB, `MAX_XML_ENTRY_BYTES` = 8 MiB via `Read::take`). Host CLIs (`soffice`, `unrar`, `7z`) are never invoked when `is_sandboxed()` is true (`in_flatpak()` or non-empty `SNAP`). `generate_document_thumbnail()` returns `Ok(None)` whenever a format has no thumbnail (plain text, Markdown, spreadsheets without embedded previews, Linux Office files without embedded thumbnails, encrypted documents, or QuickLook timeouts), and `Ok(None)` thumbnails must **never** record errors in `media_errors`.
+
+**Filtering & settings:** The media grid provides active-session type filter chips (`Images`, `Video`, `Audio`, `Documents`) that live in session state rather than persisted toggles; `general.show_documents_by_default` (`bool`, default `true`) seeds whether the `Documents` chip starts enabled when opening a folder. `advanced.enable_libreoffice_preview` (`bool`, default `true`) controls the LibreOffice PDF preview bridge.
+
 ## Two `detect_media_type` functions — beware
 
 There are **two different** media type detection functions:
 
-1. `MediaRegistry::determine_type()` in `media-sort-core/src/media_type.rs:87` — strict priority order (native image → native audio → mpv-discovered), uses the global OnceLock registry. Returns `None` for unknown extensions.
+1. `MediaRegistry::determine_type()` in `media-sort-core/src/media_type.rs` — strict priority order (native image → native audio → native document → mpv-discovered), uses the global OnceLock registry. Returns `None` for unknown extensions.
 2. `detect_media_type()` in `media-sort-gui/src/state.rs:440` — simple linear scan of hardcoded extension lists from `MediaType::extensions()`. Defaults to `MediaType::Image` for unknown extensions.
 
 The GUI scanner uses (2), metadata loading uses (1). This can cause mismatches if mpv discovers additional extensions at startup (e.g., a custom mpv build with extra demuxers). If you add formats, update both.
@@ -544,6 +563,9 @@ The benchmarks crate builds the same vendored static libjpeg-turbo as the backen
 | `wgpu` + `winit` + `ash` + `raw-window-handle` | Vulkan interop for video frames |
 | `symphonia` (all codecs) + `rodio` | Audio decoding and output |
 | `kamadak-exif` + `id3` + `metaflac` + `mp4ameta` | Metadata extraction |
+| `hayro` | Pure-Rust PDF rendering and metadata extraction |
+| `calamine` + `csv` | Spreadsheet (`.xlsx`/`.xlsm`/`.xlsb`/`.xls`/`.ods`) and CSV/TSV parsing |
+| `zip` + `sevenz-rust2` + `tar` + `rarchive` + `quick-xml` | Comic archives (`.cbz`/`.cb7`/`.cbt`/`.cbr`), EPUB, and Office XML/ODF parsing |
 | `notify` | Filesystem watcher |
 | `walkdir` | Media file scanning |
 | `trash` | Cross-platform delete-to-trash |

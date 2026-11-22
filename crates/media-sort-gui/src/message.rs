@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use media_sort_backend::filesystem::watcher::FileSystemEvent;
+use media_sort_backend::media::document::DocumentPreview;
+use media_sort_core::media_type::MediaType;
 use media_sort_core::settings::keybindings::Key;
 use media_sort_core::settings::store::SettingsStore;
 
@@ -92,6 +94,8 @@ pub enum SettingsMessage {
     StartDragMetadataDivider,
     OpenAdvanced,
     ToggleHardwareDecoding,
+    ToggleShowDocumentsByDefault(bool),
+    ToggleLibreOfficePreview(bool),
 }
 
 #[derive(Debug, Clone, serde::Deserialize, iced_automation_macros::AutomationKeycap)]
@@ -172,6 +176,18 @@ pub enum MediaMessage {
     AudioSetVolume(f64),
     AudioToggleMute,
     AudioPlayPause,
+    #[serde(skip_deserializing)]
+    ToggleTypeFilter(MediaType),
+    #[serde(skip_deserializing)]
+    DocumentLoaded {
+        path: PathBuf,
+        page_index: usize,
+        result: Result<DocumentPreview, String>,
+    },
+    DocumentPrevPage,
+    DocumentNextPage,
+    DocumentSelectSheet(usize),
+    DocumentLinkClicked(iced::widget::markdown::Uri),
 }
 
 #[cfg(feature = "velopack")]

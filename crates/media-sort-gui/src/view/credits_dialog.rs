@@ -109,8 +109,10 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
 
     let libraries = vec![
         ("bytemuck", "https://github.com/Lokathor/bytemuck"),
+        ("calamine", "https://github.com/tafia/calamine"),
         ("Chrono", "https://github.com/chronotope/chrono"),
         ("Clap", "https://github.com/clap-rs/clap"),
+        ("csv", "https://github.com/BurntSushi/rust-csv"),
         ("dirs", "https://github.com/dirs-dev/dirs-rs"),
         (
             "embed-resource",
@@ -121,6 +123,7 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
             "https://github.com/cykooz/fast_image_resize",
         ),
         ("Fluent", "https://github.com/projectfluent/fluent-rs"),
+        ("hayro", "https://github.com/LaurenzV/hayro"),
         ("ico", "https://github.com/mdsteele/rust-ico"),
         ("Iced", "https://github.com/iced-rs/iced"),
         ("iced_wgpu", "https://github.com/iced-rs/iced"),
@@ -139,7 +142,9 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
         ("objc2", "https://github.com/madsmtm/objc2"),
         ("objc2-foundation", "https://github.com/madsmtm/objc2"),
         ("proc-macro2", "https://github.com/dtolnay/proc-macro2"),
+        ("quick-xml", "https://github.com/tafia/quick-xml"),
         ("quote", "https://github.com/dtolnay/quote"),
+        ("rarchive", "https://github.com/gelenmedya/rarchive"),
         (
             "RFD (Rust File Dialogs)",
             "https://github.com/PolyMeilex/rfd",
@@ -147,9 +152,11 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
         ("Rodio", "https://github.com/RustAudio/rodio"),
         ("Serde", "https://github.com/serde-rs/serde"),
         ("serde_json", "https://github.com/serde-rs/json"),
+        ("sevenz-rust2", "https://github.com/hasenbanck/sevenz-rust2"),
         ("strum", "https://github.com/Peternator7/strum"),
         ("syn", "https://github.com/dtolnay/syn"),
         ("Symphonia", "https://github.com/pdeljanov/Symphonia"),
+        ("tar", "https://github.com/composefs/tar-rs"),
         ("thiserror", "https://github.com/dtolnay/thiserror"),
         ("Tokio", "https://github.com/tokio-rs/tokio"),
         ("toml", "https://github.com/toml-rs/toml"),
@@ -159,6 +166,7 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
         ("unic-langid", "https://github.com/zbraniecki/unic-locale"),
         ("walkdir", "https://github.com/BurntSushi/walkdir"),
         ("winreg", "https://github.com/gentoo90/winreg-rs"),
+        ("zip", "https://github.com/zip-rs/zip2"),
     ];
 
     let mut rows = Vec::with_capacity(libraries.len());

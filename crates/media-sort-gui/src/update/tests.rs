@@ -1553,4 +1553,366 @@ fn test_l10n_detect_locale_returns_string() {
     assert!(!locale.is_empty());
 }
 
+// ============================================================================
+// Document support & type filter tests
+// ============================================================================
+
+#[test]
+fn test_toggle_type_filter_preserves_selected_path_and_falls_back() {
+    let mut state = AppState::new(SettingsStore::default());
+    let img = PathBuf::from("/test/a.jpg");
+    let doc = PathBuf::from("/test/b.pdf");
+    state.media_grid.entries = vec![
+        MediaEntry {
+            path: img.clone(),
+            media_type: MediaType::Image,
+            file_name: "a.jpg".into(),
+            animated: None,
+        },
+        MediaEntry {
+            path: doc.clone(),
+            media_type: MediaType::Document,
+            file_name: "b.pdf".into(),
+            animated: None,
+        },
+    ];
+    state.media_grid.rebuild_lower_names();
+
+    let _ = update(&mut state, Message::Media(MediaMessage::SelectEntry(1)));
+    assert_eq!(state.media_grid.selected_index, Some(1));
+    assert_eq!(state.document.current_path.as_ref(), Some(&doc));
+
+    // Hiding images shifts the selected document from index 1 -> 0 without losing it.
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ToggleTypeFilter(MediaType::Image)),
+    );
+    assert!(!state.media_grid.type_filter.images);
+    assert_eq!(state.media_grid.selected_index, Some(0));
+    assert_eq!(state.document.current_path.as_ref(), Some(&doc));
+
+    // Hiding documents leaves zero entries and clears selection/document preview.
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ToggleTypeFilter(MediaType::Document)),
+    );
+    assert!(state.media_grid.filtered_entries().is_empty());
+    assert_eq!(state.media_grid.selected_index, None);
+    assert!(state.document.current_path.is_none());
+
+    // Re-enabling images selects index 0 (a.jpg) cleanly.
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ToggleTypeFilter(MediaType::Image)),
+    );
+    assert_eq!(state.media_grid.selected_index, Some(0));
+    assert_eq!(state.media_grid.filtered_entries()[0].path, img);
+}
+
+#[test]
+fn test_document_loaded_ignores_stale_and_caches_valid() {
+    use media_sort_backend::media::document::DocumentPreview;
+
+    let mut state = AppState::new(SettingsStore::default());
+    let doc = PathBuf::from("/test/readme.txt");
+    let other = PathBuf::from("/test/other.txt");
+    state.document.current_path = Some(doc.clone());
+    state.document.page_index = 1;
+    state.document.loading = true;
+
+    // Stale path
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLoaded {
+            path: other,
+            page_index: 1,
+            result: Ok(DocumentPreview::PlainText {
+                text: "wrong".into(),
+                truncated: false,
+            }),
+        }),
+    );
+    assert!(state.document.loading);
+    assert!(state.document.data.is_none());
+
+    // Stale page index
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLoaded {
+            path: doc.clone(),
+            page_index: 0,
+            result: Ok(DocumentPreview::PlainText {
+                text: "stale page".into(),
+                truncated: false,
+            }),
+        }),
+    );
+    assert!(state.document.loading);
+    assert!(state.document.data.is_none());
+
+    // Matching response updates state and populates cache
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLoaded {
+            path: doc.clone(),
+            page_index: 1,
+            result: Ok(DocumentPreview::PlainText {
+                text: "hello world".into(),
+                truncated: false,
+            }),
+        }),
+    );
+    assert!(!state.document.loading);
+    assert!(matches!(
+        state.document.data,
+        Some(crate::state::document::DocumentPreviewData::PlainText { .. })
+    ));
+    assert!(state.cache.document_cache.contains(&(doc, 1)));
+}
+
+#[test]
+fn test_document_prev_next_page_and_sheet_navigation() {
+    use media_sort_backend::media::DecodedImage;
+    use media_sort_backend::media::document::{DocumentPreview, SheetData, SlideData};
+
+    let mut state = AppState::new(SettingsStore::default());
+    let doc = PathBuf::from("/test/sample.pdf");
+    let page0 = DocumentPreview::PagedImage {
+        image: DecodedImage::new(2, 2, vec![255; 16]),
+        page_index: 0,
+        total_pages: 2,
+    };
+    let page1 = DocumentPreview::PagedImage {
+        image: DecodedImage::new(2, 2, vec![0; 16]),
+        page_index: 1,
+        total_pages: 2,
+    };
+    state
+        .cache
+        .document_cache
+        .push((doc.clone(), 0), page0.clone());
+    state.cache.document_cache.push((doc.clone(), 1), page1);
+    state.document.current_path = Some(doc.clone());
+    state.document.page_index = 0;
+    state.document.data = Some(crate::state::document::DocumentPreviewData::from_backend(
+        &page0,
+    ));
+
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert_eq!(state.document.page_index, 1);
+    assert!(!state.document.loading);
+    assert!(matches!(
+        state.document.data,
+        Some(crate::state::document::DocumentPreviewData::PagedImage {
+            page_index: 1,
+            total_pages: 2,
+            ..
+        })
+    ));
+
+    // Clamps at upper bound
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert_eq!(state.document.page_index, 1);
+
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentPrevPage));
+    assert_eq!(state.document.page_index, 0);
+
+    // Clamps at 0
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentPrevPage));
+    assert_eq!(state.document.page_index, 0);
+
+    // Slides adjust slide_index in-memory
+    state.document.data = Some(crate::state::document::DocumentPreviewData::Slides {
+        slides: vec![
+            SlideData {
+                number: 1,
+                title: Some("First".into()),
+                body_paragraphs: vec![],
+            },
+            SlideData {
+                number: 2,
+                title: Some("Second".into()),
+                body_paragraphs: vec![],
+            },
+        ],
+        slide_index: 0,
+    });
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert!(matches!(
+        state.document.data,
+        Some(crate::state::document::DocumentPreviewData::Slides { slide_index: 1, .. })
+    ));
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentPrevPage));
+    assert!(matches!(
+        state.document.data,
+        Some(crate::state::document::DocumentPreviewData::Slides { slide_index: 0, .. })
+    ));
+
+    // Spreadsheet sheet selection
+    state.document.data = Some(crate::state::document::DocumentPreviewData::Spreadsheet {
+        sheets: vec![
+            SheetData {
+                name: "S1".into(),
+                headers: vec![],
+                rows: vec![],
+                total_rows: 0,
+                total_cols: 0,
+                truncated: false,
+            },
+            SheetData {
+                name: "S2".into(),
+                headers: vec![],
+                rows: vec![],
+                total_rows: 0,
+                total_cols: 0,
+                truncated: false,
+            },
+        ],
+        active_sheet: 0,
+    });
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentSelectSheet(1)),
+    );
+    assert!(matches!(
+        state.document.data,
+        Some(crate::state::document::DocumentPreviewData::Spreadsheet {
+            active_sheet: 1,
+            ..
+        })
+    ));
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentSelectSheet(99)),
+    );
+    assert!(matches!(
+        state.document.data,
+        Some(crate::state::document::DocumentPreviewData::Spreadsheet {
+            active_sheet: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_document_link_url_validation() {
+    use crate::update::media::is_safe_http_url;
+
+    assert!(is_safe_http_url("https://mediasort.app"));
+    assert!(is_safe_http_url("HTTP://example.com/docs"));
+    assert!(!is_safe_http_url(""));
+    assert!(!is_safe_http_url("http://"));
+    assert!(!is_safe_http_url("https://"));
+    assert!(!is_safe_http_url("file:///etc/passwd"));
+    assert!(!is_safe_http_url("javascript:alert(1)"));
+    assert!(!is_safe_http_url("mailto:user@example.com"));
+    assert!(!is_safe_http_url("https://example.com/\nfoo"));
+
+    let mut state = AppState::new(SettingsStore::default());
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLinkClicked(
+            "file:///etc/passwd".into(),
+        )),
+    );
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::DocumentLinkClicked(
+            "https://mediasort.app".into(),
+        )),
+    );
+}
+
+#[test]
+fn test_keyboard_page_up_down_document_navigation() {
+    use crate::update::keyboard::document_nav_message;
+
+    let mut state = AppState::new(SettingsStore::default());
+    state.media_grid.entries = vec![
+        MediaEntry {
+            path: PathBuf::from("/test/a.pdf"),
+            media_type: MediaType::Document,
+            file_name: "a.pdf".into(),
+            animated: None,
+        },
+        MediaEntry {
+            path: PathBuf::from("/test/b.jpg"),
+            media_type: MediaType::Image,
+            file_name: "b.jpg".into(),
+            animated: None,
+        },
+    ];
+    state.media_grid.selected_index = Some(0);
+
+    assert!(matches!(
+        document_nav_message(&state, Key::PageDown, false, false, false),
+        Some(MediaMessage::DocumentNextPage)
+    ));
+    assert!(matches!(
+        document_nav_message(&state, Key::PageUp, false, false, false),
+        Some(MediaMessage::DocumentPrevPage)
+    ));
+
+    // Ignored with modifiers, search focus, open dialog, or non-document selection
+    assert!(document_nav_message(&state, Key::PageDown, true, false, false).is_none());
+    state.media_grid.search.focused = true;
+    assert!(document_nav_message(&state, Key::PageDown, false, false, false).is_none());
+    state.media_grid.search.focused = false;
+    state.settings_ui = SettingsUiState::Settings;
+    assert!(document_nav_message(&state, Key::PageDown, false, false, false).is_none());
+    state.settings_ui = SettingsUiState::Hidden;
+    state.media_grid.selected_index = Some(1);
+    assert!(document_nav_message(&state, Key::PageDown, false, false, false).is_none());
+}
+
+#[test]
+fn test_settings_toggle_show_documents_by_default() {
+    let mut state = AppState::new(SettingsStore::default());
+    assert!(state.settings.general.show_documents_by_default);
+
+    let _ = update(
+        &mut state,
+        Message::Settings(SettingsMessage::ToggleShowDocumentsByDefault(false)),
+    );
+    assert!(!state.settings.general.show_documents_by_default);
+    assert!(state.settings.dirty);
+
+    let _ = update(
+        &mut state,
+        Message::Settings(SettingsMessage::ToggleShowDocumentsByDefault(true)),
+    );
+    assert!(state.settings.general.show_documents_by_default);
+}
+
+#[test]
+fn test_settings_toggle_libreoffice_preview_clears_cache_and_reloads() {
+    use media_sort_backend::media::document::DocumentPreview;
+
+    let mut state = AppState::new(SettingsStore::default());
+    let doc = PathBuf::from("/test/report.docx");
+    let preview = DocumentPreview::PlainText {
+        text: "cached".into(),
+        truncated: false,
+    };
+    state
+        .cache
+        .document_cache
+        .push((doc.clone(), 1), preview.clone());
+    state.document.current_path = Some(doc);
+    state.document.page_index = 1;
+    state.document.data = Some(crate::state::document::DocumentPreviewData::from_backend(
+        &preview,
+    ));
+
+    let _ = update(
+        &mut state,
+        Message::Settings(SettingsMessage::ToggleLibreOfficePreview(false)),
+    );
+    assert!(!state.settings.advanced.enable_libreoffice_preview);
+    assert!(state.settings.dirty);
+    assert!(state.cache.document_cache.is_empty());
+    assert!(state.document.loading);
+    assert!(state.document.data.is_none());
+}
+
 mod filesystem_watcher;

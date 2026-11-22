@@ -260,7 +260,12 @@ static EXT_MAP: OnceLock<HashMap<&'static str, MediaType>> = OnceLock::new();
 fn ext_map() -> &'static HashMap<&'static str, MediaType> {
     EXT_MAP.get_or_init(|| {
         let mut m = HashMap::new();
-        for ty in [MediaType::Image, MediaType::Video, MediaType::Audio] {
+        for ty in [
+            MediaType::Image,
+            MediaType::Video,
+            MediaType::Audio,
+            MediaType::Document,
+        ] {
             for ext in ty.extensions() {
                 m.insert(*ext, ty);
             }
@@ -283,10 +288,15 @@ fn ascii_lowercase_stack<'b>(ext: &str, buf: &'b mut [u8; 32]) -> Option<&'b str
 pub fn detect_media_type_baseline(path: &Path, _animate_gifs: bool) -> MediaType {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let ext = ext.to_lowercase();
-    [MediaType::Image, MediaType::Video, MediaType::Audio]
-        .into_iter()
-        .find(|ty| ty.extensions().contains(&ext.as_str()))
-        .unwrap_or(MediaType::Image)
+    [
+        MediaType::Image,
+        MediaType::Video,
+        MediaType::Audio,
+        MediaType::Document,
+    ]
+    .into_iter()
+    .find(|ty| ty.extensions().contains(&ext.as_str()))
+    .unwrap_or(MediaType::Image)
 }
 
 pub fn detect_media_type_hashset(path: &Path, _animate_gifs: bool) -> MediaType {
@@ -505,7 +515,7 @@ pub fn synthetic_media_entries(n: usize) -> Vec<MediaEntry> {
     let exts = [
         "jpg", "png", "jpeg", "gif", "mp4", "mkv", "webm", "bmp", "tiff", "webp", "mp3", "flac",
         "wav", "avi", "mov", "m4v", "aac", "ogg", "opus", "m4a", "wmv", "flv", "qoi", "tga",
-        "avif",
+        "avif", "pdf", "cbz", "docx", "txt",
     ];
     (0..n)
         .map(|i| {
@@ -519,6 +529,7 @@ pub fn synthetic_media_entries(n: usize) -> Vec<MediaEntry> {
                 "mp3" | "flac" | "wav" | "aac" | "m4a" | "ogg" | "opus" | "wma" | "aiff" => {
                     MediaType::Audio
                 }
+                _ if MediaType::Document.extensions().contains(&ext) => MediaType::Document,
                 _ => MediaType::Image,
             };
             MediaEntry {
@@ -551,6 +562,11 @@ mod tests {
             "webp",
             "tiff",
             "bmp",
+            "pdf",
+            "PDF",
+            "cbz",
+            "docx",
+            "txt",
             "unknown_ext",
             "this_is_not_a_real_extension",
         ] {
@@ -559,6 +575,10 @@ mod tests {
             let b = detect_media_type_hashset(&p, true);
             assert_eq!(a, b, "ext={}", ext);
         }
+        assert_eq!(
+            detect_media_type_hashset(Path::new("report.pdf"), true),
+            MediaType::Document
+        );
     }
 
     #[test]
