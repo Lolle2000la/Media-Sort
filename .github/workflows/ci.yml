@@ -320,15 +320,11 @@ jobs:
             [ -n "$msvc_link_dir" ] \
               || { echo "::error::no MSVC linker found on PATH"; exit 1; }
             export PATH="$msvc_link_dir:$PATH"
-            # Name the compiler explicitly. When meson has to resolve CC from
-            # PATH itself it wraps whatever ccache/sccache it finds there, and
-            # this image ships ccache in C:\Strawberry\c\bin -- which drives cl
-            # through the conforming preprocessor, where dav1d's
-            # `#if defined(__clang__) && __has_include_next(<stdatomic.h>)`
-            # guard is error C7780 instead of being skipped (upstream builds
-            # it with the traditional one, and 1.5.4 still carries that guard).
-            # With CC set, meson parses the entry instead of probing for a
-            # cache, so ninja runs plain cl.
+            # Name the compiler explicitly instead of letting meson resolve one
+            # from PATH. That keeps ccache/sccache -- the image ships ccache in
+            # C:\Strawberry\c\bin -- out of build.ninja, so the log shows the
+            # compiler that actually ran; with CC set meson parses the entry
+            # rather than probing for a cache.
             CC_WIN="$(cygpath -w "$msvc_link_dir")/cl.exe"
             [ -f "$CC_WIN" ] || { echo "::error::$CC_WIN not found"; exit 1; }
             export CC="$CC_WIN"
@@ -350,6 +346,20 @@ jobs:
             tar xzf dav1d.tar.gz -C dav1d-src --strip-components=1
             grep -q "version: '$DAV1D_TAG'" dav1d-src/meson.build \
               || { echo "::error::$DAV1D_COMMIT is not dav1d $DAV1D_TAG"; exit 1; }
+            # MSVC 14.52.37029 rejects dav1d's clang-cl guard outright --
+            # "error C7780: function-like macro '__has_include_next' is not
+            # defined" -- on every object that includes this header, with no
+            # cache or preprocessor flag on the command line. Take the header's
+            # own non-clang branch, which is what MSVC builds use anyway and is
+            # never reached for plain cl; the substitute only ever applied to
+            # clang-cl, which this job does not use. The pinned commit keeps
+            # the patch stable and the grep fails here if a pin bump moves the
+            # line, instead of silently not applying it.
+            grep -qxF '#if defined(__clang__) && __has_include_next(<stdatomic.h>)' \
+              dav1d-src/include/compat/msvc/stdatomic.h \
+              || { echo "::error::the msvc stdatomic.h guard changed; re-check this patch"; exit 1; }
+            sed -i 's|^#if defined(__clang__) && __has_include_next(<stdatomic.h>)$|#if 0|' \
+              dav1d-src/include/compat/msvc/stdatomic.h
             meson setup -Ddefault_library=static --prefix "$prefix" \
               dav1d-build dav1d-src
             ninja -C dav1d-build
