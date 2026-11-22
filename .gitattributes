@@ -1,0 +1,5 @@
+# `scripts/ci-pins.env` is sourced by a bash step on the Windows test job,
+# where the runner's `core.autocrlf` would otherwise check it out with CRLF:
+# `DAV1D_TAG=1.5.5\r` then fails the "this archive is dav1d 1.5.5" assertion
+# and puts a stray carriage return in the download URL. Keep it LF there.
+scripts/ci-pins.env text eol=lf
