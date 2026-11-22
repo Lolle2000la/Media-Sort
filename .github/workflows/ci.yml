@@ -338,8 +338,24 @@ jobs:
             # is byte-identical to 1.5.0's, so the crate's bindings are
             # unaffected. DAV1D_COMMIT is the tag's peeled sha, so the archive
             # cannot move under us the way a tag can.
-            DAV1D_TAG=1.5.5
-            DAV1D_COMMIT=6c7bee685677fd997a431302be4fea8ea4017606
+            #
+            # The pin itself lives in scripts/ci-pins.env, not inline here: the
+            # weekly bump (.github/workflows/appimage-bump.yml) pushes with
+            # GITHUB_TOKEN or a Contents+Pull-requests PAT, and neither can
+            # create or modify a file under .github/workflows/ (that needs the
+            # `workflows` permission), so a pin written inline could never be
+            # moved automatically. `set -e` aborts the step when the file is
+            # missing or does not parse, and both values are asserted below, so
+            # a broken pin file fails here instead of building nothing.
+            [ -f scripts/ci-pins.env ] \
+              || { echo "::error::scripts/ci-pins.env is missing"; exit 1; }
+            set -a
+            . ./scripts/ci-pins.env
+            set +a
+            [ -n "${DAV1D_TAG:-}" ] \
+              || { echo "::error::scripts/ci-pins.env does not define DAV1D_TAG"; exit 1; }
+            [ -n "${DAV1D_COMMIT:-}" ] \
+              || { echo "::error::scripts/ci-pins.env does not define DAV1D_COMMIT"; exit 1; }
             # The prefix is a stable absolute path, because it is baked into
             # the build script's cached rustc-link-search that a restored
             # target/ reuses, and it carries the commit so that bumping the
