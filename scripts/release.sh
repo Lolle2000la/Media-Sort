@@ -38,6 +38,10 @@
 # The AppStream metadata is synced too, so Flathub's release list cannot drift
 # from the tags:
 #   packaging/linux/app.mediasort.MediaSort.metainfo.xml   <releases> entry
+#
+# The Flatpak vendored crate list is regenerated from the refreshed Cargo.lock,
+# so the tagged tree builds offline the way Flathub expects:
+#   flatpak/cargo-sources.json
 
 set -euo pipefail
 
@@ -195,6 +199,9 @@ fi
 INFO_PLIST="packaging/macos/Info.plist"
 RC_FILE="crates/media-sort-gui/media-sort-gui.rc"
 METAINFO_XML="packaging/linux/app.mediasort.MediaSort.metainfo.xml"
+# Not version-bearing, but it is a pure function of Cargo.lock, so it has to ride
+# in the same commit: the tagged tree is what Flathub builds offline from.
+FLATPAK_SOURCES="flatpak/cargo-sources.json"
 
 # Apple's CFBundleShortVersionString is 1-3 period-separated integers, so the
 # prerelease/build suffix is dropped (3.0.0-rc.1 -> 3.0.0).
@@ -230,6 +237,7 @@ info "branch:    $BRANCH"
 info "tag:       $TAG (signed)"
 
 if [ "$DRY_RUN" -eq 1 ]; then
+  info "dry run: not regenerating $FLATPAK_SOURCES (it would dirty the tree)"
   info "dry run: no changes made"
   exit 0
 fi
@@ -243,7 +251,7 @@ restore() {
   local code=$?
   if [ "$code" -ne 0 ] && [ "$COMMITTED" -eq 0 ] && [ "$BUMPED" -eq 1 ]; then
     warn "rolling back the version files"
-    git checkout -- Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" "$METAINFO_XML" 2>/dev/null || true
+    git checkout -- Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" "$METAINFO_XML" "$FLATPAK_SOURCES" 2>/dev/null || true
   fi
   return "$code"
 }
@@ -446,8 +454,15 @@ sync_metainfo_xml() {
 info "syncing AppStream metadata ($METAINFO_XML)"
 sync_metainfo_xml
 
+# Cargo.lock just changed above, so the vendored Flatpak crate list is stale by
+# definition. Regenerate it here (rather than leaving it to a separate step) so
+# the release commit carries a file that matches the tag's lock, and
+# release.yml's verify-version can reject a hand-cut tag for drift.
+info "regenerating Flatpak cargo sources ($FLATPAK_SOURCES)"
+bash scripts/update-flatpak-sources.sh
+
 info "committing"
-git add Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" "$METAINFO_XML"
+git add Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" "$METAINFO_XML" "$FLATPAK_SOURCES"
 git commit -m "chore: bump version to $VERSION"
 COMMITTED=1
 

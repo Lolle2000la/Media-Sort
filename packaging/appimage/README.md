@@ -259,7 +259,8 @@ reached is reported as `unknown` and does not abort the others (in a dry run);
 ### The 14-day soak
 
 `--min-age-days` (default **14**) skips anything younger than that, matching the
-repository's Renovate policy (`minimumReleaseAge` in `renovate.json`, see
+repository's Renovate policy (`minimumReleaseAge` in `renovate.json` and Cargo's
+`[registry] global-min-publish-age`, see
 AGENTS.md "Dependency updates (Renovate)"): a malicious or broken publish gets
 the same two weeks to be caught before it can reach a pin. The date comes from
 `published_at` for a GitHub release, the tag commit's `committer.date` for a

@@ -26,6 +26,8 @@ on:
       # The metainfo/desktop/icon the app module installs; a malformed one fails
       # appstream compose in the build.
       - packaging/linux/**
+      # The generator the build below runs to refresh the vendored crate set.
+      - scripts/update-flatpak-sources.sh
       - .github/workflows/flatpak-build.yml
   pull_request:
     paths: *paths
@@ -39,6 +41,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.x'
+
+      - name: Regenerate the Flatpak cargo sources from Cargo.lock
+        # flatpak/cargo-sources.json is regenerated (and committed) at release
+        # time, so CI regenerates it here from the lock instead of demanding a
+        # second commit: this validates a dependency change against the offline
+        # build from the checked-out lock alone. Installing the generator's deps
+        # here lets scripts/update-flatpak-sources.sh reuse this interpreter
+        # instead of building a venv.
+        run: |
+          pip install --quiet --disable-pip-version-check aiohttp tomlkit
+          bash scripts/update-flatpak-sources.sh
 
       - name: Install flatpak-builder and the runtime
         run: |

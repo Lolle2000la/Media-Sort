@@ -26,6 +26,19 @@ jobs:
           # set must be present (fetch-depth: 0 fetches all history and tags).
           fetch-depth: 0
 
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.x'
+
+      - name: Verify Flatpak cargo sources are current
+        # scripts/release.sh regenerates and commits flatpak/cargo-sources.json,
+        # so a tag whose committed file no longer matches Cargo.lock was cut by
+        # hand (or the lock changed after the bump). Regenerate from the tag's
+        # own lock and refuse the build on any drift.
+        run: |
+          pip install --quiet --disable-pip-version-check aiohttp tomlkit
+          bash scripts/update-flatpak-sources.sh --check
+
       - name: Verify Tag Matches Version Files
         run: |
           set -euo pipefail
