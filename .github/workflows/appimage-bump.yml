@@ -1,7 +1,8 @@
 name: AppImage Dependency Bump
 
 # Weekly proposal of upstream version bumps for the self-contained Linux
-# AppImage payload (packaging/appimage/versions.env).
+# AppImage payload (packaging/appimage/versions.env), plus the dav1d pin
+# .github/workflows/ci.yml builds from for the Windows test job.
 #
 # Renovate cannot maintain that file: every entry is a version + URL + sha256,
 # and Renovate can compute a new version but not a new hash for an archive it
@@ -11,8 +12,9 @@ name: AppImage Dependency Bump
 #   1. `check` queries every upstream (12 s, no docker) and reports whether any
 #      pin is behind, honouring the 14-day soak the repository's Renovate policy
 #      uses (AGENTS.md "Dependency updates (Renovate)").
-#   2. `bump` re-runs it with `--apply`, commits the rewritten versions.env on
-#      `chore/appimage-bump`, runs the same build + verify gate as
+#   2. `bump` re-runs it with `--apply`, commits the rewritten pins on
+#      `chore/appimage-bump` (versions.env, and `.github/workflows/ci.yml` when
+#      its dav1d pin is behind), runs the same build + verify gate as
 #      .github/workflows/appimage.yml (the shared composite action), and then
 #      creates -- or force-updates -- the pull request. "Create, or replace if
 #      the last one is still open": an open PR with that head branch is updated
@@ -141,6 +143,11 @@ jobs:
       pull-requests: write
     env:
       GH_TOKEN: ${{ secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+      # The branch and PR carry two files that "AppImage" in the name does not
+      # cover: packaging/appimage/versions.env, and .github/workflows/ci.yml when
+      # its dav1d pin is behind (the Windows test job builds dav1d from a tag +
+      # peeled commit, and this workflow is what keeps that pair current). A
+      # ci.yml-only bump is therefore still a normal run with a PR, not a no-op.
       BRANCH: chore/appimage-bump
       TITLE: 'chore(appimage): bump bundled upstream versions'
       MIN_AGE_DAYS: ${{ github.event.inputs.min_age_days }}
@@ -184,7 +191,10 @@ jobs:
           # 2>&1: the script logs "nothing to apply" / "updated N component(s)"
           # on stderr, and the no-op decision below reads them.
           bash scripts/bump-appimage.sh --apply --min-age-days "$MIN_AGE_DAYS" 2>&1 | tee apply.log
-          if git diff --quiet -- packaging/appimage/versions.env; then
+          # The apply writes at most two files: versions.env, and the dav1d pin
+          # in ci.yml when that pin is behind.
+          PINS=(packaging/appimage/versions.env .github/workflows/ci.yml)
+          if git diff --quiet -- "${PINS[@]}"; then
             # `check` and `bump` are separate jobs and master moves between them:
             # if a bump PR was merged (or the newest release aged past the soak)
             # in between, --apply legitimately has nothing left to write. That is
@@ -195,11 +205,11 @@ jobs:
               echo "changed=0" >>"$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::--apply reported updates but changed nothing in packaging/appimage/versions.env"
+            echo "::error::--apply reported updates but changed neither packaging/appimage/versions.env nor the ci.yml dav1d pin"
             exit 1
           fi
           echo "changed=1" >>"$GITHUB_OUTPUT"
-          git diff -- packaging/appimage/versions.env
+          git diff -- "${PINS[@]}"
 
       # Everything that writes is skipped unless this runs from master, so a
       # dispatch on a PR branch is a real (writable-nothing) pre-merge check.
@@ -214,7 +224,7 @@ jobs:
           git switch -c "$BRANCH"
           # Only the pins: the apply step writes nothing else, and a stray file
           # must not ride along into the PR.
-          git add packaging/appimage/versions.env
+          git add packaging/appimage/versions.env .github/workflows/ci.yml
           git commit -m "$TITLE"
 
           if [ -n "$LEASE" ]; then
