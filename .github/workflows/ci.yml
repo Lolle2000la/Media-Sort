@@ -317,9 +317,21 @@ jobs:
                 break
               fi
             done <<< "$(printf '%s\n' "$PATH" | tr ':' '\n')"
-            if [ -n "$msvc_link_dir" ]; then
-              export PATH="$msvc_link_dir:$PATH"
-            fi
+            [ -n "$msvc_link_dir" ] \
+              || { echo "::error::no MSVC linker found on PATH"; exit 1; }
+            export PATH="$msvc_link_dir:$PATH"
+            # Name the compiler explicitly. When meson has to resolve CC from
+            # PATH itself it wraps whatever ccache/sccache it finds there, and
+            # this image ships ccache in C:\Strawberry\c\bin -- which drives cl
+            # through the conforming preprocessor, where dav1d's
+            # `#if defined(__clang__) && __has_include_next(<stdatomic.h>)`
+            # guard is error C7780 instead of being skipped (upstream builds
+            # it with the traditional one, and 1.5.4 still carries that guard).
+            # With CC set, meson parses the entry instead of probing for a
+            # cache, so ninja runs plain cl.
+            CC_WIN="$(cygpath -w "$msvc_link_dir")/cl.exe"
+            [ -f "$CC_WIN" ] || { echo "::error::$CC_WIN not found"; exit 1; }
+            export CC="$CC_WIN"
             # 1.5.0 is the tag dav1d-sys 0.8.3 builds; DAV1D_COMMIT is that
             # tag's peeled sha, so the archive cannot move under us the way a
             # tag can. Bump both together with the crate.
