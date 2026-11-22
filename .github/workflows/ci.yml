@@ -353,23 +353,20 @@ jobs:
             tar xzf dav1d.tar.gz -C dav1d-src --strip-components=1
             grep -q "version: '$DAV1D_TAG'" dav1d-src/meson.build \
               || { echo "::error::$DAV1D_COMMIT is not dav1d $DAV1D_TAG"; exit 1; }
-            meson setup -Ddefault_library=static --prefix "$prefix" \
-              dav1d-build dav1d-src
+            # -Dnamingscheme=platform: meson's default ("classic") names MSVC
+            # static libraries `libdav1d.a` -- deliberate, documented behaviour
+            # (meson FAQ: "why does building my project with MSVC output static
+            # libraries called libfoo.a") -- while `cargo:rustc-link-lib=dav1d`
+            # makes link.exe look for `dav1d.lib`. That mismatch is the
+            # "LNK1181: cannot open input file 'dav1d.lib'" this whole job
+            # started from, and asking for the platform scheme is steadier
+            # than rewriting whatever name the default scheme produced.
+            meson setup -Ddefault_library=static -Dnamingscheme=platform \
+              --prefix "$prefix" dav1d-build dav1d-src
             ninja -C dav1d-build
             meson install -C dav1d-build
-            lib="$prefix/lib/dav1d.lib"
-            if [ ! -f "$lib" ]; then
-              # meson installs the MSVC static archive as `libdav1d.a` (its
-              # static-library suffix is `.a` for every compiler), while
-              # link.exe resolves `-l dav1d` as `dav1d.lib` -- which is what
-              # "LNK1181: cannot open input file 'dav1d.lib'" was all along.
-              # The archive is plain COFF either way, so copy it to the name the
-              # Rust link asks for.
-              built="$prefix/lib/libdav1d.a"
-              [ -f "$built" ] \
-                || { echo "::error::neither $lib nor $built was installed"; exit 1; }
-              cp "$built" "$lib"
-            fi
+            [ -f "$prefix/lib/dav1d.lib" ] \
+              || { echo "::error::$prefix/lib/dav1d.lib was not produced"; exit 1; }
             {
               echo "SYSTEM_DEPS_DAV1D_BUILD_INTERNAL=never"
               echo "SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG=1"
