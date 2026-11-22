@@ -328,11 +328,18 @@ jobs:
             CC_WIN="$(cygpath -w "$msvc_link_dir")/cl.exe"
             [ -f "$CC_WIN" ] || { echo "::error::$CC_WIN not found"; exit 1; }
             export CC="$CC_WIN"
-            # 1.5.0 is the tag dav1d-sys 0.8.3 builds; DAV1D_COMMIT is that
-            # tag's peeled sha, so the archive cannot move under us the way a
-            # tag can. Bump both together with the crate.
-            DAV1D_TAG=1.5.0
-            DAV1D_COMMIT=32cf02af50f32af108a3b281c452788dccdac648
+            # 1.5.5, not the 1.5.0 that dav1d-sys 0.8.3 pins (nor 1.5.4, which
+            # is what 0.9.0 moves to): 1.5.5 is the first tag whose
+            # compat/msvc/stdatomic.h survives MSVC 14.52.37029, which rejects
+            # the `#if defined(__clang__) && __has_include_next(<stdatomic.h>)`
+            # guard with "error C7780: function-like macro
+            # '__has_include_next' is not defined" on earlier tags; 1.5.5
+            # defines the macro away before the guard. include/dav1d/version.h
+            # is byte-identical to 1.5.0's, so the crate's bindings are
+            # unaffected. DAV1D_COMMIT is the tag's peeled sha, so the archive
+            # cannot move under us the way a tag can.
+            DAV1D_TAG=1.5.5
+            DAV1D_COMMIT=6c7bee685677fd997a431302be4fea8ea4017606
             # The prefix is a stable absolute path, because it is baked into
             # the build script's cached rustc-link-search that a restored
             # target/ reuses, and it carries the commit so that bumping the
@@ -346,20 +353,6 @@ jobs:
             tar xzf dav1d.tar.gz -C dav1d-src --strip-components=1
             grep -q "version: '$DAV1D_TAG'" dav1d-src/meson.build \
               || { echo "::error::$DAV1D_COMMIT is not dav1d $DAV1D_TAG"; exit 1; }
-            # MSVC 14.52.37029 rejects dav1d's clang-cl guard outright --
-            # "error C7780: function-like macro '__has_include_next' is not
-            # defined" -- on every object that includes this header, with no
-            # cache or preprocessor flag on the command line. Take the header's
-            # own non-clang branch, which is what MSVC builds use anyway and is
-            # never reached for plain cl; the substitute only ever applied to
-            # clang-cl, which this job does not use. The pinned commit keeps
-            # the patch stable and the grep fails here if a pin bump moves the
-            # line, instead of silently not applying it.
-            grep -qxF '#if defined(__clang__) && __has_include_next(<stdatomic.h>)' \
-              dav1d-src/include/compat/msvc/stdatomic.h \
-              || { echo "::error::the msvc stdatomic.h guard changed; re-check this patch"; exit 1; }
-            sed -i 's|^#if defined(__clang__) && __has_include_next(<stdatomic.h>)$|#if 0|' \
-              dav1d-src/include/compat/msvc/stdatomic.h
             meson setup -Ddefault_library=static --prefix "$prefix" \
               dav1d-build dav1d-src
             ninja -C dav1d-build
