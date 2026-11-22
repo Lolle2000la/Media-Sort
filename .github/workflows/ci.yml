@@ -353,20 +353,28 @@ jobs:
             tar xzf dav1d.tar.gz -C dav1d-src --strip-components=1
             grep -q "version: '$DAV1D_TAG'" dav1d-src/meson.build \
               || { echo "::error::$DAV1D_COMMIT is not dav1d $DAV1D_TAG"; exit 1; }
-            # -Dnamingscheme=platform: meson's default ("classic") names MSVC
-            # static libraries `libdav1d.a` -- deliberate, documented behaviour
-            # (meson FAQ: "why does building my project with MSVC output static
-            # libraries called libfoo.a") -- while `cargo:rustc-link-lib=dav1d`
-            # makes link.exe look for `dav1d.lib`. That mismatch is the
-            # "LNK1181: cannot open input file 'dav1d.lib'" this whole job
-            # started from, and asking for the platform scheme is steadier
-            # than rewriting whatever name the default scheme produced.
-            meson setup -Ddefault_library=static -Dnamingscheme=platform \
-              --prefix "$prefix" dav1d-build dav1d-src
+            meson setup -Ddefault_library=static --prefix "$prefix" \
+              dav1d-build dav1d-src
             ninja -C dav1d-build
             meson install -C dav1d-build
-            [ -f "$prefix/lib/dav1d.lib" ] \
-              || { echo "::error::$prefix/lib/dav1d.lib was not produced"; exit 1; }
+            # meson uses its documented "classic" naming, under which an MSVC
+            # static library is `libdav1d.a` (its FAQ explains the libfoo.a
+            # choice), while `cargo:rustc-link-lib=dav1d` makes link.exe look
+            # for `dav1d.lib`. That mismatch is the "LNK1181: cannot open input
+            # file 'dav1d.lib'" this job started from. `-Dnamingscheme=platform`
+            # is not a way out: for a plain `library()` call the platform values
+            # are overwritten by the name_prefix/name_suffix fallbacks in
+            # StaticLibrary.determine_default_prefix_and_suffix, and meson still
+            # installs libdav1d.a (verified on this runner). So publish whatever
+            # archive was installed under the name the Rust link asks for.
+            lib="$prefix/lib/dav1d.lib"
+            if [ ! -f "$lib" ]; then
+              built="$(find "$prefix/lib" -maxdepth 1 -type f \
+                \( -name '*.a' -o -name '*.lib' \) -print -quit)"
+              [ -n "$built" ] \
+                || { echo "::error::no static archive was installed into $prefix/lib"; exit 1; }
+              cp "$built" "$lib"
+            fi
             {
               echo "SYSTEM_DEPS_DAV1D_BUILD_INTERNAL=never"
               echo "SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG=1"
