@@ -210,7 +210,9 @@ infrastructure — nothing here is published automatically.
    cutting the release, and `verify-version` in `release.yml` refuses to build a
    tag whose first `<release>` is not that version.
 3. `cargo-sources.json` comes from the tagged tree — the release commit
-   regenerates it (see below) — so copy it as-is. Re-run
+   regenerates it (see below) — so copy it as-is. Take it from the **release
+   tag**, not from `master`; Flathub's external data checker only bumps the
+   manifest's `tag`/`commit` and never regenerates `cargo-sources.json`. Re-run
    `bash scripts/update-flatpak-sources.sh` only if you point the manifest at a
    lock newer than the tag.
 4. Fork [`flathub/flathub`](https://github.com/flathub/flathub), create a branch

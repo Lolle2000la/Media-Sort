@@ -9,6 +9,12 @@
   "osvVulnerabilityAlerts": true,
   "minimumReleaseAge": "14 days",
   "minimumReleaseAgeBehaviour": "timestamp-required",
+  "cargo": {
+    "minimumReleaseAgePackageManagerSync": true,
+    "constraints": {
+      "rust": "1.100"
+    }
+  },
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["before 5am on monday"],
@@ -37,7 +43,7 @@
       "groupName": "GitHub Actions"
     },
     {
-      "description": "Automerge non-major cargo/npm updates once their checks are green. Both ecosystems are gate-tested on every pull request: ci.yml runs fmt, clippy and the Linux/Windows/macOS nextest + doctest matrices for any Cargo.lock change, and website.yml runs npm ci --locked, eslint, prettier --check and astro build for any website/** change -- a bump that does not install, compile or pass tests fails the PR instead of reaching master. The 14-day soak is enforced twice: minimumReleaseAge (with minimumReleaseAgeBehaviour=timestamp-required, strict) keeps the branch and PR from being created at all until the release is two weeks old, and Cargo's [registry] global-min-publish-age (Rust 1.100+) holds resolution on the other path -- including lockfile maintenance, which Renovate's age gate does not cover -- so this only ever merges releases that have soaked that long. Security/vulnerability updates bypass the Renovate age gate by design; Cargo's cooldown then makes such an update surface as an artifact error (the `cargo update -p … --precise` fails) until the release is 14 days old, unless it is resolved with CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow. platformAutomerge is pinned false on purpose: this repository has allow_auto_merge disabled, so GitHub offers no native auto-merge and Renovate does the merge itself, only after evaluating the PR's status checks. Majors stay manual: they get their own PR so a human reads the changelog. Pin/digest updates stay manual too, because minimumReleaseAge explicitly does not cover pin updates, so automerging them would skip the 14-day soak.",
+      "description": "Automerge non-major cargo/npm updates once their checks are green. Both ecosystems are gate-tested on every pull request: ci.yml runs fmt, clippy and the Linux/Windows/macOS nextest + doctest matrices for any Cargo.lock change, and website.yml runs npm ci --locked, eslint, prettier --check and astro build for any website/** change -- a bump that does not install, compile or pass tests fails the PR instead of reaching master. minimumReleaseAge (14 days, with minimumReleaseAgeBehaviour=timestamp-required and the strict internalChecksFilter) keeps the branch and PR from being created at all until the release is two weeks old. For cargo, the top-level cargo block's minimumReleaseAgePackageManagerSync plus constraints.rust \"1.100\" make Renovate pass CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE=\"14 days\" and CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=\"deny\" to its cargo update calls, so lockfile maintenance is aged the same way (this needs Cargo >= 1.100 in Renovate's environment). Security/vulnerability updates bypass the Renovate age gate and pass no Cargo env, so they land immediately. platformAutomerge is pinned false on purpose: this repository has allow_auto_merge disabled, so GitHub offers no native auto-merge and Renovate does the merge itself, only after evaluating the PR's status checks. Majors stay manual: they get their own PR so a human reads the changelog. Pin/digest updates stay manual too, because minimumReleaseAge explicitly does not cover pin updates, so automerging them would skip the 14-day soak.",
       "matchManagers": ["cargo", "npm"],
       "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,

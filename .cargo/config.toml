@@ -1,22 +1,3 @@
-# Cargo dependency cooldowns (RFC 3923, stabilized in Rust 1.100): the resolver
-# ignores any crate version published less than this window ago unless that
-# exact version is already pinned in Cargo.lock. It applies to every resolution
-# -- `cargo update`, lockfile maintenance and a newly added dependency alike --
-# but never re-resolves a version already in the lock, and it leaves git/path
-# dependencies and `cargo install` untouched. This mirrors renovate.json's
-# `minimumReleaseAge` on the resolution path (Renovate holds PR creation), so a
-# registry compromise has two weeks to be caught before either route can take
-# it. Toolchains before 1.100 warn about the unknown key and ignore it, so the
-# 1.98 MSRV keeps working; CI runs stable (>= 1.100). The AppImage container
-# still pins Rust 1.99.1 (packaging/appimage/versions.env, bumped by the
-# appimage-bump workflow) and so ignores the key -- harmless only because the
-# container builds without `--locked` and relies on release.sh refreshing the
-# lock before tagging; changing that would let it silently re-resolve. Take a
-# too-new version deliberately for one command with
-# CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow.
-[registry]
-global-min-publish-age = "14 days"
-
 # turbojpeg-sys vendors libjpeg-turbo whose CMake defaults to the static
 # MSVC CRT (WITH_CRT_DLL=FALSE -> /MTd in debug builds, /MT in release),
 # while rustc always links the dynamic CRT (/MD). That surfaces as
