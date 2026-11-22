@@ -234,6 +234,7 @@ impl AppState {
         self.cache.selected_image = None;
         self.cache.image_cache.clear();
         self.cache.document_cache.clear();
+        self.cache.thumbnails_in_flight.clear();
         self.document.reset();
         self.video.select(None);
         self.cache.media_errors.clear();

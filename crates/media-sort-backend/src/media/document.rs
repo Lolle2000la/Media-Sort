@@ -11,6 +11,7 @@ use super::DecodedImage;
 
 pub mod comic;
 pub mod epub;
+pub mod lok_worker;
 pub mod office;
 pub mod os_preview;
 pub mod pdf;
@@ -135,6 +136,43 @@ pub fn generate_document_thumbnail(
     max_height: u32,
 ) -> Result<Option<DecodedImage>, DocumentError> {
     generate_document_thumbnail_with_options(path, max_width, max_height, true)
+}
+
+/// Generates a fast bounded thumbnail for `path` without invoking LibreOffice.
+///
+/// For Office and spreadsheet formats this checks embedded archive thumbnails and the OS preview
+/// provider only; LibreOffice conversion is skipped so slow conversions can be scheduled separately
+/// via [`render_libreoffice_document_thumbnail`].
+pub fn extract_fast_document_thumbnail(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+) -> Result<Option<DecodedImage>, DocumentError> {
+    match DocumentKind::from_path(path) {
+        Some(DocumentKind::Pdf) => pdf::render_pdf_thumbnail(path, max_width, max_height),
+        Some(DocumentKind::Comic) => comic::extract_comic_thumbnail(path, max_width, max_height),
+        Some(DocumentKind::Epub) => epub::extract_epub_thumbnail(path, max_width, max_height),
+        Some(DocumentKind::Office) | Some(DocumentKind::Spreadsheet) => {
+            office::extract_fast_office_thumbnail(path, max_width, max_height)
+        }
+        Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) | None => Ok(None),
+    }
+}
+
+/// Renders a bounded thumbnail for an Office or spreadsheet document via LibreOffice.
+///
+/// Returns `Ok(None)` for non-Office formats or when LibreOffice is unavailable or fails.
+pub fn render_libreoffice_document_thumbnail(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+) -> Result<Option<DecodedImage>, DocumentError> {
+    match DocumentKind::from_path(path) {
+        Some(DocumentKind::Office) | Some(DocumentKind::Spreadsheet) => {
+            office::render_libreoffice_thumbnail(path, max_width, max_height)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Loads the interactive preview payload for a document at `page_index` (used for PDF pages,

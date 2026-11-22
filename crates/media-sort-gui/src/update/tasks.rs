@@ -172,20 +172,21 @@ pub fn select_and_load_entry(state: &mut AppState, index: usize) -> Task<Message
         tasks.extend(preload_tasks);
 
         let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
-        tasks.extend(
-            thumbnail_meta
-                .into_iter()
-                .filter(|(p, _, _)| !state.cache.thumbnail_cache.contains(p))
-                .map(|(p, mt, animated)| {
-                    load_thumbnail(
-                        p,
-                        state.cache.thumbnail_tracker.clone_checker(),
-                        mt,
-                        animated,
-                        enable_libreoffice,
-                    )
-                }),
-        );
+        let checker = state.cache.thumbnail_tracker.clone_checker();
+        for (p, mt, animated) in thumbnail_meta {
+            if !state.cache.thumbnail_cache.contains(&p)
+                && !state.cache.media_errors.has_error(&p)
+                && state.cache.thumbnails_in_flight.insert(p.clone())
+            {
+                tasks.push(load_thumbnail(
+                    p,
+                    checker.clone(),
+                    mt,
+                    animated,
+                    enable_libreoffice,
+                ));
+            }
+        }
         Task::batch(tasks)
     } else {
         state.media_grid.selected_index = None;
@@ -379,28 +380,30 @@ pub fn load_visible_thumbnails(state: &mut AppState) -> Task<Message> {
         .map(|e| (e.path.clone(), (e.media_type, e.animated)))
         .collect();
 
+    drop(filtered);
+
     let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
-    Task::batch(
-        load_queue
-            .into_iter()
-            .filter(|path| {
-                !state.cache.thumbnail_cache.contains(path)
-                    && !state.cache.media_errors.has_error(path)
-            })
-            .map(|path| {
-                let (media_type, animated) = entry_meta
-                    .get(&path)
-                    .copied()
-                    .unwrap_or((media_sort_core::media_type::MediaType::Image, None));
-                load_thumbnail(
-                    path,
-                    state.cache.thumbnail_tracker.clone_checker(),
-                    media_type,
-                    animated,
-                    enable_libreoffice,
-                )
-            }),
-    )
+    let checker = state.cache.thumbnail_tracker.clone_checker();
+    let mut tasks = Vec::new();
+    for path in load_queue {
+        if !state.cache.thumbnail_cache.contains(&path)
+            && !state.cache.media_errors.has_error(&path)
+            && state.cache.thumbnails_in_flight.insert(path.clone())
+        {
+            let (media_type, animated) = entry_meta
+                .get(&path)
+                .copied()
+                .unwrap_or((media_sort_core::media_type::MediaType::Image, None));
+            tasks.push(load_thumbnail(
+                path,
+                checker.clone(),
+                media_type,
+                animated,
+                enable_libreoffice,
+            ));
+        }
+    }
+    Task::batch(tasks)
 }
 
 pub fn load_thumbnail(

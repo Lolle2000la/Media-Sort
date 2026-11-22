@@ -19,18 +19,15 @@ use super::{
 const MAX_SHEETS: usize = 32;
 const CFB_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
-/// Extracts a bounded thumbnail for Office or spreadsheet documents.
+/// Extracts a fast thumbnail for Office or spreadsheet documents without invoking LibreOffice.
 ///
 /// Checks embedded archive thumbnails first (`Thumbnails/thumbnail.png`, `docProps/thumbnail.*`),
-/// then falls back to the platform OS thumbnail provider (`os_preview::generate_os_thumbnail`),
-/// and finally (when `enable_libreoffice` is enabled) converts via LibreOffice to a cached PDF
-/// and renders page 0. Errors are logged at debug level and converted to `Ok(None)` so missing or
-/// unsupported Office thumbnails never pollute `media_errors`.
-pub fn extract_office_thumbnail(
+/// then falls back to the platform OS thumbnail provider (`os_preview::generate_os_thumbnail`).
+/// Errors are logged at debug level and converted to `Ok(None)`.
+pub fn extract_fast_office_thumbnail(
     path: &Path,
     max_width: u32,
     max_height: u32,
-    enable_libreoffice: bool,
 ) -> Result<Option<DecodedImage>, DocumentError> {
     let max_width = max_width.max(1);
     let max_height = max_height.max(1);
@@ -45,42 +42,76 @@ pub fn extract_office_thumbnail(
     }
 
     match os_preview::generate_os_thumbnail(path, max_width, max_height) {
-        Ok(Some(img)) => return Ok(Some(img)),
-        Ok(None) => {}
+        Ok(Some(img)) => Ok(Some(img)),
+        Ok(None) => Ok(None),
         Err(err) => {
             tracing::debug!(
                 path = %path.display(),
                 error = %err,
                 "OS thumbnail lookup failed for Office document"
             );
+            Ok(None)
         }
     }
+}
 
-    if enable_libreoffice && soffice_pipe::is_libreoffice_available() {
-        match soffice_pipe::convert_to_pdf_path(path) {
-            Ok(Some(pdf_path)) => match pdf::render_pdf_thumbnail(&pdf_path, max_width, max_height)
-            {
-                Ok(img) => return Ok(img),
-                Err(err) => {
-                    tracing::debug!(
-                        path = %path.display(),
-                        pdf_path = %pdf_path.display(),
-                        error = %err,
-                        "Failed to render PDF thumbnail from LibreOffice output"
-                    );
-                }
-            },
-            Ok(None) => {}
+/// Renders a thumbnail for an Office or spreadsheet document via LibreOffice.
+///
+/// Converts page 1 via `soffice_pipe::convert_first_page_to_pdf_path` and renders page 0 via
+/// `pdf::render_pdf_thumbnail`. Errors are logged at debug level and converted to `Ok(None)` so
+/// missing or unsupported Office thumbnails never pollute `media_errors`.
+pub fn render_libreoffice_thumbnail(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+) -> Result<Option<DecodedImage>, DocumentError> {
+    let max_width = max_width.max(1);
+    let max_height = max_height.max(1);
+    if !soffice_pipe::is_libreoffice_available() {
+        return Ok(None);
+    }
+
+    match soffice_pipe::convert_first_page_to_pdf_path(path) {
+        Ok(Some(pdf_path)) => match pdf::render_pdf_thumbnail(&pdf_path, max_width, max_height) {
+            Ok(img) => Ok(img),
             Err(err) => {
                 tracing::debug!(
                     path = %path.display(),
+                    pdf_path = %pdf_path.display(),
                     error = %err,
-                    "LibreOffice conversion failed while generating Office thumbnail"
+                    "Failed to render PDF thumbnail from LibreOffice output"
                 );
+                Ok(None)
             }
+        },
+        Ok(None) => Ok(None),
+        Err(err) => {
+            tracing::debug!(
+                path = %path.display(),
+                error = %err,
+                "LibreOffice conversion failed while generating Office thumbnail"
+            );
+            Ok(None)
         }
     }
+}
 
+/// Extracts a bounded thumbnail for Office or spreadsheet documents.
+///
+/// Checks fast embedded/OS sources via [`extract_fast_office_thumbnail`], and finally (when
+/// `enable_libreoffice` is enabled) converts via [`render_libreoffice_thumbnail`].
+pub fn extract_office_thumbnail(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+    enable_libreoffice: bool,
+) -> Result<Option<DecodedImage>, DocumentError> {
+    if let Some(img) = extract_fast_office_thumbnail(path, max_width, max_height)? {
+        return Ok(Some(img));
+    }
+    if enable_libreoffice {
+        return render_libreoffice_thumbnail(path, max_width, max_height);
+    }
     Ok(None)
 }
 

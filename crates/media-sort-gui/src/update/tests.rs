@@ -2069,4 +2069,186 @@ fn test_document_select_cache_hit_and_non_document_resets_in_flight() {
     assert!(state.document.in_flight_pages.is_empty());
 }
 
+#[test]
+fn test_thumbnails_in_flight_dedup_on_load_visible_and_select() {
+    let mut state = AppState::new(SettingsStore::default());
+    let a = PathBuf::from("/test/a.jpg");
+    let b = PathBuf::from("/test/b.jpg");
+    let cached = PathBuf::from("/test/cached.jpg");
+    let errored = PathBuf::from("/test/errored.jpg");
+
+    state.media_grid.entries = vec![
+        MediaEntry {
+            path: a.clone(),
+            media_type: MediaType::Image,
+            file_name: "a.jpg".into(),
+            animated: None,
+        },
+        MediaEntry {
+            path: b.clone(),
+            media_type: MediaType::Image,
+            file_name: "b.jpg".into(),
+            animated: None,
+        },
+        MediaEntry {
+            path: cached.clone(),
+            media_type: MediaType::Image,
+            file_name: "cached.jpg".into(),
+            animated: None,
+        },
+        MediaEntry {
+            path: errored.clone(),
+            media_type: MediaType::Image,
+            file_name: "errored.jpg".into(),
+            animated: None,
+        },
+    ];
+    state.media_grid.rebuild_lower_names();
+    state.media_grid.scroll.viewport_width = 1000.0;
+    state.cache.thumbnail_cache.push(
+        cached.clone(),
+        iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]),
+    );
+    state
+        .cache
+        .media_errors
+        .record(errored.clone(), "decode failed");
+
+    let _ = super::tasks::load_visible_thumbnails(&mut state);
+    assert_eq!(state.cache.thumbnails_in_flight.len(), 2);
+    assert!(state.cache.thumbnails_in_flight.contains(&a));
+    assert!(state.cache.thumbnails_in_flight.contains(&b));
+    assert!(!state.cache.thumbnails_in_flight.contains(&cached));
+    assert!(!state.cache.thumbnails_in_flight.contains(&errored));
+
+    // Back-to-back calls do not duplicate already in-flight paths.
+    let _ = super::tasks::load_visible_thumbnails(&mut state);
+    assert_eq!(state.cache.thumbnails_in_flight.len(), 2);
+
+    // `select_and_load_entry` respects `thumbnails_in_flight`, `thumbnail_cache`, and `media_errors`.
+    let _ = super::tasks::select_and_load_entry(&mut state, 0);
+    assert_eq!(state.cache.thumbnails_in_flight.len(), 2);
+    assert!(!state.cache.thumbnails_in_flight.contains(&cached));
+    assert!(!state.cache.thumbnails_in_flight.contains(&errored));
+
+    // Fresh state verifies `select_and_load_entry` inserts and deduplicates on back-to-back calls.
+    let mut fresh = AppState::new(SettingsStore::default());
+    fresh.media_grid.entries = vec![
+        MediaEntry {
+            path: a.clone(),
+            media_type: MediaType::Image,
+            file_name: "a.jpg".into(),
+            animated: None,
+        },
+        MediaEntry {
+            path: b.clone(),
+            media_type: MediaType::Image,
+            file_name: "b.jpg".into(),
+            animated: None,
+        },
+    ];
+    fresh.media_grid.rebuild_lower_names();
+
+    let _ = super::tasks::select_and_load_entry(&mut fresh, 0);
+    assert_eq!(fresh.cache.thumbnails_in_flight.len(), 2);
+    assert!(fresh.cache.thumbnails_in_flight.contains(&a));
+    assert!(fresh.cache.thumbnails_in_flight.contains(&b));
+
+    let _ = super::tasks::select_and_load_entry(&mut fresh, 0);
+    assert_eq!(fresh.cache.thumbnails_in_flight.len(), 2);
+}
+
+#[test]
+fn test_thumbnails_in_flight_cleared_by_completion_messages() {
+    use crate::subscriptions::prefetch::ThumbnailError;
+
+    let mut state = AppState::new(SettingsStore::default());
+    let ready = PathBuf::from("/test/ready.jpg");
+    let ready_empty = PathBuf::from("/test/ready_empty.jpg");
+    let failed_decode = PathBuf::from("/test/failed_decode.jpg");
+    let failed_transient = PathBuf::from("/test/failed_transient.jpg");
+    let cancelled = PathBuf::from("/test/cancelled.wav");
+
+    for path in [
+        &ready,
+        &ready_empty,
+        &failed_decode,
+        &failed_transient,
+        &cancelled,
+    ] {
+        state.cache.thumbnails_in_flight.insert(path.clone());
+    }
+
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ThumbnailReady(
+            ready.clone(),
+            1,
+            1,
+            vec![255, 0, 0, 255],
+        )),
+    );
+    assert!(!state.cache.thumbnails_in_flight.contains(&ready));
+    assert!(state.cache.thumbnail_cache.contains(&ready));
+
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ThumbnailReady(
+            ready_empty.clone(),
+            0,
+            0,
+            Vec::new(),
+        )),
+    );
+    assert!(!state.cache.thumbnails_in_flight.contains(&ready_empty));
+
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ThumbnailFailed(
+            failed_decode.clone(),
+            ThumbnailError::Decode("corrupt".into()),
+        )),
+    );
+    assert!(!state.cache.thumbnails_in_flight.contains(&failed_decode));
+    assert!(state.cache.media_errors.has_error(&failed_decode));
+
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ThumbnailFailed(
+            failed_transient.clone(),
+            ThumbnailError::Transient("timeout".into()),
+        )),
+    );
+    assert!(!state.cache.thumbnails_in_flight.contains(&failed_transient));
+    assert!(!state.cache.media_errors.has_error(&failed_transient));
+
+    let _ = update(
+        &mut state,
+        Message::Media(MediaMessage::ThumbnailCancelled(cancelled.clone())),
+    );
+    assert!(!state.cache.thumbnails_in_flight.contains(&cancelled));
+    assert!(state.cache.thumbnails_in_flight.is_empty());
+}
+
+#[test]
+fn test_open_folder_clears_thumbnails_in_flight() {
+    let dir = temp_media_dir("mediasort_open_folder_inflight");
+    let mut state = AppState::new(SettingsStore::default());
+    state
+        .cache
+        .thumbnails_in_flight
+        .insert(PathBuf::from("/old/a.jpg"));
+    state
+        .cache
+        .thumbnails_in_flight
+        .insert(PathBuf::from("/old/b.docx"));
+
+    state.open_folder(&dir);
+    assert!(state.cache.thumbnails_in_flight.is_empty());
+
+    drain_async_scan(&mut state);
+    drain_folder_tree(&mut state);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 mod filesystem_watcher;

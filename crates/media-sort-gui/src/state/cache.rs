@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use crate::subscriptions::thumbnail_tracker::ThumbnailVisibilityTracker;
 pub struct CacheState {
     pub selected_image: Option<(PathBuf, iced::widget::image::Handle)>,
     pub thumbnail_cache: LruCache<PathBuf, iced::widget::image::Handle>,
+    pub thumbnails_in_flight: HashSet<PathBuf>,
     pub image_cache: LruCache<PathBuf, iced::widget::image::Handle>,
     pub document_cache: LruCache<(PathBuf, usize), DocumentPreviewData>,
     pub thumbnail_tracker: ThumbnailVisibilityTracker,
@@ -25,6 +27,7 @@ impl fmt::Debug for CacheState {
                 &self.selected_image.as_ref().map(|(p, _)| p),
             )
             .field("thumbnail_cache_len", &self.thumbnail_cache.len())
+            .field("thumbnails_in_flight_len", &self.thumbnails_in_flight.len())
             .field("image_cache_len", &self.image_cache.len())
             .field("document_cache_len", &self.document_cache.len())
             .field("media_errors_len", &self.media_errors.len())
@@ -39,6 +42,7 @@ impl CacheState {
             thumbnail_cache: LruCache::new(
                 NonZeroUsize::new(200).expect("200 is a non-zero constant"),
             ),
+            thumbnails_in_flight: HashSet::new(),
             image_cache: LruCache::new(NonZeroUsize::new(20).expect("20 is a non-zero constant")),
             document_cache: LruCache::new(
                 NonZeroUsize::new(24).expect("24 is a non-zero constant"),
@@ -50,11 +54,12 @@ impl CacheState {
         }
     }
 
-    /// Clears all cached previews, thumbnails, and tracked media errors.
+    /// Clears all cached previews, thumbnails, in-flight tracking, and tracked media errors.
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.selected_image = None;
         self.thumbnail_cache.clear();
+        self.thumbnails_in_flight.clear();
         self.image_cache.clear();
         self.document_cache.clear();
         self.media_errors.clear();

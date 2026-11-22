@@ -255,6 +255,7 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             }
         },
         MediaMessage::ThumbnailReady(path, w, h, data) => {
+            state.cache.thumbnails_in_flight.remove(&path);
             if !data.is_empty() && w > 0 && h > 0 {
                 state.cache.media_errors.remove(&path);
                 let handle = iced::widget::image::Handle::from_rgba(w, h, data);
@@ -263,6 +264,7 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             Task::none()
         }
         MediaMessage::ThumbnailFailed(path, err) => {
+            state.cache.thumbnails_in_flight.remove(&path);
             match err {
                 crate::subscriptions::prefetch::ThumbnailError::Transient(rest) => {
                     // Transient failure (queue timeout, dead worker pool),
@@ -285,7 +287,10 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             }
             Task::none()
         }
-        MediaMessage::ThumbnailCancelled(_path) => Task::none(),
+        MediaMessage::ThumbnailCancelled(path) => {
+            state.cache.thumbnails_in_flight.remove(&path);
+            Task::none()
+        }
         MediaMessage::OpenExternal(path) => {
             super::tasks::open_externally(&path);
             Task::none()

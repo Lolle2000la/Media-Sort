@@ -11,7 +11,7 @@ type KeepPredicate = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 struct DocumentThumbnailRequest {
     path: PathBuf,
-    enable_libreoffice: bool,
+    libreoffice_only: bool,
     should_keep: Option<KeepPredicate>,
     response: std::sync::mpsc::Sender<DocumentThumbnailResult>,
 }
@@ -189,12 +189,20 @@ fn spawn_document_thumbnail_pool(
                     let _ = req.response.send(Ok(None));
                     continue;
                 }
-                let result = match media_sort_backend::media::document::generate_document_thumbnail_with_options(
-                    &req.path,
-                    THUMBNAIL_SIZE,
-                    THUMBNAIL_SIZE,
-                    req.enable_libreoffice,
-                ) {
+                let result = if req.libreoffice_only {
+                    media_sort_backend::media::document::render_libreoffice_document_thumbnail(
+                        &req.path,
+                        THUMBNAIL_SIZE,
+                        THUMBNAIL_SIZE,
+                    )
+                } else {
+                    media_sort_backend::media::document::extract_fast_document_thumbnail(
+                        &req.path,
+                        THUMBNAIL_SIZE,
+                        THUMBNAIL_SIZE,
+                    )
+                };
+                let result = match result {
                     Ok(opt) => Ok(opt.map(|d| d.into_parts())),
                     Err(e) => Err(ThumbnailError::Decode(format!(
                         "Document thumbnail error: {e}"
@@ -213,8 +221,8 @@ fn spawn_document_thumbnail_pool(
 }
 
 // Bounded document thumbnail worker pool — handles fast document formats (PDF,
-// comic archives, EPUB covers, Markdown/plain text) without overloading CPU/RAM
-// on large folders.
+// comic archives, EPUB covers, Markdown/plain text, and embedded/OS Office
+// thumbnails) without ever invoking LibreOffice.
 static DOCUMENT_THUMBNAIL_WORKER: LazyLock<
     std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
 > = LazyLock::new(|| {
@@ -225,41 +233,21 @@ static DOCUMENT_THUMBNAIL_WORKER: LazyLock<
     spawn_document_thumbnail_pool(num_workers, "Document thumbnail worker")
 });
 
-// Dedicated Office/spreadsheet thumbnail worker pool (2 threads) so slow
-// LibreOffice conversions cannot starve fast PDF/CBZ/EPUB thumbnails.
+// Dedicated Office/spreadsheet thumbnail worker pool (1 thread, since
+// LibreOffice execution serializes anyway) so slow LibreOffice conversions
+// cannot starve fast thumbnails on `DOCUMENT_THUMBNAIL_WORKER`.
 static OFFICE_THUMBNAIL_WORKER: LazyLock<
     std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
-> = LazyLock::new(|| spawn_document_thumbnail_pool(2, "Office thumbnail worker"));
+> = LazyLock::new(|| spawn_document_thumbnail_pool(1, "Office thumbnail worker"));
 
-fn generate_document_thumbnail_queued(
+fn dispatch_document_thumbnail_request(
+    pool: &std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
     path: &std::path::Path,
-    enable_libreoffice: bool,
+    libreoffice_only: bool,
     should_keep: Option<KeepPredicate>,
+    timeout: std::time::Duration,
+    label: &'static str,
 ) -> DocumentThumbnailResult {
-    if let Some(ref keep) = should_keep
-        && !keep()
-    {
-        return Ok(None);
-    }
-
-    let is_office = matches!(
-        DocumentKind::from_path(path),
-        Some(DocumentKind::Office | DocumentKind::Spreadsheet)
-    );
-    let (pool, timeout, label): (
-        &std::sync::Mutex<std::sync::mpsc::SyncSender<DocumentThumbnailRequest>>,
-        std::time::Duration,
-        &'static str,
-    ) = if is_office {
-        (&OFFICE_THUMBNAIL_WORKER, OFFICE_RESPONSE_TIMEOUT, "office")
-    } else {
-        (
-            &DOCUMENT_THUMBNAIL_WORKER,
-            DOCUMENT_RESPONSE_TIMEOUT,
-            "document",
-        )
-    };
-
     let (response_tx, response_rx) = std::sync::mpsc::channel();
     let sender = pool
         .lock()
@@ -267,7 +255,7 @@ fn generate_document_thumbnail_queued(
         .clone();
     let request = DocumentThumbnailRequest {
         path: path.to_path_buf(),
-        enable_libreoffice,
+        libreoffice_only,
         should_keep,
         response: response_tx,
     };
@@ -285,6 +273,55 @@ fn generate_document_thumbnail_queued(
             format!("{label} thumbnail worker pool disconnected"),
         )),
     }
+}
+
+fn generate_document_thumbnail_queued(
+    path: &std::path::Path,
+    enable_libreoffice: bool,
+    should_keep: Option<KeepPredicate>,
+) -> DocumentThumbnailResult {
+    if let Some(ref keep) = should_keep
+        && !keep()
+    {
+        return Ok(None);
+    }
+
+    // Always try the fast path first so PDF/CBZ/EPUB and embedded/OS Office
+    // thumbnails never wait behind slow LibreOffice conversions.
+    match dispatch_document_thumbnail_request(
+        &DOCUMENT_THUMBNAIL_WORKER,
+        path,
+        false,
+        should_keep.clone(),
+        DOCUMENT_RESPONSE_TIMEOUT,
+        "document",
+    ) {
+        Ok(Some(parts)) => return Ok(Some(parts)),
+        Err(e) => return Err(e),
+        Ok(None) => {}
+    }
+
+    let is_office = matches!(
+        DocumentKind::from_path(path),
+        Some(DocumentKind::Office | DocumentKind::Spreadsheet)
+    );
+    if !is_office || !enable_libreoffice {
+        return Ok(None);
+    }
+    if let Some(ref keep) = should_keep
+        && !keep()
+    {
+        return Ok(None);
+    }
+
+    dispatch_document_thumbnail_request(
+        &OFFICE_THUMBNAIL_WORKER,
+        path,
+        true,
+        should_keep,
+        OFFICE_RESPONSE_TIMEOUT,
+        "office",
+    )
 }
 
 fn generate_video_thumbnail_frame(
@@ -342,10 +379,12 @@ pub fn generate_thumbnail(
 /// Generate a thumbnail for the given file with document preview options and an
 /// optional viewport-visibility predicate (`should_keep`).
 ///
-/// Office and spreadsheet documents are dispatched onto the dedicated
-/// `OFFICE_THUMBNAIL_WORKER` pool so slow LibreOffice conversions do not block
-/// PDF/comic/EPUB thumbnails on `DOCUMENT_THUMBNAIL_WORKER`. When `should_keep`
-/// returns `false`, queued work is aborted cleanly with `Ok(None)`.
+/// Document thumbnails always try `DOCUMENT_THUMBNAIL_WORKER` first (PDF,
+/// comic, EPUB, and embedded/OS Office thumbnails without LibreOffice). Only if
+/// the fast path returns `Ok(None)` for an Office/spreadsheet document with
+/// `enable_libreoffice == true` is a conversion dispatched to the dedicated
+/// single-worker `OFFICE_THUMBNAIL_WORKER` pool. When `should_keep` returns
+/// `false`, queued work is aborted cleanly with `Ok(None)`.
 pub fn generate_thumbnail_with_options(
     path: &std::path::Path,
     media_type: MediaType,
@@ -720,12 +759,14 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // First call (pre-queue) returns true so the job enters OFFICE_THUMBNAIL_WORKER;
-        // second call (inside the worker after recv) returns false so LibreOffice is skipped.
+        // Calls 0..=2 (pre-queue, inside DOCUMENT_THUMBNAIL_WORKER, and pre-office-queue)
+        // return true so the job finishes the fast path (`Ok(None)`) and enters
+        // `OFFICE_THUMBNAIL_WORKER`; call 3 (inside `OFFICE_THUMBNAIL_WORKER` after recv)
+        // returns false so LibreOffice is skipped.
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
         let cancel_in_worker: Arc<dyn Fn() -> bool + Send + Sync> =
-            Arc::new(move || calls_clone.fetch_add(1, Ordering::SeqCst) == 0);
+            Arc::new(move || calls_clone.fetch_add(1, Ordering::SeqCst) < 3);
 
         let path = std::path::PathBuf::from("/nonexistent/slides.pptx");
         let result = generate_thumbnail_with_options(
@@ -736,6 +777,6 @@ mod tests {
             Some(cancel_in_worker),
         );
         assert!(matches!(result, Ok(None)));
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 }
