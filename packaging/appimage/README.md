@@ -27,7 +27,7 @@ no binaries are committed to git and nothing is downloaded at runtime.
 
 | File | Purpose |
 | --- | --- |
-| `versions.env` | Every upstream pin in one place (mpv, FFmpeg, dav1d, libass, zimg, wayland, libplacebo, wayland-protocols) with URL + sha256 (+ release commit where upstream publishes one, and the `RUST_VERSION` the AppImage's own compiler is pinned to). **Bump versions here and nowhere else.** |
+| `versions.env` | Every upstream pin for the payload in one place (mpv, FFmpeg, dav1d, libass, zimg, wayland, libplacebo, wayland-protocols) with URL + sha256 (+ release commit where upstream publishes one, and the `RUST_VERSION` the AppImage's own compiler is pinned to). **Bump payload versions here and nowhere else.** The one version-bearing file outside this directory is [`scripts/ci-pins.env`](../../scripts/ci-pins.env), the dav1d pair the Windows CI job builds (not part of the payload); `bump-appimage.sh --apply` can rewrite both, see [Bumping versions](#bumping-versions). |
 | `build-in-container.sh` | Runs in `ubuntu:22.04`: apt deps → dav1d → FFmpeg → libass → zimg → wayland → wayland-protocols → libplacebo → libmpv → `cargo build` → stage. Per-component logs, per-component stamps over the version, the source pin (URL + sha256) *and* the build flags (re-runs are cheap; a flag or pin change rebuilds). |
 | `bundle.sh` | `stage` (container side) computes the closure into `target/appimage-stage`; `install` (host side) copies it into the AppDir, writes the RPATHs and fails on any unresolved `DT_NEEDED`. |
 | `excludelist` | The host-provided allowlist: what must never be bundled (glibc/loader, the GL/Vulkan/GPU-driver stack, and the plugin hosts the host's plugins bind to) with a one-line reason per entry. |
@@ -225,7 +225,8 @@ hard meson error.
 
 ## Bumping versions
 
-Everything lives in [`versions.env`](versions.env). Bumping is automated by
+Everything the payload pins lives in [`versions.env`](versions.env). Bumping is
+automated by
 [`scripts/bump-appimage.sh`](../../scripts/bump-appimage.sh), which queries every
 upstream, downloads the exact archive each new pin would point at, and computes
 the sha256 from those bytes — the part Renovate cannot do (it can find a new
@@ -237,6 +238,13 @@ scripts/bump-appimage.sh --check        # exit 2 when a pin is behind, 0 when no
 scripts/bump-appimage.sh --apply        # rewrite versions.env (temp file + mv)
 scripts/bump-appimage.sh --component mpv --min-age-days 0 --apply
 ```
+
+`--apply` can write a second file: `dav1d` also covers the
+[`scripts/ci-pins.env`](../../scripts/ci-pins.env) pair (`DAV1D_TAG` +
+`DAV1D_COMMIT`) that the Windows CI job builds dav1d from — an independent pin
+that deliberately sits on a different release than the payload's. So a local
+`--apply` is reverted with `git checkout packaging/appimage/versions.env
+scripts/ci-pins.env`, and `git diff` after one may show that file too.
 
 It covers `mpv`, `ffmpeg`, `dav1d`, `libass`, `zimg`, `wayland`,
 `wayland-protocols`, `libplacebo` and `rust`, keeps each component's existing
@@ -250,11 +258,11 @@ status carries the verdict — so its output pipes straight into `jq`. Timestamp
 are parsed with GNU `date -d` (`gdate` is used when it is on `PATH`, i.e. macOS
 with coreutils); a BSD `date` is refused up front, because it would silently make
 every candidate look too young and report "0 updates". Comments,
-ordering and formatting in `versions.env` are preserved. If **any** query, commit
-lookup, download or hash fails, nothing is written at all — the file stays
-byte-identical and the run exits non-zero. A component whose upstream cannot be
-reached is reported as `unknown` and does not abort the others (in a dry run);
-`--apply` refuses to write while any selected component is unknown.
+ordering and formatting in both files are preserved. If **any** query, commit
+lookup, `git ls-remote`, download or hash fails, nothing is written at all — both
+files stay byte-identical and the run exits non-zero. A component whose upstream
+cannot be reached is reported as `unknown` and does not abort the others (in a
+dry run); `--apply` refuses to write while any selected component is unknown.
 
 ### The 14-day soak
 
@@ -274,11 +282,14 @@ has no dates), and the stable channel manifest's `date` for Rust.
 runs `--check` weekly (Mondays 06:00 UTC) and, when something is behind,
 re-runs `--apply`, commits the result on `chore/appimage-bump`, runs the same
 build + verify gate as [`appimage.yml`](../../.github/workflows/appimage.yml)
-(the shared composite action `.github/actions/appimage-gate`), and then opens a
-**draft** PR — or, when a PR with that head branch is still open, force-pushes
-the branch and rewrites that PR's body instead of opening a second one. The job
+(the shared composite action `.github/actions/appimage-gate`) when a
+`versions.env` pin moved, and then opens a **draft** PR — or, when a PR with
+that head branch is still open, force-pushes the branch and rewrites that PR's
+body instead of opening a second one. The job
 fails when the gate fails, but the PR is still created: the failing pin
-combination is then visible instead of silently retried.
+combination is then visible instead of silently retried. A bump that only moves
+`scripts/ci-pins.env` skips the gate (the AppImage never builds that pin) and is
+checked by the PR's own CI instead.
 
 Two details of that job are deliberate:
 

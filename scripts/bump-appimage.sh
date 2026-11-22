@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
 # bump-appimage.sh -- find, report and apply upstream version bumps for the
-# self-contained Linux AppImage payload.
+# self-contained Linux AppImage payload, plus the dav1d pin the Windows test job
+# in .github/workflows/ci.yml builds from.
 #
 # `packaging/appimage/versions.env` pins nine upstreams, and Renovate cannot
 # maintain them: it can compute a new version, but not a new sha256 for an
 # archive it never downloads. This script does that part. It only ever touches
-# packaging/appimage/versions.env -- comments, ordering and formatting are
-# preserved -- and never writes a version whose archive it did not download and
-# hash itself.
+# packaging/appimage/versions.env and the DAV1D_TAG/DAV1D_COMMIT pair in
+# scripts/ci-pins.env -- comments, ordering and formatting are preserved -- and
+# never writes a version whose archive it did not download and hash itself.
 #
 # What it covers, and where each answer comes from:
 #
@@ -23,6 +24,18 @@
 #   wayland-protocols  GitLab repository/tags                        GitLab archive
 #   ffmpeg             https://ffmpeg.org/releases/ index            upstream tarball
 #   rust               channel-rust-stable.toml                      (no URL/sha256)
+#
+# `dav1d-ci` is the same upstream as `dav1d` but a pin of its own: the tag and
+# commit in scripts/ci-pins.env, which .github/workflows/ci.yml's
+# `Build dav1d (Windows)` step sources for the Windows test job. It appears in a
+# run that selects `dav1d`, is resolved independently (the two pins legitimately
+# sit on different releases) and is always written as a pair: the commit is the
+# release tag's *peeled* commit, because the step fetches
+# `archive/<commit>.tar.gz` and an archive URL for an annotated tag's own sha
+# 404s. The pin sits outside `.github/workflows/` on purpose: a push that
+# creates or modifies a file there needs the `workflows` permission, which
+# `GITHUB_TOKEN` cannot hold, so a pin inline in ci.yml could never be bumped by
+# the workflow that runs this script.
 #
 # GitHub goes through `gh api` when it is on PATH (the runners have it, already
 # authenticated), otherwise `curl` + `jq` with `GITHUB_TOKEN` when that is set.
@@ -53,7 +66,8 @@
 #                        there are, 0 when there are none (never downloads)
 #   --component NAME     limit the run to one component (repeatable):
 #                        mpv ffmpeg dav1d libass zimg wayland
-#                        wayland-protocols libplacebo rust
+#                        wayland-protocols libplacebo rust (`dav1d` also
+#                        covers the scripts/ci-pins.env pin)
 #   --min-age-days N     soak period in days (0 disables it; default 14)
 #   --allow-prerelease   also consider -rc/-beta/-alpha/-pre/dev tags
 #   --json               machine-readable report instead of the table: exactly
@@ -62,6 +76,8 @@
 #                        stderr; --check's verdict is the exit status)
 #   --versions-file P    operate on P instead of packaging/appimage/versions.env
 #                        (for testing this script, not for real bumps)
+#   --ci-pins P          operate on P instead of scripts/ci-pins.env (for
+#                        testing this script, not for real pins)
 #   --help
 #
 # Exit status: 0 = nothing to do (or the apply succeeded), 1 = error (nothing
@@ -98,6 +114,7 @@ SCRIPT_NAME=${0##*/}
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 VERSIONS_FILE="$REPO_ROOT/packaging/appimage/versions.env"
+CI_PINS_FILE="$REPO_ROOT/scripts/ci-pins.env"
 MODE=report
 MIN_AGE_DAYS=14
 ALLOW_PRERELEASE=0
@@ -108,6 +125,10 @@ API_TIMEOUT=${API_TIMEOUT:-60}
 DOWNLOAD_TIMEOUT=${DOWNLOAD_TIMEOUT:-600}
 
 COMPONENTS=(mpv ffmpeg dav1d libass zimg wayland wayland-protocols libplacebo rust)
+# The ci.yml half of the dav1d pin. Not in COMPONENTS: it is not a versions.env
+# entry and has no upstream query of its own -- it is selected by `dav1d`.
+CI_PIN_COMPONENT=dav1d-ci
+CI_PIN_REPO=videolan/dav1d
 
 log() { printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2; }
 warn() { printf '%s: WARNING: %s\n' "$SCRIPT_NAME" "$*" >&2; }
@@ -131,6 +152,15 @@ add_component() {
   done
   [ "$known" = 1 ] || die "unknown component '$name' (known: ${COMPONENTS[*]})"
   SELECTED+=("$name")
+}
+
+# is_selected <component> -- true when this run covers that component.
+is_selected() {
+  local want=$1 c
+  for c in "${SELECTED[@]}"; do
+    [ "$c" = "$want" ] && return 0
+  done
+  return 1
 }
 
 while [ $# -gt 0 ]; do
@@ -157,6 +187,12 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --versions-file=*) VERSIONS_FILE=${1#*=} ;;
+    --ci-pins)
+      [ $# -ge 2 ] || die "--ci-pins needs a value"
+      CI_PINS_FILE=$2
+      shift
+      ;;
+    --ci-pins=*) CI_PINS_FILE=${1#*=} ;;
     --help | -h) usage 0 ;;
     *) die "unknown argument '$1' (try --help)" ;;
   esac
@@ -280,6 +316,41 @@ env_get() {
 
 env_has() {
   grep -q "^$1=" "$VERSIONS_FILE"
+}
+
+# --- ci-pins.env access -------------------------------------------------------
+#
+# The two pin lines are a plain env file, one `VAR=value` per line, sourced by
+# .github/workflows/ci.yml's `Build dav1d (Windows)` step. `value` ends at the
+# first blank, exactly as sourcing it does, so a human's trailing note
+# (`DAV1D_TAG=1.5.5   # first tag that survives MSVC 14.52`) is text the rewrite
+# carries through rather than part of the pin.
+
+# ci_pin_get <file> <VAR> -- the value of one pin line. Exactly one line must
+# carry it: a renamed variable would make this script silently stop bumping the
+# pin, which is the failure this whole mechanism exists to prevent, so it is
+# loud instead.
+ci_pin_get() {
+  local file=$1 var=$2 count value
+  count=$(grep -cE "^[[:space:]]*$var=" "$file" || true)
+  [ "$count" = 1 ] ||
+    die "$file carries $count $var= line(s), expected exactly one; the dav1d pin has been renamed or moved"
+  value=$(sed -n -E "s/^[[:space:]]*$var=//p" "$file")
+  value=${value%%[[:space:]]*}
+  value=${value%\"}
+  value=${value#\"}
+  value=${value%\'}
+  value=${value#\'}
+  [ -n "$value" ] || die "$file has an empty $var="
+  printf '%s\n' "$value"
+}
+
+# is_full_sha <value> -- true for a lowercase 40-hex git object name.
+is_full_sha() {
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  [ ${#1} -eq 40 ]
 }
 
 # --- version arithmetic ------------------------------------------------------
@@ -557,6 +628,30 @@ commit_for() {
   esac
 }
 
+# peeled_commit <repo> <tag> -- the commit a release tag points at, never the tag
+# object. This is what a *commit* archive URL needs: ci.yml fetches
+# `github.com/<repo>/archive/<sha>.tar.gz`, and an archive URL for an annotated
+# tag object's own sha is a 404 (the tag archive is spelled differently). The
+# REST tags endpoint is not a substitute -- it answers with the tag's commit
+# only because GitHub dereferences server-side -- so ask git directly: the
+# `^{}` line of `git ls-remote --tags` is the peeled commit, and its absence
+# means the tag is lightweight and its own sha is the commit. Needs no clone.
+peeled_commit() {
+  local repo=$1 tag=$2 refs sha ref peeled="" plain=""
+  refs=$(git ls-remote --tags "https://github.com/$repo" \
+    "refs/tags/$tag" "refs/tags/$tag^{}" 2>/dev/null) || return 1
+  while IFS="$TAB" read -r sha ref; do
+    [ -n "$sha" ] || continue
+    case "$ref" in
+      *'^{}') peeled=$sha ;;
+      "refs/tags/$tag") plain=$sha ;;
+    esac
+  done <<<"$refs"
+  [ -n "$peeled" ] || peeled=$plain
+  [ -n "$peeled" ] || return 1
+  printf '%s\n' "$peeled"
+}
+
 # --- query-time guard --------------------------------------------------------
 
 # The URL this script would write for the *pinned* version must already be the
@@ -587,7 +682,8 @@ Fix url_of() in $SCRIPT_NAME before trusting a bump."
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/bump-appimage.XXXXXX")
 tmp_file=""
-trap 'rm -rf "$WORK_DIR"; [ -z "$tmp_file" ] || rm -f "$tmp_file"' EXIT
+ci_tmp_file=""
+trap 'rm -rf "$WORK_DIR"; [ -z "$tmp_file" ] || rm -f "$tmp_file"; [ -z "$ci_tmp_file" ] || rm -f "$ci_tmp_file"' EXIT
 
 check_url_templates
 
@@ -595,6 +691,9 @@ declare -a order=() pinned_list=() latest_list=() action_list=() status_list=() 
 declare -a new_url_list=() new_sha_list=() new_commit_list=()
 updates=0
 unknowns=0
+ci_pinned=""
+ci_latest=""
+ci_action=""
 
 for component in "${SELECTED[@]}"; do
   prefix=$(prefix_of "$component") || die "no versions.env prefix for $component"
@@ -633,6 +732,74 @@ for component in "${SELECTED[@]}"; do
   new_sha_list+=("")
   new_commit_list+=("")
 done
+
+# --- the ci-pins.env dav1d pin -----------------------------------------------
+#
+# .github/workflows/ci.yml's `Build dav1d (Windows)` step builds dav1d for the
+# Windows test job itself, from a *commit* archive
+# (`archive/$DAV1D_COMMIT.tar.gz`), because dav1d-sys' build script swallows its
+# own clone/compile failures there; the job reads both values from
+# scripts/ci-pins.env and asserts the unpacked meson.build says
+# `version: '<DAV1D_TAG>'`. Two consequences make this its own row rather than a
+# versions.env component:
+#
+#   * the commit must be the release tag's *peeled* commit -- an archive URL for
+#     an annotated tag object's own sha is a 404 -- so it is resolved with
+#     `git ls-remote` (peeled_commit) right before writing, never taken from the
+#     tags API;
+#   * the tag and the commit have to move together, or the job fails on its own
+#     assertion: both values are rewritten in one pass over one file.
+#
+# The pin lives in a plain file outside `.github/workflows/` because a push that
+# touches a workflow file needs the `workflows` permission, which the bump
+# workflow's `GITHUB_TOKEN` can never hold -- inline in ci.yml it could not be
+# moved at all.
+#
+# It is deliberately independent of versions.env's DAV1D_VERSION (the Windows
+# job needs a release whose stdatomic.h survives the MSVC toolset -- the floor is
+# recorded in the pin file, next to the value -- while the AppImage may sit
+# elsewhere), so it is resolved against its own pin -- forward only, so a pin
+# ahead of the newest soaked release is kept, not dragged back.
+if is_selected dav1d; then
+  [ -f "$CI_PINS_FILE" ] || die "no such pin file: $CI_PINS_FILE"
+  ci_pinned=$(ci_pin_get "$CI_PINS_FILE" DAV1D_TAG)
+  ci_pinned_commit=$(ci_pin_get "$CI_PINS_FILE" DAV1D_COMMIT)
+  # A commit that is not a full sha cannot be fetched, which means every bump
+  # built on it is broken: fail before querying anything else.
+  is_full_sha "$ci_pinned_commit" ||
+    die "$CI_PINS_FILE: DAV1D_COMMIT is not a full 40-hex commit sha ('$ci_pinned_commit')"
+
+  ci_latest=""
+  ci_status=ok
+  if ! ci_eligible=$(resolve_eligible dav1d "$ci_pinned"); then
+    ci_status=unknown
+  elif [ -n "$ci_eligible" ]; then
+    ci_latest=$(printf '%s' "$ci_eligible" | cut -f1)
+  fi
+
+  if [ "$ci_status" = unknown ]; then
+    ci_action=unknown
+    ci_display=unknown
+    unknowns=$((unknowns + 1))
+  elif [ -z "$ci_latest" ]; then
+    ci_action=keep
+    ci_display=$ci_pinned
+  else
+    ci_action=update
+    ci_display=$ci_latest
+    updates=$((updates + 1))
+  fi
+
+  order+=("$CI_PIN_COMPONENT")
+  pinned_list+=("$ci_pinned")
+  latest_list+=("$ci_display")
+  action_list+=("$ci_action")
+  status_list+=("$ci_status")
+  commit_list+=("")
+  new_url_list+=("")
+  new_sha_list+=("")
+  new_commit_list+=("")
+fi
 
 print_report() {
   local i
@@ -708,6 +875,9 @@ fi
 
 for i in "${!order[@]}"; do
   [ "${action_list[$i]}" = update ] || continue
+  # The ci.yml row is written by its own block below: it has no versions.env
+  # prefix, and it needs a peeled commit instead of an archive hash.
+  [ "${order[$i]}" = "$CI_PIN_COMPONENT" ] && continue
   component=${order[$i]}
   prefix=$(prefix_of "$component")
   latest=${latest_list[$i]}
@@ -747,13 +917,56 @@ for i in "${!order[@]}"; do
 done
 
 if [ "$updates" -eq 0 ]; then
-  log "nothing to apply; ${VERSIONS_FILE#"$REPO_ROOT"/} is already current"
+  log "nothing to apply; every pin in ${VERSIONS_FILE#"$REPO_ROOT"/} and ${CI_PINS_FILE#"$REPO_ROOT"/} is already current"
   exit 0
 fi
 
+ci_new_commit=""
+if [ "$ci_action" = update ]; then
+  # The peeled commit, as the *very* last network question of the run: if it
+  # cannot be had, nothing below this point has rewritten a file yet.
+  if ! ci_new_commit=$(peeled_commit "$CI_PIN_REPO" "$ci_latest") || [ -z "$ci_new_commit" ]; then
+    die "could not resolve the peeled commit of dav1d $ci_latest ('git ls-remote --tags $CI_PIN_REPO'); nothing was written"
+  fi
+  is_full_sha "$ci_new_commit" ||
+    die "git ls-remote returned '$ci_new_commit' for dav1d $ci_latest, which is not a commit sha; nothing was written"
+
+  ci_tmp_file=$(mktemp "${CI_PINS_FILE}.XXXXXX")
+  # Only the two values are replaced. Everything after a value on the same line
+  # -- a trailing comment, its spacing -- is carried through untouched, so a
+  # hand note on a pin line cannot vanish in a bump (the mask check below proves
+  # it for the whole file).
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ $line =~ ^([[:space:]]*DAV1D_TAG=)[^[:space:]]*(.*)$ ]]; then
+      printf '%s%s%s\n' "${BASH_REMATCH[1]}" "$ci_latest" "${BASH_REMATCH[2]}"
+    elif [[ $line =~ ^([[:space:]]*DAV1D_COMMIT=)[^[:space:]]*(.*)$ ]]; then
+      printf '%s%s%s\n' "${BASH_REMATCH[1]}" "$ci_new_commit" "${BASH_REMATCH[2]}"
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$CI_PINS_FILE" >"$ci_tmp_file"
+
+  # mask_pins <file> -- the file with both values blanked out. Comparing the
+  # masked old and new file is the strongest statement available: same lines,
+  # same order, same comments, same spacing, only the two values differ, so a
+  # dropped line, a lost trailing comment or a re-indented pin cannot pass.
+  mask_pins() { sed -E 's/^([[:space:]]*DAV1D_(TAG|COMMIT)=)[^[:space:]]*/\1<pin>/' "$1"; }
+  [ "$(mask_pins "$CI_PINS_FILE")" = "$(mask_pins "$ci_tmp_file")" ] ||
+    die "the ci-pins.env rewrite changed more than the two values; $CI_PINS_FILE was left untouched"
+  [ "$(ci_pin_get "$ci_tmp_file" DAV1D_TAG)" = "$ci_latest" ] ||
+    die "the ci-pins.env rewrite did not write DAV1D_TAG=$ci_latest; $CI_PINS_FILE was left untouched"
+  [ "$(ci_pin_get "$ci_tmp_file" DAV1D_COMMIT)" = "$ci_new_commit" ] ||
+    die "the ci-pins.env rewrite did not write DAV1D_COMMIT=$ci_new_commit; $CI_PINS_FILE was left untouched"
+  chmod --reference="$CI_PINS_FILE" "$ci_tmp_file" 2>/dev/null || chmod 644 "$ci_tmp_file"
+fi
+
+# versions.env: the same row a --apply has always written, plus a count that
+# ignores the dav1d-ci row (which has no variable in this file).
+env_updates=0
 declare -A NEW=()
 for i in "${!order[@]}"; do
   [ "${action_list[$i]}" = update ] || continue
+  [ "${order[$i]}" = "$CI_PIN_COMPONENT" ] && continue
   prefix=$(prefix_of "${order[$i]}")
   NEW["${prefix}_VERSION"]=${latest_list[$i]}
   [ -n "${new_url_list[$i]}" ] && NEW["${prefix}_URL"]=${new_url_list[$i]}
@@ -761,34 +974,52 @@ for i in "${!order[@]}"; do
   if env_has "${prefix}_COMMIT"; then
     NEW["${prefix}_COMMIT"]=${new_commit_list[$i]}
   fi
+  env_updates=$((env_updates + 1))
 done
 
-tmp_file=$(mktemp "${VERSIONS_FILE}.XXXXXX")
-while IFS= read -r line || [ -n "$line" ]; do
-  var=${line%%=*}
-  if [ "$line" != "$var" ] && [ -n "${NEW[$var]+set}" ]; then
-    printf '%s=%s\n' "$var" "${NEW[$var]}"
-  else
-    printf '%s\n' "$line"
+if [ "$env_updates" -gt 0 ]; then
+  tmp_file=$(mktemp "${VERSIONS_FILE}.XXXXXX")
+  while IFS= read -r line || [ -n "$line" ]; do
+    var=${line%%=*}
+    if [ "$line" != "$var" ] && [ -n "${NEW[$var]+set}" ]; then
+      printf '%s=%s\n' "$var" "${NEW[$var]}"
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$VERSIONS_FILE" >"$tmp_file"
+
+  # Nothing may be lost in the rewrite: every variable that was meant to change
+  # must be in the output (this also catches a NEW key that matched no line), and
+  # the file must still define exactly the same set of variables.
+  for var in "${!NEW[@]}"; do
+    grep -q "^$var=" "$tmp_file" || die "the rewrite dropped $var; $VERSIONS_FILE was left untouched"
+  done
+  assignments() { grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$1" || true; }
+  if [ "$(assignments "$VERSIONS_FILE")" != "$(assignments "$tmp_file")" ]; then
+    die "the rewrite changed the number of variables in $VERSIONS_FILE; it was left untouched"
   fi
-done <"$VERSIONS_FILE" >"$tmp_file"
 
-# Nothing may be lost in the rewrite: every variable that was meant to change
-# must be in the output (this also catches a NEW key that matched no line), and
-# the file must still define exactly the same set of variables.
-for var in "${!NEW[@]}"; do
-  grep -q "^$var=" "$tmp_file" || die "the rewrite dropped $var; $VERSIONS_FILE was left untouched"
-done
-assignments() { grep -cE '^[A-Za-z_][A-Za-z0-9_]*=' "$1" || true; }
-if [ "$(assignments "$VERSIONS_FILE")" != "$(assignments "$tmp_file")" ]; then
-  die "the rewrite changed the number of variables in $VERSIONS_FILE; it was left untouched"
+  # Keep the file's mode (mktemp creates 0600) so the rewrite is not a silent
+  # permission change for a file other people's scripts source.
+  chmod --reference="$VERSIONS_FILE" "$tmp_file" 2>/dev/null || chmod 644 "$tmp_file"
 fi
 
-# Keep the file's mode (mktemp creates 0600) so the rewrite is not a silent
-# permission change for a file other people's scripts source.
-chmod --reference="$VERSIONS_FILE" "$tmp_file" 2>/dev/null || chmod 644 "$tmp_file"
+# Both rewrites are complete and validated by now, so only a failure between
+# these two renames can leave the tree half-updated; every query, download,
+# hash, ls-remote and validation above leaves both files byte-identical.
+if [ -n "$tmp_file" ]; then
+  mv "$tmp_file" "$VERSIONS_FILE"
+  tmp_file=""
+fi
+if [ -n "$ci_tmp_file" ]; then
+  mv "$ci_tmp_file" "$CI_PINS_FILE"
+  ci_tmp_file=""
+fi
 
-mv "$tmp_file" "$VERSIONS_FILE"
-tmp_file=""
-log "updated $updates component(s) in ${VERSIONS_FILE#"$REPO_ROOT"/}"
+if [ "$env_updates" -gt 0 ]; then
+  log "updated $env_updates component(s) in ${VERSIONS_FILE#"$REPO_ROOT"/}"
+fi
+if [ "$ci_action" = update ]; then
+  log "updated the dav1d pin in ${CI_PINS_FILE#"$REPO_ROOT"/}: $ci_pinned -> $ci_latest ($ci_new_commit)"
+fi
 print_deltas

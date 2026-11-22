@@ -262,15 +262,22 @@ jobs:
           command: |
             pip install meson ninja
             choco install -y nasm pkgconfiglite
-            # system-deps defaults BUILD_INTERNAL to "never" and hard-fails
-            # when pkg-config is absent (always on Windows runners); force
-            # the vendored meson build instead.
-            echo "SYSTEM_DEPS_DAV1D_BUILD_INTERNAL=always" >> "$GITHUB_ENV"
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: matrix.os == 'windows-latest'
         with:
           arch: x64
+
+      # dav1d-sys 0.8.3's build script swallows its own clone/compile failures,
+      # so a failed dav1d build surfaces later as "LNK1181: cannot open input
+      # file 'dav1d.lib'". The shared action builds the library from the pin in
+      # scripts/ci-pins.env and points system-deps at it; the x64 test matrix,
+      # the `dav1d-arm64` job below and release.yml all call it, so the three
+      # cannot drift apart. See .github/actions/build-dav1d-windows/action.yml
+      # for the full rationale.
+      - name: Build dav1d (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/build-dav1d-windows
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
@@ -286,19 +293,12 @@ jobs:
           # regenerates. The code also self-validates via the VERSION marker.
           key: ${{ matrix.os }}-fixtures-${{ hashFiles('crates/benchmarks/src/fixture_gen.rs', 'resources/MockState/mock 1.jpg') }}
 
-      # Compiling is split from executing so that only the compile is retried.
-      # On Windows the vendored dav1d is built by dav1d-sys's build script,
-      # which git-clones the source and only panics when the process cannot be
-      # spawned -- a transient network failure (or an interrupted clone that
-      # leaves a partial .git behind) is silently ignored, the script reports
-      # success without producing dav1d.lib, and the link then dies with
-      # "LNK1181: cannot open input file 'dav1d.lib'" (job 134899537045; a
-      # re-run of the same job passed). That is a flake in the toolchain, so
-      # the build gets the retry while the test run below stays a single
-      # attempt: a genuine test failure must fail the job immediately instead
-      # of being retried until it looks green. The retry alone would only
-      # repeat the link failure -- cargo still believes that build script is
-      # fresh -- so on_retry_command discards the half-built state first.
+      # Compiling is split from executing so that only the compile is retried:
+      # a toolchain flake in the cargo build, a network flake fetching crates,
+      # or a retried libjpeg-turbo build is retried, while a genuine test
+      # failure still fails the run below immediately instead of being retried
+      # until it looks green. dav1d is already built by the step above, so this
+      # only consumes that install tree.
       - name: Build Test Binaries (retry on transient network failures)
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         env:
@@ -309,8 +309,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-L native=libs -C link-arg=/NODEFAULTLIB:LIBCMTD -C link-arg=/NODEFAULTLIB:LIBCMT' || '' }}
         with:
           # Bounds each attempt, three attempts in total: a cold build compiles
-          # the whole workspace including the vendored libjpeg-turbo and dav1d
-          # sources, and every retry additionally rebuilds dav1d from scratch.
+          # the whole workspace including the vendored libjpeg-turbo sources.
           timeout_minutes: 60
           max_attempts: 3
           retry_wait_seconds: 20
@@ -321,16 +320,12 @@ jobs:
           # setting above, so the cleanup is handed to bash explicitly:
           # `set -euo pipefail` is not cmd syntax, and cmd.exe would pass
           # `$GITHUB_WORKSPACE` through literally instead of expanding it. A
-          # failure here (Linux/macOS, where dav1d-sys is not built from
-          # source) is reported through the action's info() channel and cannot
-          # fail the step. `cargo clean -p dav1d-sys` is the part that counts:
-          # it drops the build script's fingerprint, so the script re-runs and
-          # re-clones. The rm only drops the half-clone, covering both cargo
-          # layouts (`build/dav1d-sys/<hash>/out` on current toolchains,
-          # `build/dav1d-sys-<hash>/out` on older ones), and is a no-op where
-          # neither exists.
+          # failure here is reported through the action's info() channel and
+          # cannot fail the step. `cargo clean -p dav1d-sys` is what counts: it
+          # drops the build script's fingerprint so the system-deps probe runs
+          # again against the prebuilt library.
           on_retry_command: |
-            bash -c "set -euo pipefail; cd \"$GITHUB_WORKSPACE\"; rm -rf target/*/build/dav1d-sys/*/out/dav1d target/*/build/dav1d-sys-*/out/dav1d; cargo clean -p dav1d-sys"
+            bash -c "set -euo pipefail; cd \"$GITHUB_WORKSPACE\"; cargo clean -p dav1d-sys"
           command: |
             # nick-fields/retry@v4 spawns the command without set -e, so a
             # failed compile would otherwise be swallowed; be explicit.
@@ -420,6 +415,72 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # The arm64 half of the Windows dav1d prebuild used to run only on a v* tag,
+  # in release.yml's aarch64 leg -- so a broken clang-cl path was invisible
+  # until a release was cut, and then blocked it. This job runs the same shared
+  # action on every CI run. It is a smoke test, not a build: no cache (nothing
+  # here is reused and nothing may be written), no libmpv, no workspace build --
+  # just the prebuild plus the one crate that consumes it, which is what proves
+  # the system-deps handoff on this toolchain.
+  dav1d-arm64:
+    name: Build dav1d (Windows arm64)
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # release.yml sets the toolchain up per leg rather than relying on the
+      # image, so do the same here (same pinned action).
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: arm64
+
+      - name: Setup dav1d Build Tools (Windows arm64)
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 10
+          shell: bash
+          command: |
+            set -euo pipefail
+            pip install meson ninja
+
+      - name: Use clang-cl for dav1d (Windows arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # dav1d's meson needs gas-preprocessor.pl for MSVC ARM64 asm (not
+          # installed), and skips that path when cc.get_id() == 'clang-cl'
+          # (meson >= 0.58), using clang's integrated assembler for the .S files
+          # instead; clang-cl ships in the runner's bundled LLVM. The shared
+          # action names `cl` only when CC is unset, so this export wins.
+          # nasm is deliberately not installed: dav1d's x86 asm path is not
+          # built here, exactly as in release.yml's aarch64 leg.
+          echo "CC=clang-cl" >> "$GITHUB_ENV"
+          echo "CXX=clang-cl" >> "$GITHUB_ENV"
+
+      - name: Build dav1d (Windows arm64)
+        uses: ./.github/actions/build-dav1d-windows
+
+      - name: Check the system-deps handoff (dav1d-sys)
+        # `cmd`, not bash: a bash step puts C:\Program Files\Git\usr\bin ahead
+        # of the MSVC dirs, and rustc resolves MSVC's linker by bare name, so it
+        # would invoke coreutils' `link.exe` and die with "returned an
+        # unexpected error" -- the hazard the composite action promotes PATH
+        # for, which a plain cargo step does not. The first run of this job
+        # failed exactly that way (job 137255599354).
+        shell: cmd
+        run: |
+          rem The point of the prebuild is that dav1d-sys' build script never
+          rem clones or compiles anything: system-deps resolves the archive
+          rem through SYSTEM_DEPS_DAV1D_SEARCH_NATIVE. Building that one crate
+          rem is the whole check -- the workspace build is release.yml's job.
+          cargo build -p dav1d-sys
 
   verify-contributors:
     name: Verify Contributors List
