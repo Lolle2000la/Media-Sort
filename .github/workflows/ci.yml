@@ -468,14 +468,18 @@ jobs:
         uses: ./.github/actions/build-dav1d-windows
 
       - name: Check the system-deps handoff (dav1d-sys)
-        shell: bash
+        # `cmd`, not bash: a bash step puts C:\Program Files\Git\usr\bin ahead
+        # of the MSVC dirs, and rustc resolves MSVC's linker by bare name, so it
+        # would invoke coreutils' `link.exe` and die with "returned an
+        # unexpected error" -- the hazard the composite action promotes PATH
+        # for, which a plain cargo step does not. The first run of this job
+        # failed exactly that way (job 137255599354).
+        shell: cmd
         run: |
-          set -euo pipefail
-          # The point of the prebuild is that dav1d-sys' build script never
-          # clones or compiles anything: system-deps resolves the archive
-          # through SYSTEM_DEPS_DAV1D_SEARCH_NATIVE. Building that one crate is
-          # the whole check -- the workspace build is release.yml's job, not
-          # this one.
+          rem The point of the prebuild is that dav1d-sys' build script never
+          rem clones or compiles anything: system-deps resolves the archive
+          rem through SYSTEM_DEPS_DAV1D_SEARCH_NATIVE. Building that one crate
+          rem is the whole check -- the workspace build is release.yml's job.
           cargo build -p dav1d-sys
 
   verify-contributors:
