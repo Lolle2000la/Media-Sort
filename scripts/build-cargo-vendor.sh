@@ -8,8 +8,8 @@
 # the path the manifest layout expects, and packs the result as a deterministic
 # tarball whose root is `cargo/` (`cargo/config.toml` + `cargo/vendor/<crate>`). The
 # manifest consumes it as a `type: archive` source with `strip-components: 0`,
-# landing it at the module build root exactly where the old generated
-# cargo-sources.json used to go.
+# landing it at the module build root exactly where the previously generated
+# sources file used to go.
 #
 # The tarball is attached to the GitHub release (release.yml), so the manifest
 # references a released asset rather than a checked-in generated file; Flathub's

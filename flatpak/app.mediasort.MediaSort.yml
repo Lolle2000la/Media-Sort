@@ -236,18 +236,13 @@ modules:
     sources:
       - type: git
         url: https://github.com/Lolle2000la/Media-Sort.git
-        # Must be the first stable release that contains the Flatpak metadata
-        # this module installs (packaging/linux/app.mediasort.MediaSort.*):
-        # v3.0.0 predates it. Cut that release (e.g. scripts/release.sh 3.0.1)
-        # and set the tag and its commit here before submitting to Flathub.
+        # Set `tag` to a stable release that contains the Flatpak metadata this
+        # module installs (packaging/linux/app.mediasort.MediaSort.*), and add
+        # `commit:` — its tagged commit (`git rev-parse <tag>^{commit}`) — at
+        # submission. `commit:` is REQUIRED, not preferred: Flathub's
+        # new-submission linter rejects a tag-only git source with
+        # `module-media-sort-source-git-no-commit-with-tag`.
         tag: v3.0.1
-        # `commit:` is REQUIRED, not just preferred: Flathub's new-submission
-        # linter pipeline refuses a tag-only git source with
-        # `module-media-sort-source-git-no-commit-with-tag`. Fill in the tagged
-        # commit (`git rev-parse v3.0.1^{commit}`) alongside the tag.
-        # The AppStream <release> for that tag is written by scripts/release.sh
-        # into packaging/linux/app.mediasort.MediaSort.metainfo.xml, so it is
-        # already in the tagged tree this source fetches.
         # TODO: add the released `commit:`.
         x-checker-data:
           type: git

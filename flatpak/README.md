@@ -1,15 +1,16 @@
 # Flatpak / Flathub packaging
 
-This directory holds everything needed to build and submit **Media Sort** as a
-Flatpak on [Flathub](https://flathub.org):
+This directory holds the Flathub packaging for **Media Sort**
+([Flathub](https://flathub.org)):
 
 | File | Purpose |
 | --- | --- |
-| `app.mediasort.MediaSort.yml` | The Flatpak build manifest (this is the file submitted to Flathub). |
+| `app.mediasort.MediaSort.yml` | The Flatpak build manifest (the file submitted to Flathub). |
 
 The vendored Rust crates are **not** checked in: the manifest's second source is
-a `cargo-vendor.tar.gz` release asset, built with `scripts/build-cargo-vendor.sh`
-and attached to each GitHub release (see below). Flathub builds offline from it.
+a `cargo-vendor.tar.gz` release asset built by `scripts/build-cargo-vendor.sh`
+and attached to each release by `release.yml` (see below). Flathub builds
+offline from it.
 
 Upstream metadata lives with the other Linux packaging files:
 
@@ -19,146 +20,97 @@ Upstream metadata lives with the other Linux packaging files:
 
 ## Application id
 
-The id is **`app.mediasort.MediaSort`**, derived from the `mediasort.app` domain
-(declared in `website/public/CNAME`). This makes the app eligible for the
-Flathub *Verified* badge: after the first build, add the verification token
-Flathub gives you to `website/public/.well-known/org.flathub.VerifiedApps.txt`
-and click *Verify* on the app's Flathub page. The id is also the value of the
-window's Wayland/X11 app id at runtime (see below), so keep the metadata file
-names, the `<id>` in the metainfo, the `Icon=` in the desktop file and the
-`app-id` in the manifest in sync.
+The id is **`app.mediasort.MediaSort`**, the reverse-DNS of `mediasort.app`
+(`website/public/CNAME`), which makes the app eligible for the Flathub
+*Verified* badge: add the token Flathub gives you to
+`website/public/.well-known/org.flathub.VerifiedApps.txt` and click *Verify*. The
+id is also the runtime Wayland/X11 app id, so keep the metadata file names, the
+metainfo `<id>`, the desktop `Icon=` and the manifest `app-id` in sync.
 
 ## How it is built
 
-- **Runtime/SDK:** `org.freedesktop.Platform` / `org.freedesktop.Sdk` `26.08`
-  (Freedesktop). Flathub requires the latest runtime at submission time; bump
-  this and re-check when a new yearly branch lands.
+- **Runtime/SDK:** `org.freedesktop.Platform` / `org.freedesktop.Sdk` `26.08`.
+  Flathub requires the current runtime; bump this when a new yearly branch lands.
 - **Rust:** the `org.freedesktop.Sdk.Extension.rust-stable` SDK extension.
-- **libmpv:** not part of the runtime, so `mpv` (v0.41.0) is built from source
-  in a module, together with its two unconditional build dependencies that the
-  runtime does not ship — `libass` and `libplacebo`. Everything the three link
-  against comes from the runtime/SDK (ffmpeg libraries, dav1d, libva,
-  PulseAudio/PipeWire/ALSA, freetype/fontconfig/harfbuzz/fribidi,
-  vulkan/shaderc/lcms2), so no codec stack is built here. Media Sort renders
-  frames itself through libmpv's software render API, so mpv needs no
-  display/GPU output of its own.
-- **Hardware decoding (NVDEC / VA-API):** mpv gates VA-API behind one of its display
-  back-ends, and both of those are missing a dependency in the runtime — its
-  Wayland back-end wants `wayland-protocols` and its X11 back-end wants
-  `libXpresent`. Both are built as small modules so hardware copy-back decoding
-  (`nvdec-copy,vaapi-copy,...`) works on Wayland and X11 sessions alike, while
-  skipping FFmpeg 8.1's `vulkan-copy` decoder (which `auto-copy` would probe
-  first and which crashes on rapid decoder teardown).
-- **ffmpeg CLI:** the runtime ships `/usr/bin/ffmpeg`, which is what
-  `media-sort-backend`'s `find_ffmpeg()` picks up for video thumbnails.
-- **zimg:** built as a module because the runtime does not ship it, and mpv's
-  software render path — the one this app drives — converts every frame with it.
-  Without it mpv falls back to swscale, and a 4K video drops from ~30 fps to
-  ~6.6 fps (hardware decoding on either way): ~7 ms versus ~66 ms per frame.
-- **Audio:** the manifest builds `media-sort-backend`'s `pulse` feature, so the
-  audio player writes straight to PulseAudio instead of going through cpal's
-  ALSA device. Inside the sandbox only the PulseAudio socket exists, and
-  cpal's ALSA stream cannot deliver through the ALSA pulse plugin there: it
-  opens, the client even reaches the server, and then every read fails with
-  `ALSA function 'snd_pcm_avail_delay' failed with error 'I/O error (5)'` —
-  while `ffmpeg` and `mpv` use the same socket without trouble, and no ALSA
-  configuration (`plug` wrapper, pinned rate/format, blocking mode) helps.
-  Video sound was never affected (mpv talks to PulseAudio directly). Without
-  the feature nothing changes; with it, a machine that has no PulseAudio server
-  simply falls back to the default device.
-- **Snap:** the snap enables `media-sort-backend`'s `pulse` feature too
-  (`rust-features` in `snap/snapcraft.yaml`, with `libpulse-dev` at build time
-  and `libpulse0` staged), so the audio player uses the same PulseAudio path as
-  the Flatpak. Unverified by ear — CI has no sound server — but it is the code
-  path verified in the Flatpak.
-- **Trash:** deletions first go through `org.freedesktop.portal.Trash`, so files
-  land in the *host* trash where the desktop can see and empty them. Without it
-  the `trash` crate would use `$XDG_DATA_HOME/Trash`, which a Flatpak remaps to
-  a private directory inside `~/.var/app` that only survives until the app is
-  uninstalled with `--delete-data`. Before calling the portal (and after any
-  native `trash::delete` call), `repair_existing_trash_permissions` tightens any
-  existing `Trash/{,files,info}` directories to mode `0700` — the `trash` crate
-  creates them with `create_dir_all` (`0755`), which `xdg-desktop-portal` 1.20+
-  rejects with `"Directory already exists with bad permissions"`. When the
-  portal still refuses a file (system-internal mounts `/tmp`, `/run`, `/dev`, or
-  distributions with an unpatched CVE-2026-40354 portal build — upstream
-  [flatpak/xdg-desktop-portal#1972](https://github.com/flatpak/xdg-desktop-portal/issues/1972),
-  fixed in #1982 / 1.21.2), `trash_into_home_trash` writes the entry directly
-  into `$HOME/.local/share/Trash/{files,info}` for home-filesystem files, or
-  into `<mount_root>/.Trash-<uid>` (with `0700` permissions and a mount-relative
-  `Path=`) for files on another volume. Undo/restore works for both home and
-  volume trashes, resolving relative `Path=` entries against the volume root.
-- **Open externally / reveal in file manager:** inside the sandbox both go
-  through `org.freedesktop.portal.OpenURI` (`platform/desktop_portal.rs`). The
-  file manager and the default handler are *host* applications, and the
-  sandbox's session-bus policy lets the app reach only its own name,
-  `org.freedesktop.DBus` and `org.freedesktop.portal.*` — so the native
-  `dbus-send` (`org.freedesktop.FileManager1`) route cannot work there at all.
-  `OpenURI.OpenDirectory` takes a file descriptor for the target file itself and
-  calls `org.freedesktop.FileManager1.ShowItems` on the host to open its
-  containing folder with the file selected. Outside Flatpak the native
-  `open`/`explorer`/`xdg-open` code runs unchanged.
-- **The self-updater (`velopack` feature) is intentionally not built** — Flatpak
-  owns updates. That is also why the manifest needs no network access.
+- **libmpv:** not in the runtime, so `mpv` is built from source together with its
+  unconditional build dependencies that the runtime lacks — `libass` and
+  `libplacebo`. Everything they link against comes from the runtime/SDK (ffmpeg,
+  dav1d, libva, PulseAudio/PipeWire/ALSA, freetype/fontconfig/harfbuzz/fribidi,
+  vulkan/shaderc/lcms2), so no codec stack is built here. The app drives libmpv's
+  software render API, so mpv needs no display/GPU output of its own.
+- **Hardware decoding (NVDEC / VA-API):** mpv gates VA-API behind a display
+  back-end, and the runtime misses a dependency for each — `wayland-protocols`
+  for Wayland and `libXpresent` for X11. Both are built as small modules so
+  copy-back decoding (`nvdec-copy,vaapi-copy,...`) works on either session, while
+  skipping FFmpeg's `vulkan-copy` decoder (`auto-copy` would probe it first, and
+  it crashes on rapid teardown).
+- **zimg:** built as a module; the software render path converts every frame with
+  it, and swscale instead collapses 4K throughput (~7 ms vs ~66 ms per frame), so
+  phone/camera 4K footage is unwatchable without it.
+- **ffmpeg CLI:** the runtime's `/usr/bin/ffmpeg` is what `find_ffmpeg()` uses for
+  video thumbnails.
+- **Audio:** the manifest builds `media-sort-backend`'s `pulse` feature, so audio
+  writes straight to PulseAudio. Inside the sandbox cpal's ALSA stream cannot
+  deliver through the ALSA pulse plugin (every read fails with
+  `snd_pcm_avail_delay ... 'I/O error (5)'`) while mpv and ffmpeg use the same
+  socket fine; without the feature the player falls back to cpal and the default
+  device. Video sound was never affected (mpv talks to PulseAudio directly), and
+  the snap enables the same feature.
+- **No self-updater:** the `velopack` feature is not built — Flatpak owns updates,
+  which is also why the manifest needs no network access.
+
+## Sandbox integration
+
+Everything that reaches the host goes through the freedesktop portals: deletion
+uses `org.freedesktop.portal.Trash` (so files land in the *host* trash, not the
+sandbox-private `~/.var/app` one), and *open externally* / *reveal in file
+manager* use `org.freedesktop.portal.OpenURI` (the session bus only exposes the
+portal, so the native `dbus-send` route cannot work). Because the app sorts real
+files it needs `--filesystem=home` and the removable-media mounts rather than a
+document-portal view. Outside Flatpak the native implementations run unchanged;
+the details live in `AGENTS.md` and the code.
 
 ## Permissions
 
-The app is a media *sorter*: it moves, renames, copies and deletes files in a
-folder the user opens, including into pinned destination folders elsewhere.
-That is file-management work, so it needs real filesystem access rather than the
-document-portal view of a single chosen folder, hence `--filesystem=home` plus
-the removable-media mount points. The document portal cannot replace that grant:
-a picked folder is only usable through its FUSE mount, where inotify never sees
-a change made by a host process (the filesystem watcher goes blind), moves
-between two separately picked grants degrade to copy-then-delete (`EXDEV`), and
-the folder tree still needs paths above the folder the user picked. There is no
-`--filesystem=host` and no
-network access. Device/audio access is `--device=dri` (wgpu/Vulkan rendering and
-VA-API hardware decoding) and `--socket=pulseaudio`.
+The app moves, renames, copies and deletes files in a folder the user opens,
+including into pinned destinations elsewhere, so it needs real filesystem access:
+the document portal's single-folder FUSE view breaks the watcher (inotify), turns
+cross-grant moves into copy-then-delete, and has no paths above the picked
+folder. Hence `--filesystem=home` plus the removable-media mounts, with
+`--device=dri` (wgpu/Vulkan and VA-API) and `--socket=pulseaudio`; there is no
+`--filesystem=host` and no network.
 
-`--filesystem=home` is the broadest grant here and the one Flathub scrutinises:
-its submission policy requires the justification above to be written into the
-submission, and a human reviewer approves the grant — a local
-`flatpak-builder-lint` run does **not** fail on it by itself, so a manifest that
-lints clean is not automatically accepted with this permission.
+`--filesystem=home` is the grant Flathub scrutinises: the justification above
+must be in the submission and a human reviewer approves it — a clean
+`flatpak-builder-lint` run does not by itself accept it.
 
 ## NVIDIA
 
 Nothing in the manifest can carry the NVIDIA userspace driver: it must match the
-user's *kernel* driver, so Flatpak ships it as a runtime extension and picks it
-from the host. Without it the sandbox falls back to Mesa's `llvmpipe`, which is
-a CPU rasteriser — the window still works, but every frame (including mpv's
-frame path) is composited on the CPU, which looks like a slideshow.
-
-Tell the user to install the extension matching the drivers in `/sys/module/nvidia/version`
-(Flatpak matches on that, checked against `libnvidia-glcore.so.<version>` in
-`/usr/lib`):
+user's kernel driver, so Flatpak ships it as a runtime extension. Without it the
+sandbox uses Mesa `llvmpipe` and every frame composites on the CPU (a slideshow).
+Install the extension matching `/sys/module/nvidia/version`:
 
 ```bash
 # GL/EGL/Vulkan userspace — required for GPU rendering at all
 flatpak install flathub org.freedesktop.Platform.GL.nvidia-<major>-<minor>-<patch>
-# nvidia-vaapi-driver, so mpv's vaapi-copy hardware decoder can decode on the GPU
+# nvidia-vaapi-driver, so mpv's vaapi-copy decoder can decode on the GPU
 flatpak install flathub org.freedesktop.Platform.VAAPI.nvidia//26.08
 ```
 
-e.g. driver `615.78.08` → `org.freedesktop.Platform.GL.nvidia-615-78-08`. The GL
-extension is published on branch `1.4`, which the 26.08 runtime's GL extension
-point accepts (`versions = 26.08;26.08-extra;1.4`) — that is normal, not a
-mismatch. Both installs are user-visible either system-wide or with
-`--user` (the latter needs a user Flathub remote: `flatpak remote-add --user
-flathub https://flathub.org/repo/flathub.flatpakrepo`).
-
-Symptom to recognise: `flatpak run` logs
-`Unable to find extension: VK_EXT_physical_device_drm`, `MESA-EGL: egl: failed
-to create dri2 screen`, and a wgpu adapter list containing only `llvmpipe`.
-That is an environment gap, not an app or manifest bug — the manifest already
-gets `--device=dri` and Flatpak passes `/dev/nvidia*` in. The extension is bound
-when the app is *launched*, so an instance that was already running when the
-driver was installed keeps the software stack and has to be quit and started
-again. A working setup shows `NVIDIA … DiscreteGpu` in the adapter list and
-names that adapter on the `Selected:` line, and `libva` loading
-`…/dri/nvidia-vaapi-driver/nvidia_drv_video.so` ("VA-API NVDEC driver") for the
-`vaapi-copy` hardware decoder.
+e.g. driver `615.78.08` → `org.freedesktop.Platform.GL.nvidia-615-78-08`; the GL
+extension's `1.4` branch is normal for the `26.08` runtime. Both installs are
+user-visible system-wide or with `--user` (which needs a user Flathub remote:
+`flatpak remote-add --user flathub https://flathub.org/repo/flathub.flatpakrepo`).
+Symptom of a missing extension: `flatpak run` logs
+`Unable to find extension: VK_EXT_physical_device_drm` and
+`MESA-EGL: egl: failed to create dri2 screen`, and the wgpu adapter list shows
+only `llvmpipe` — an environment gap, not an app or manifest bug (the manifest
+already gets `--device=dri` and Flatpak passes `/dev/nvidia*` in). The extension
+binds when the app is launched, so an instance that was already running when the
+driver was installed keeps the software stack and must be restarted. A working
+setup shows `NVIDIA … DiscreteGpu` in the adapter list and `libva` loading
+`…/nvidia_drv_video.so` for the `vaapi-copy` decoder.
 
 ## Building locally
 
@@ -176,9 +128,11 @@ flatpak-builder --user --install --force-clean build-dir flatpak/app.mediasort.M
 flatpak run app.mediasort.MediaSort
 ```
 
-The manifest's two sources point at the released tag (`v3.0.1`): the app source
-and the `cargo-vendor.tar.gz` asset beside it. For a local build of uncommitted
-work, build the vendor tarball and point both sources at local paths:
+The checked-in manifest points at a released tag and that release's
+`cargo-vendor.tar.gz` asset, so a build of uncommitted work must point **both**
+sources at local paths — exactly what `.github/workflows/flatpak-build.yml` does
+for any change to `Cargo.lock`, a `Cargo.toml`, `flatpak/**` or
+`scripts/build-cargo-vendor.sh`:
 
 ```bash
 bash scripts/build-cargo-vendor.sh "$PWD/cargo-vendor.tar.gz"
@@ -187,15 +141,9 @@ bash scripts/build-cargo-vendor.sh "$PWD/cargo-vendor.tar.gz"
 # `path: /abs/path/cargo-vendor.tar.gz` and `strip-components: 0`.
 ```
 
-CI runs this same build for any change to `Cargo.lock`, a `Cargo.toml`,
-`flatpak/**` or `scripts/build-cargo-vendor.sh`:
-`.github/workflows/flatpak-build.yml` builds the vendor tarball from the
-checked-out `Cargo.lock`, rewrites the app source to `type: dir` and, at the
-manifest's `# BEGIN/END CARGO VENDOR SOURCE` markers, swaps the released vendor
-asset for that local archive, then runs `flatpak-builder` against the same
-runtime. It is expensive, so it is not a required check.
-
-Lint the manifest before/after changes:
+That CI build is expensive, so it is not a required check. The module builds with
+`cargo build --release --offline --locked` and `CARGO_HOME` pointing at the
+extracted `cargo/`. Lint the manifest (the tool ships in `org.flatpak.Builder`):
 
 ```bash
 flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest flatpak/app.mediasort.MediaSort.yml
@@ -204,129 +152,66 @@ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo build-dir/re
 
 ## Submitting to Flathub
 
-Flathub hosts the manifest in its own repository and builds it on Flathub's
-infrastructure — nothing here is published automatically.
+Flathub hosts the manifest and builds it on its infrastructure; nothing here is
+published automatically.
 
-1. **Cut a stable release that includes this packaging.** Flathub's stable
-   repository accepts only stable software, and the manifest installs the
-   metadata from the tagged source tree, so the source tag must contain
-   `packaging/linux/app.mediasort.MediaSort.*` and `flatpak/`. `v3.0.0` predates
-   them, so cut a follow-up (e.g. `scripts/release.sh 3.0.1`).
-2. Point the manifest's `media-sort` source at that tag *and* its commit
-   (`git rev-parse v3.0.1^{commit}`). The commit is **required**, not a
-   preference: Flathub's new-submission linter fails a tag-only git source with
-   `module-media-sort-source-git-no-commit-with-tag`. The matching `<release>`
-   needs no hand-editing — `scripts/release.sh` inserts it (with the tag's UTC
-   date) into `packaging/linux/app.mediasort.MediaSort.metainfo.xml` as part of
-   cutting the release, and `verify-version` in `release.yml` refuses to build a
-   tag whose first `<release>` is not that version.
-3. There is no `cargo-sources.json` to copy: the vendored crates are the
-   `cargo-vendor.tar.gz` asset of the tag being submitted, which `release.yml`
-   builds and attaches (see below). Both the app source and the vendor source
-   carry `x-checker-data`, so Flathub's external data checker bumps the tag
-   *and* the vendor archive's url+sha256.
-
-   When you submit, point the vendor source's `url` at the same tag you are
-   submitting and its `sha256` at that release's `cargo-vendor.tar.gz` (download
-   it and `sha256sum` it, or run the checker); the checker only keeps both
-   sources in sync for later releases, and the committed upstream template still
-   names the previous release because `release.sh` tags before `release.yml`
-   builds and attaches the asset.
-
-   `v3.0.1` predates that asset, and the manifest pins its tarball's sha256. The
-   pinned value is reproducible **only** when the tarball is built from that tag
-   with the current `scripts/build-cargo-vendor.sh` (the script does not exist in
-   the `v3.0.1`/`v3.0.2` trees, and building from a newer checkout gives a
-   different checksum). Either:
-
-   - **preferred:** cut the next release — its `publish` job attaches the
-     tarball, and the data checker then moves the manifest's tag and
-     url/sha256; or
-   - **immediate:** build the tarball from the tag, upload it, and repin the
-     `sha256` if the printed value differs:
-
-     ```bash
-     git worktree add --detach /tmp/ms-v3.0.1 v3.0.1
-     mkdir -p /tmp/ms-v3.0.1/scripts
-     cp scripts/build-cargo-vendor.sh /tmp/ms-v3.0.1/scripts/
-     bash /tmp/ms-v3.0.1/scripts/build-cargo-vendor.sh /tmp/cargo-vendor.tar.gz
-     gh release upload v3.0.1 /tmp/cargo-vendor.tar.gz
-     # if the printed sha256 differs from the manifest's, update that sha256 line
-     git worktree remove /tmp/ms-v3.0.1
-     ```
-4. Fork [`flathub/flathub`](https://github.com/flathub/flathub), create a branch
-   named `app.mediasort.MediaSort`, add `app.mediasort.MediaSort.yml` at the
-   repository root (the vendor tarball is fetched from the release, not
-   committed), and open a pull request.
-5. Flathub reviews the submission. After it is merged the manifest moves to
-   `flathub/app.mediasort.MediaSort`, builds start automatically, and future
-   updates are a pull request to that repository.
+1. **Cut a stable release that contains this packaging** — Flathub's stable repo
+   accepts only stable software, and the manifest installs metadata from the
+   tagged tree, so the tag must contain `packaging/linux/app.mediasort.MediaSort.*`
+   and `flatpak/`.
+2. **Point both manifest sources at that release.** The `media-sort` source takes
+   the tag *and* its commit (`git rev-parse <tag>^{commit}`) — the commit is
+   required, not preferred: Flathub's linter rejects a tag-only git source with
+   `module-media-sort-source-git-no-commit-with-tag`. The vendor source takes the
+   same tag's `cargo-vendor.tar.gz` URL and its sha256 (download it and
+   `sha256sum` it, or let the checker fill it in after the first submission). The
+   metainfo `<release>` entry is written by `scripts/release.sh` when the tag is
+   cut.
+3. **Add the manifest** to a branch of your
+   [`flathub/flathub`](https://github.com/flathub/flathub) fork named
+   `app.mediasort.MediaSort` (the vendor tarball is fetched from the release, not
+   committed) and open a pull request.
+4. **Review.** Once merged the manifest lives in `flathub/app.mediasort.MediaSort`,
+   builds run automatically, and later updates are pull requests there. The first
+   submission also gets the `--filesystem=home` justification reviewed.
 
 ## The vendored-crate tarball
 
-Flathub builds offline, so the app module needs every crate `Cargo.lock` resolves
-to. That is not a checked-in file: `scripts/build-cargo-vendor.sh` runs
-`cargo vendor --locked` and packs the result as a deterministic tarball whose
-root is `cargo/` (`cargo/config.toml` plus `cargo/vendor/<crate>`), which the manifest
-consumes as a `type: archive` source with `strip-components: 0`.
+Flathub builds offline, so it needs every crate `Cargo.lock` resolves to. That is
+not a checked-in file: `scripts/build-cargo-vendor.sh` runs
+`cargo vendor --locked` and packs a deterministic tarball whose root is `cargo/`
+(`cargo/config.toml` plus `cargo/vendor/<crate>`), consumed as a `type: archive`
+source with `strip-components: 0`.
 
-It is built automatically:
-
-- `release.yml`'s `publish` job builds it from the tag's lock and attaches it to
-  the release before the notes go out, so every release carries
-  `cargo-vendor.tar.gz` (and the job fails if it cannot be built or uploaded);
-- `.github/workflows/flatpak-build.yml` builds it from the checked-out lock and
-  points the manifest at that local file, so a dependency change is validated
-  against the offline build without any checked-in artifact.
-
-Build it locally to verify the archive (for a release that predates the asset,
-follow the tag-worktree steps in the submission notes above):
+It is built automatically: `release.yml`'s `publish` job builds it from the tag's
+lock and attaches it to the release (failing the run if it cannot), and
+`.github/workflows/flatpak-build.yml` builds it from the checked-out lock for
+validation. Build it locally with:
 
 ```bash
-bash scripts/build-cargo-vendor.sh            # -> ./cargo-vendor.tar.gz (gitignored)
+bash scripts/build-cargo-vendor.sh              # -> ./cargo-vendor.tar.gz (gitignored)
 bash scripts/build-cargo-vendor.sh /tmp/x.tar.gz
 ```
 
-A tarball only matches the manifest's pinned sha256 when built from that same
-tag.
-
-The archive is reproducible (sorted entries, fixed mtime and ownership, `gzip
--n`), so its sha256 is stable for a given lock; the manifest pins that sha256 and
-Flathub's data checker updates it with the tag.
+The archive is reproducible (sorted entries, fixed mtime/ownership, `gzip -n`), so
+its sha256 is stable for a given lock; a tarball matches the manifest's pinned
+sha256 only when built from the same tag.
 
 ## Version maintenance
 
-Every release touches the Flatpak packaging:
-
-- bump `tag` (and `commit`) of the `media-sort` source in the manifest — the
-  `commit` is mandatory, not optional (Flathub's
-  `module-media-sort-source-git-no-commit-with-tag` error);
-- the matching `<release version="…" date="…"/>` in the metainfo is written by
-  `scripts/release.sh` when the tag is cut, so only a hand-made tag needs it
-  added manually;
-- the vendor archive: every release attaches `cargo-vendor.tar.gz`
-  (`release.yml`), and the manifest's `url`/`sha256` for it must move to that
-  tag — by hand, or via Flathub's external data checker.
-
-The `x-checker-data` blocks let Flathub's external data checker open automated
-bump PRs for mpv, libass, libplacebo, and the app together with its vendor
-archive.
+- bump the `media-sort` source's `tag` and `commit`, and the vendor source's
+  `url`/`sha256`, together — by hand, or let Flathub's external data checker do
+  it: `x-checker-data` is on both sources and keeps them in sync (the other
+  sources, mpv/libass/libplacebo, are checked the same way);
+- `release.yml` attaches `cargo-vendor.tar.gz` to every tag;
+- the metainfo `<release>` entry is written by `scripts/release.sh` when the tag
+  is cut, so only a hand-made tag needs it added manually;
+- bump the Freedesktop runtime when a new yearly branch lands.
 
 ## Known follow-ups
 
-- **Screenshots:** `website/public/screenshots/*.png` are stills extracted from
-  the rendered demo videos (the automation HUD was painted out). The metainfo
-  references them at `https://mediasort.app/screenshots/…`, so the **website
-  must be deployed before the Flathub build** — Flathub mirrors the URLs at
-  build time and the build fails if they are unreachable.
-- **Portals:** deletion goes through `org.freedesktop.portal.Trash` — with direct
-  host home/volume trash writes as the fallback when the portal refuses a file
-  (see the Trash bullet above) — and under Flatpak *open externally* and *reveal
-  in file manager* go through `org.freedesktop.portal.OpenURI` — the session-bus
-  policy allows an app to talk only to its own name, `org.freedesktop.DBus` and
-  `org.freedesktop.portal.*`, so the native `dbus-send`
-  (`org.freedesktop.FileManager1`) route cannot work there at all.
-  `OpenURI.OpenDirectory` takes a file descriptor for the file itself and asks
-  the host's `org.freedesktop.FileManager1.ShowItems` to open the containing
-  folder with the entry selected. Outside Flatpak both keep their native
-  implementations.
+- **Screenshots:** `website/public/screenshots/*.png` are stills from the rendered
+  demo videos; the metainfo references them at
+  `https://mediasort.app/screenshots/…`, so the **website must be deployed before
+  the Flathub build** — Flathub mirrors the URLs and the build fails if they are
+  unreachable.
