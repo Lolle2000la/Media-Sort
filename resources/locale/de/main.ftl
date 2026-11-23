@@ -23,6 +23,8 @@ settings-animated-gifs = Animierte GIFs
 settings-play-gifs = Animierte GIFs abspielen
 settings-pinned-folders = Angeheftete Ordner
 settings-session-pinned-folders = Angeheftete Ordner pro Sitzung halten (nicht zwischen laufenden Instanzen teilen)
+settings-show-documents-by-default = Dokumente standardmäßig anzeigen
+settings-show-documents-by-default-desc = Aktiviert den Dokumente-Filter beim Öffnen eines Ordners automatisch.
 settings-updates = Updates
 settings-check-updates = Beim Start nach Updates suchen
 settings-install-prerelease = Vorabversionen installieren
@@ -40,6 +42,7 @@ keybindings-press-key = Taste drücken...
 keybindings-images = Medien
 keybindings-folders = Ordner
 keybindings-other = Sonstiges
+keybindings-documents-section = Dokumente
 keybindings-management = Verwaltung
 keybindings-selection = Auswahl
 keybindings-search = Suche
@@ -70,6 +73,8 @@ keybindings-select-below = Ordner darunter auswählen
 keybindings-expand = Ordner aufklappen (Unterordner anzeigen)
 keybindings-undo = Rückgängig
 keybindings-redo = Wiederherstellen
+keybindings-previous-page = Vorherige Seite / Tabelle
+keybindings-next-page = Nächste Seite / Tabelle
 
 # Other UI
 ui-folder = Ordner
@@ -194,3 +199,47 @@ status-symlink-refused = {$name} abgelehnt: Der Eintrag ist eine symbolische Ver
 status-folder-name-invalid = Ordner "{$name}" konnte nicht erstellt werden: ungültiger Ordnername.
 status-target-exists = {$name} abgelehnt: Eine Datei oder ein Ordner mit diesem Namen existiert bereits.
 status-update-failed = Update fehlgeschlagen. Bitte versuche es später erneut.
+
+# Medien-Typfilter
+filter-images = Bilder
+filter-video = Videos
+filter-audio = Audio
+filter-documents = Dokumente
+
+# Dokumentvorschau
+doc-loading = Dokument wird geladen...
+doc-prev-page = Vorherige Seite
+doc-next-page = Nächste Seite
+doc-page-indicator = Seite { $current } von { $total }
+doc-chapter-indicator = Kapitel { $current } von { $total }
+doc-slide-indicator = Folie { $current } von { $total }
+doc-truncated = Vorschau aufgrund des Größenlimits gekürzt
+doc-empty-sheet = Dieses Tabellenblatt ist leer.
+doc-open-externally = Extern öffnen
+doc-unavailable-encrypted = Dieses Dokument ist verschlüsselt oder passwortgeschützt.
+doc-unavailable-binary = Diese Datei scheint binär zu sein oder kann nicht als Text gelesen werden.
+doc-unavailable-no-backend = Für dieses Format ist ohne passendes Anzeige-Backend keine Vorschau verfügbar.
+doc-unavailable-too-large = Dieses Dokument ist zu groß für die Vorschau in der App.
+doc-unavailable-corrupt = Dieses Dokument kann nicht angezeigt werden; es wird möglicherweise nicht unterstützt oder ist beschädigt.
+
+# Dokument-Metadaten
+metadata-section-document = Dokument
+metadata-field-kind = Typ
+metadata-field-author = Autor
+metadata-field-subject = Thema
+metadata-field-creator = Erstellt mit
+metadata-field-producer = PDF-Produzent
+metadata-field-created = Erstellt
+metadata-field-pages = Seiten
+metadata-field-chapters = Kapitel
+metadata-field-sheets = Tabellenblätter
+metadata-field-slides = Folien
+metadata-field-publisher = Verlag
+metadata-field-identifier = Kennung
+metadata-field-series = Serie
+metadata-field-number = Nummer
+metadata-field-writer = Verfasser
+metadata-field-lines = Zeilen
+metadata-field-words = Wörter
+metadata-field-encoding = Kodierung
+metadata-field-encrypted = Verschlüsselt

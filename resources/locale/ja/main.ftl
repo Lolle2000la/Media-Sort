@@ -23,6 +23,8 @@ settings-animated-gifs = アニメーションGIF
 settings-play-gifs = アニメーションGIFを再生
 settings-pinned-folders = ピン留めフォルダー
 settings-session-pinned-folders = ピン留めフォルダーをセッションごとに分ける（実行中のインスタンス間で共有しない）
+settings-show-documents-by-default = ドキュメントをデフォルトで表示
+settings-show-documents-by-default-desc = フォルダを開いたときに「ドキュメント」フィルターを自動的に有効にします。
 settings-updates = アップデート
 settings-check-updates = 起動時にアップデートを確認
 settings-install-prerelease = プレリリースビルドをインストール
@@ -40,6 +42,7 @@ keybindings-press-key = キーを押してください...
 keybindings-images = メディア
 keybindings-folders = フォルダ
 keybindings-other = その他
+keybindings-documents-section = ドキュメント
 keybindings-management = 管理
 keybindings-selection = 選択
 keybindings-search = 検索
@@ -70,6 +73,8 @@ keybindings-select-below = 下のフォルダを選択
 keybindings-expand = フォルダを展開（サブフォルダを表示）
 keybindings-undo = 元に戻す
 keybindings-redo = やり直し
+keybindings-previous-page = 前のページ / シート
+keybindings-next-page = 次のページ / シート
 
 # Other UI
 ui-folder = フォルダ
@@ -194,3 +199,47 @@ status-symlink-refused = {$name} を拒否しました: シンボリックリン
 status-folder-name-invalid = フォルダー「{$name}」を作成できません: フォルダー名が無効です。
 status-target-exists = {$name} を拒否しました: 同名のファイルまたはフォルダーが既に存在します。
 status-update-failed = アップデートに失敗しました。後でもう一度お試しください。
+
+# メディア種別フィルター
+filter-images = 画像
+filter-video = 動画
+filter-audio = 音声
+filter-documents = ドキュメント
+
+# ドキュメントプレビュー
+doc-loading = ドキュメントを読み込み中...
+doc-prev-page = 前のページ
+doc-next-page = 次のページ
+doc-page-indicator = { $current } / { $total } ページ
+doc-chapter-indicator = { $current } / { $total } 章
+doc-slide-indicator = スライド { $current } / { $total }
+doc-truncated = サイズ上限のためプレビューは一部のみ表示されています
+doc-empty-sheet = このシートは空です。
+doc-open-externally = 外部アプリで開く
+doc-unavailable-encrypted = このドキュメントは暗号化またはパスワードで保護されています。
+doc-unavailable-binary = このファイルはバイナリ形式であるか、テキストとして読み取れません。
+doc-unavailable-no-backend = 対応するビューアーバックエンドがないため、この形式はプレビューできません。
+doc-unavailable-too-large = このドキュメントはサイズが大きすぎるため、アプリ内でプレビューできません。
+doc-unavailable-corrupt = このドキュメントをプレビューできません。未対応の形式か、破損している可能性があります。
+
+# ドキュメントメタデータ
+metadata-section-document = ドキュメント
+metadata-field-kind = 種類
+metadata-field-author = 著者
+metadata-field-subject = 件名
+metadata-field-creator = 作成元
+metadata-field-producer = PDF変換
+metadata-field-created = 作成日時
+metadata-field-pages = ページ数
+metadata-field-chapters = 章数
+metadata-field-sheets = シート数
+metadata-field-slides = スライド数
+metadata-field-publisher = 出版社
+metadata-field-identifier = 識別子
+metadata-field-series = シリーズ
+metadata-field-number = 番号
+metadata-field-writer = ライター
+metadata-field-lines = 行数
+metadata-field-words = 単語数
+metadata-field-encoding = エンコーディング
+metadata-field-encrypted = 暗号化

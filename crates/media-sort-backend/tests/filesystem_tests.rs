@@ -87,10 +87,10 @@ fn test_scan_images_only() {
 fn test_scan_filtered_by_extension() {
     let tmp = TempDir::new("scan_filtered");
     copy_fixture("test_image.jpg", tmp.path());
-    fs::write(tmp.join("notes.txt"), b"not media").unwrap();
+    fs::write(tmp.join("notes.bin"), b"not media").unwrap();
 
     let results: Vec<_> = scan_media_files(tmp.path()).into_iter().collect();
-    assert_eq!(results.len(), 1, "expected only the jpg, not the txt");
+    assert_eq!(results.len(), 1, "expected only the jpg, not the bin");
     let name = results[0].file_name().unwrap().to_str().unwrap();
     assert_eq!(name, "test_image.jpg");
 }

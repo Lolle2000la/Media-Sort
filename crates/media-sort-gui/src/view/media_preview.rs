@@ -92,6 +92,9 @@ pub fn media_preview_view(state: &AppState) -> Element<'_, Message> {
             let thumb = state.cache.thumbnail_cache.peek(&entry.path).cloned();
             crate::widgets::video_canvas::audio_controls_view(entry.path.clone(), state, thumb)
         }
+        media_sort_core::media_type::MediaType::Document => {
+            crate::widgets::document_preview::document_preview_view(&entry.path, state)
+        }
     };
 
     let file_size_str = state

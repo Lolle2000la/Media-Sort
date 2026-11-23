@@ -740,6 +740,8 @@ mod tests {
             let name = key.display_name();
             assert!(!name.is_empty(), "keybinding {} has empty key", i);
         }
+        assert_eq!(kb.previous_page.key, Key::PageUp);
+        assert_eq!(kb.next_page.key, Key::PageDown);
     }
 
     #[test]

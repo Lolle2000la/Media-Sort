@@ -237,7 +237,7 @@ Note: `app::update()` (`crates/media-sort-gui/src/app.rs`) delegates to the `upd
 | `actions/` | `ReversibleAction` trait + `MoveAction`, `RenameAction`, `DeleteAction`, `CopyAction`. **Symlink policy:** all action constructors refuse symbolic-link sources (`ActionError::SourceIsSymlink`), checked via the shared `path_utils::is_symlink` helper BEFORE and AFTER `canonicalize()` — `canonicalize()` would resolve the link and silently act on its TARGET (drag & drop accepts arbitrary OS paths), and the post-canonicalize re-check closes the swap window. `CopyAction::execute()` re-checks the source immediately before `fs::copy` (which follows links). Destination folders are always canonicalized at construction, so actions into a symlinked folder land in the real target directory. `MoveAction` refuses an existing destination (`TargetExists`), enforced at construction AND inside `execute()`/`rollback()` — `rename(2)` silently replaces, and Undo/Redo must not clobber a file that appeared at the old path since the move; destination checks use `symlink_metadata()` so dangling symlinks count as existing. Create-folder input is validated with `RenameAction::validate_stem` (rejects `/`, `\\`, `.`, `..`, OS-illegal chars). |
 | `history.rs` | Undo/redo with `done`/`undone` stacks of `Box<dyn ReversibleAction>` |
 | `l10n.rs` | Fluent-backed localization, auto-detects system locale, `tr()` for lookups |
-| `media_type.rs` | `MediaType` enum (`Image`/`Video`/`Audio`, with `MediaType::iter()` via `strum::EnumIter`), global `MediaRegistry` (`OnceLock`), extension lists |
+| `media_type.rs` | `MediaType` enum (`Image`/`Video`/`Audio`/`Document`, with `MediaType::iter()` via `strum::EnumIter`), `DocumentKind` (`Markdown`/`PlainText`), global `MediaRegistry` (`OnceLock`), extension lists |
 | `models.rs` | `MediaEntry`, `FolderNode` (with `FolderKind` icon classification: `Default`/`Git`/`Symlink`/`Locked`, plus `symlink_target` for display), `PinnedFolder` data types |
 | `path_utils.rs` | Cross-platform path comparison utilities, `is_symlink` (single source of truth for the symlink-refusal policy), `atomic_write` (unique-temp + fsync + rename — used by the settings store), `unique_temp_path` (shared by the settings store and the updater; pid + counter keeps two app instances from racing on a shared temp name) |
 | `settings/` | `SettingsStore` + sub-modules: `advanced`, `general`, `keybindings` (`KeyBindings` + typed `KeyAction` / `KeyActionSection` / `KeyActionSubsection` enums), `metadata_panel`, `pinned_folders`, `window_position` |
@@ -256,11 +256,13 @@ Note: `app::update()` (`crates/media-sort-gui/src/app.rs`) delegates to the `upd
 | `media/image_decoder.rs` | Full-resolution image loading via `image` crate; `load_preview()` (capped preview decode) |
 | `media/svg.rs` | Pure-Rust `SVG`/`SVGZ` dimension reading and rasterization via `resvg` (bounded SVGZ decompression via `flate2`; blocks external/local file `<image>` refs) |
 | `media/audio_decoder.rs` | `AudioPlayer` using `rodio` output + `symphonia` decoding. With the `pulse` feature, `audio_decoder/pulse.rs` writes to PulseAudio directly instead of a cpal device (the Flatpak enables it; see the Flatpak section) |
+| `media/document.rs` + `media/document/` | Document thumbnails, structured previews (`DocumentPreview`), and metadata extraction (currently `text.rs` for Markdown, CSV/TSV, and plain text) |
 | `media/thumbnail.rs` | Thumbnail generation (dispatches into `format_pipeline`) |
-| `metadata.rs` | `MetadataError`, shared `build_file_section()`, and unified `extract_metadata(path, media_type)` dispatching to `metadata/{image,audio,video}_meta.rs` |
+| `metadata.rs` | `MetadataError`, shared `build_file_section()` / `merge_sections()`, and unified `extract_metadata(path, media_type)` dispatching to `metadata/{image,audio,video,document}_meta.rs` |
 | `metadata/image_meta.rs` | EXIF extraction via `kamadak-exif` |
 | `metadata/audio_meta.rs` | Audio tags via `id3`/`metaflac`/`mp4ameta` |
 | `metadata/video_meta.rs` | Video metadata extraction |
+| `metadata/document_meta.rs` | Document metadata (`File` + `Document` sections: `Kind`, text line/word/encoding fields) |
 | `platform.rs` | Cross-platform OS hand-off (`open_externally`, `reveal_in_file_manager`, `is_safe_http_url`, `open_url`) plus `desktop_portal.rs` and `windows_shell.rs` |
 | `platform/desktop_portal.rs` | Linux sandbox integration: `in_flatpak()` (the single Flatpak check, re-exported by `filesystem/trash/portal.rs`) and the `org.freedesktop.portal.OpenURI` actions that hand a file to the host's default handler / file manager, which the sandbox's session-bus policy makes the only route |
 | `platform/windows_shell.rs` | Windows Shell integration: registers/unregisters the "Open with Media Sort" Explorer context-menu entries in the registry |
@@ -303,12 +305,12 @@ The raw tokio command channel is hidden behind the opaque `PlayerHandle`; produc
 | `message.rs` | `Message` and sub-enum definitions |
 | `demo.rs` | Consolidates both interactive demo initialization and headless video export |
 | `state.rs` | `AppState` struct (including `clear_active_preview()`), media scanning via `scan_media_entries()`; folder tree logic lives in `state/folder/tree.rs`, per-folder classification in `state/folder_inspection.rs` |
-| `thumbnails.rs` + `thumbnails/` | `thumbnails.rs` (`generate_thumbnail_with_options`, `ThumbnailError`) + `thumbnails/{pool,video,image}.rs` (bounded ffmpeg/mpv worker pools and image/cover-art dispatch, replacing `subscriptions/prefetch.rs`) |
-| `update/` | `update.rs` + domain submodules `update/{preview,file_ops,audio,image,thumbnails,metadata,scroll,media,folder,filesystem,drag_drop,keyboard,settings,video}.rs` (replacing `update/tasks.rs` and overloaded `update/media.rs`); `update/keyboard.rs` enforces modal focus gating (`is_modal_open`) and `MediaType` playback routing; `update/tests.rs` + `update/tests/*` submodules |
+| `thumbnails.rs` + `thumbnails/` | `thumbnails.rs` (`generate_thumbnail_with_options`, `ThumbnailError`) + `thumbnails/{pool,video,image,document}.rs` (bounded ffmpeg/mpv/document worker pools and image/cover-art dispatch, replacing `subscriptions/prefetch.rs`) |
+| `update/` | `update.rs` + domain submodules `update/{preview,file_ops,audio,document,image,thumbnails,metadata,scroll,media,folder,filesystem,drag_drop,keyboard,settings,video}.rs` (replacing `update/tasks.rs` and overloaded `update/media.rs`); `update/keyboard.rs` enforces modal focus gating (`is_modal_open`) and `MediaType` playback/document routing; `update/tests.rs` + `update/tests/*` submodules |
 | `view/` | 11 view files: `main_layout`, `folder_tree`, `folder_panel`, `media_grid`, `media_preview`, `metadata_panel`, `control_panel`, `search_bar`, `settings_dialog`, `credits_dialog`, `overlay` (modal overlay + transient `status_toast`) |
 
 Transient user feedback (refused drops, update failures, create-folder errors) goes through `AppState.status_message` (`StatusMessage { text, expires_at }`): set via `state.set_status(...)`, rendered as a non-blocking `status_toast` stacked above modals by `view/overlay.rs`, and expired by `handle_tick` against the tick's own `Instant` (sleep-proof). `open_folder` clears it. New user-visible strings need entries in all three locale files.
-| `widgets/` | Custom widgets: `video_canvas`, `video_player` (controls), `video_shader` (wgpu), `rename_modal`, `create_folder_modal`, `folder_icon` |
+| `widgets/` | Custom widgets: `document_preview`, `video_canvas`, `video_player` (controls), `video_shader` (wgpu), `rename_modal`, `create_folder_modal`, `folder_icon` |
 | `subscriptions/` | `keyboard.rs`, `video_player.rs`, `filesystem.rs` (OS watcher subscription, see the Filesystem watcher section) |
 
 ### Demo video export
@@ -333,7 +335,7 @@ Transient user feedback (refused drops, update failures, create-folder errors) g
 
 `SettingsStore` (`crates/media-sort-core/src/settings/store.rs:54`) has 6 sub-structs:
 
-- `GeneralSettings` — locale, dark mode, reopen folder, update checks, GIF animation, folder tree width, per-session pinned folders
+- `GeneralSettings` — locale, dark mode, reopen folder, update checks, GIF animation, folder tree width, per-session pinned folders, `show_documents_by_default` (`true` by default; seeds the active-session Documents filter chip when opening a folder)
 - `KeyBindings` — all user-configurable shortcuts
 - `MetadataPanelSettings` — expanded state and panel width
 - `PinnedFoldersSettings` — list of pinned folder paths as strings
@@ -376,7 +378,7 @@ The entire pipeline depends on `libmpv-sys` at build time and a working `libmpv`
 
 Both `ffmpeg` and mpv invocations go through **bounded worker pools** in `thumbnails/pool.rs` and `thumbnails/video.rs`: `FFMPEG_THUMBNAIL_WORKER` spawns `available_parallelism().clamp(2, 16)` worker threads (ffmpeg is a lightweight short-lived subprocess, so the cap is sized to fit a typical visible set in 1–2 batches); `VIDEO_THUMBNAIL_WORKER` (mpv) spawns `available_parallelism().clamp(2, 4)` (each `MpvContext` is heavyweight — holds GPU resources, libmpv handle, persistent state). Both pull from a shared `mpsc` receiver (Arc-Mutex guarded, mirroring the watch-pool pattern). The queues are **bounded** (`sync_channel`, 256 slots), queue sends use a 5 s deadline (`send_with_timeout` — `SyncSender::send_timeout` is unstable on the MSRV toolchain), and response waits use timeouts, so a scroll-storm cannot grow memory unboundedly and requesters un-hang when a pool's workers all failed to start (e.g. no libmpv). The caps prevent scroll-storm fan-out from spawning N simultaneous subprocesses (default tokio blocking-pool ceiling is 512); see `benches/perf_candidates.rs` Group G for the wall-time/resource tradeoff (8-way burst on this dev host: 121 ms unbounded at peak=8 procs vs 170 ms bounded-to-4 at peak=4 procs; 20-way burst: see `g_extract_concurrent_*_20` variants for the visible-set-scale case that motivated cap=16 over cap=4).
 
-**Thumbnail failure semantics:** `thumbnails::ThumbnailError` distinguishes `Decode` (real file problem — recorded in `media_errors`, persistent "failed" badge) from `Transient` (queue timeout, dead pool, ffmpeg/mpv request timeout — NOT recorded, so the card stays un-thumbnailed and the next viewport pass re-queues it; recording timeouts would permanently badge a slow-but-valid video and block retries for the session). A third, non-error outcome covers "there is no image to show": `thumbnails::generate_thumbnail_with_options` returns `Ok(None)` (surfaced as `MediaMessage::ThumbnailCancelled`) when an audio file has no embedded cover art (or `should_keep` cancels), and the backend's `thumbnail::generate_thumbnail`/`thumbnail_image` returns `Ok(None)` for the same case. "No cover art" is a normal, playable file, NOT a decode failure: it must never be recorded in `media_errors` (that would show the preview pane's "file not supported" box and block playback). It used to fall back to decoding the audio file itself as an image, which failed with "the file extension `.wav` was not recognized as an image format". Genuinely corrupt embedded cover art still returns `Decode`/`Err`.
+**Thumbnail failure semantics:** `thumbnails::ThumbnailError` distinguishes `Decode` (real file problem — recorded in `media_errors`, persistent "failed" badge) from `Transient` (queue timeout, dead pool, ffmpeg/mpv request timeout — NOT recorded, so the card stays un-thumbnailed and the next viewport pass re-queues it; recording timeouts would permanently badge a slow-but-valid video and block retries for the session). A third, non-error outcome covers "there is no image to show": `thumbnails::generate_thumbnail_with_options` returns `Ok(None)` (surfaced as `MediaMessage::ThumbnailCancelled`) when an audio file has no embedded cover art or when a document has no thumbnail (plain text, Markdown), and the backend's `thumbnail::generate_thumbnail`/`thumbnail_image`/`document::generate_document_thumbnail` returns `Ok(None)` for those cases. **`Ok(None)` thumbnails must NEVER record errors in `media_errors`** (doing so would falsely mark valid, previewable/playable files as unsupported). "No cover art" used to fall back to decoding the audio file itself as an image, which failed with "the file extension `.wav` was not recognized as an image format". Genuinely corrupt embedded cover art still returns `Decode`/`Err`.
 
 ## Audio player
 
@@ -394,9 +396,21 @@ Grid thumbnails are static first-frame RGBA handles either way, so `thumbnails::
 
 At the file system level the `image` crate can decode GIF natively. The mpv path is also available if the installed mpv supports GIF demuxing.
 
+## Document pipeline
+
+Documents are classified as `MediaType::Document` (`NATIVE_DOCUMENT_EXTS` in `media-sort-core/src/media_type.rs`) and subdivided into `DocumentKind` variants for icons, metadata, thumbnails, and preview dispatch:
+
+- **`Markdown` (`.md`, `.markdown`) & `PlainText` (`.txt`, `.csv`, `.tsv`)** — Bounded UTF-8 reads (`MAX_TEXT_PREVIEW_BYTES` = 256 KiB, `MAX_TEXT_PREVIEW_LINES` = 2,000), `csv` table parsing for `.csv`/`.tsv`, and binary/NUL detection (`document/text.rs`).
+
+**GUI cache & page prefetching:** `CacheState.document_cache` (`capacity = 24`) stores already-converted `DocumentPreviewData` (`image::Handle` / pre-parsed `markdown::Item`s) for zero-copy page hits, and `update::document::prefetch_adjacent_document_pages` pre-renders the next/previous page (`in_flight_pages` deduped) on document open and page navigation; `CacheState::thumbnails_in_flight` deduplicates concurrent thumbnail requests across `update::thumbnails::{load_around_selection,load_visible_thumbnails}`.
+
+**Safety & error semantics:** `generate_document_thumbnail()` returns `Ok(None)` whenever a format has no thumbnail (plain text, Markdown), and `Ok(None)` thumbnails must **never** record errors in `media_errors`.
+
+**Filtering & settings:** The media grid provides active-session type filter chips (`Images`, `Video`, `Audio`, `Documents`) that live in session state rather than persisted toggles; `general.show_documents_by_default` (`bool`, default `true`) seeds whether the `Documents` chip starts enabled when opening a folder. Keybindings `previous_page` (`PageUp`) and `next_page` (`PageDown`) step pages/sheets when a document is selected.
+
 ## Media type classification
 
-`media_sort_backend::filesystem::scanner::classify_media(path, animate_gifs)` is the single classification entry point used by both `scan_media_entries()` and callers needing `(MediaType, Option<bool>)`. It checks the baseline `MediaType` extension lists (`Image`, `Video`, `Audio`), falls back to `MediaRegistry::determine_type()` (`media-sort-core/src/media_type.rs`) for mpv-discovered video formats, defaults unrecognized extensions to `MediaType::Image`, and inspects `.gif` headers via `image_decoder::is_animated_gif` to keep static GIFs (or all GIFs when `animate_gifs` is `false`) as `MediaType::Image`.
+`media_sort_backend::filesystem::scanner::classify_media(path, animate_gifs)` is the single classification entry point used by both `scan_media_entries()` and callers needing `(MediaType, Option<bool>)`. It checks the baseline `MediaType` extension lists (`Image`, `Audio`, `Document`, `Video`), falls back to `MediaRegistry::determine_type()` (`media-sort-core/src/media_type.rs`) for mpv-discovered video formats, defaults unrecognized extensions to `MediaType::Image`, and inspects `.gif` headers via `image_decoder::is_animated_gif` to keep static GIFs (or all GIFs when `animate_gifs` is `false`) as `MediaType::Image`.
 
 ## Folder tree
 
@@ -547,6 +561,7 @@ The benchmarks crate builds the same vendored static libjpeg-turbo as the backen
 | `symphonia` (all codecs) + `rodio` | Audio decoding and output |
 | `kamadak-exif` + `id3` + `metaflac` + `mp4ameta` | Metadata extraction |
 | `resvg` + `flate2` | Pure-Rust `SVG`/`SVGZ` rendering (blocks external/local file `<image>` refs; bounded SVGZ decompression via `flate2`) |
+| `csv` | CSV/TSV delimited table parsing |
 | `notify` | Filesystem watcher |
 | `walkdir` | Media file scanning |
 | `trash` | Cross-platform delete-to-trash |

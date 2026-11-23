@@ -29,6 +29,8 @@ pub fn metadata_panel_view(state: &AppState) -> Element<'_, Message> {
             for (section_name, fields) in metadata {
                 let display_section = if section_name == "File" {
                     state.l10n.tr("metadata-section-file")
+                } else if section_name == "Document" {
+                    state.l10n.tr("metadata-section-document")
                 } else if section_name == "Container Metadata" {
                     state.l10n.tr("metadata-section-container")
                 } else if section_name == "EXIF" {
@@ -154,6 +156,27 @@ fn localize_tag_name(
             "GPSLATITUDE" => l10n.tr("metadata-field-gpslatitude"),
             "GPSLONGITUDE" => l10n.tr("metadata-field-gpslongitude"),
             "GPSALTITUDE" => l10n.tr("metadata-field-gpsaltitude"),
+
+            // Document fields
+            "KIND" => l10n.tr("metadata-field-kind"),
+            "AUTHOR" => l10n.tr("metadata-field-author"),
+            "SUBJECT" => l10n.tr("metadata-field-subject"),
+            "CREATOR" => l10n.tr("metadata-field-creator"),
+            "PRODUCER" => l10n.tr("metadata-field-producer"),
+            "CREATED" => l10n.tr("metadata-field-created"),
+            "PAGES" => l10n.tr("metadata-field-pages"),
+            "CHAPTERS" => l10n.tr("metadata-field-chapters"),
+            "SHEETS" => l10n.tr("metadata-field-sheets"),
+            "SLIDES" => l10n.tr("metadata-field-slides"),
+            "PUBLISHER" => l10n.tr("metadata-field-publisher"),
+            "IDENTIFIER" => l10n.tr("metadata-field-identifier"),
+            "SERIES" => l10n.tr("metadata-field-series"),
+            "NUMBER" => l10n.tr("metadata-field-number"),
+            "WRITER" => l10n.tr("metadata-field-writer"),
+            "LINES" => l10n.tr("metadata-field-lines"),
+            "WORDS" => l10n.tr("metadata-field-words"),
+            "ENCODING" => l10n.tr("metadata-field-encoding"),
+            "ENCRYPTED" => l10n.tr("metadata-field-encrypted"),
             _ => key.to_string(),
         }
     }

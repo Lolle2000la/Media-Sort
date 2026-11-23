@@ -67,6 +67,7 @@ iced = { version = "0.14", features = [
     "tokio",
     "advanced",
     "advanced-shaping",
+    "markdown",
 ] }
 iced_wgpu = "0.14"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "fs"] }
@@ -76,6 +77,7 @@ ico = "0.6"
 open = { version = "5.4.0", features = ["shellexecute-on-windows"] }
 fast_image_resize = { version = "6.0", features = ["image", "rayon"] }
 rayon = "1.12"
+csv = "1.4"
 resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 flate2 = "1"
 

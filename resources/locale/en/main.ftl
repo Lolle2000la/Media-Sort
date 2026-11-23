@@ -23,6 +23,8 @@ settings-animated-gifs = Animated Gifs
 settings-play-gifs = Play animated gifs
 settings-pinned-folders = Pinned folders
 settings-session-pinned-folders = Keep pinned folders per-session (don't share them between running instances)
+settings-show-documents-by-default = Show documents by default
+settings-show-documents-by-default-desc = Enable the Documents filter chip automatically when opening a folder.
 settings-updates = Updates
 settings-check-updates = Check for updates on startup
 settings-install-prerelease = Install prerelease builds
@@ -40,6 +42,7 @@ keybindings-press-key = Press a key...
 keybindings-images = Media
 keybindings-folders = Folders
 keybindings-other = Other
+keybindings-documents-section = Documents
 keybindings-management = Management
 keybindings-selection = Selection
 keybindings-search = Search
@@ -70,6 +73,8 @@ keybindings-select-below = Select the folder below
 keybindings-expand = Expand folder (list sub-folders)
 keybindings-undo = Undo
 keybindings-redo = Redo
+keybindings-previous-page = Previous page / sheet
+keybindings-next-page = Next page / sheet
 
 # Other UI
 ui-folder = Folder
@@ -194,3 +199,47 @@ status-symlink-refused = Refused {$name}: the entry is a symbolic link.
 status-folder-name-invalid = Cannot create folder "{$name}": invalid folder name.
 status-target-exists = Refused {$name}: a file or folder with that name already exists.
 status-update-failed = Update failed. Please try again later.
+
+# Media type filters
+filter-images = Images
+filter-video = Video
+filter-audio = Audio
+filter-documents = Documents
+
+# Document preview
+doc-loading = Loading document...
+doc-prev-page = Previous page
+doc-next-page = Next page
+doc-page-indicator = Page { $current } of { $total }
+doc-chapter-indicator = Chapter { $current } of { $total }
+doc-slide-indicator = Slide { $current } of { $total }
+doc-truncated = Preview truncated due to size limit
+doc-empty-sheet = This sheet is empty.
+doc-open-externally = Open Externally
+doc-unavailable-encrypted = This document is encrypted or password-protected.
+doc-unavailable-binary = This file appears to be binary or unreadable as text.
+doc-unavailable-no-backend = Preview is unavailable for this format without a compatible viewer backend.
+doc-unavailable-too-large = This document is too large to preview in-app.
+doc-unavailable-corrupt = Unable to preview this document; it may be unsupported or damaged.
+
+# Document metadata
+metadata-section-document = Document
+metadata-field-kind = Kind
+metadata-field-author = Author
+metadata-field-subject = Subject
+metadata-field-creator = Creator
+metadata-field-producer = Producer
+metadata-field-created = Created
+metadata-field-pages = Pages
+metadata-field-chapters = Chapters
+metadata-field-sheets = Sheets
+metadata-field-slides = Slides
+metadata-field-publisher = Publisher
+metadata-field-identifier = Identifier
+metadata-field-series = Series
+metadata-field-number = Number
+metadata-field-writer = Writer
+metadata-field-lines = Lines
+metadata-field-words = Words
+metadata-field-encoding = Encoding
+metadata-field-encrypted = Encrypted

@@ -150,6 +150,22 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                 .on_toggle(|_| Message::Settings(SettingsMessage::ToggleSessionPinnedFolders))
                 .size(16);
 
+            let show_documents_cb = checkbox(state.settings.general.show_documents_by_default)
+                .label(state.l10n.tr("settings-show-documents-by-default"))
+                .on_toggle(|val| {
+                    Message::Settings(SettingsMessage::ToggleShowDocumentsByDefault(val))
+                })
+                .size(16);
+            let show_documents_desc =
+                text(state.l10n.tr("settings-show-documents-by-default-desc"))
+                    .size(11)
+                    .style(|theme: &iced::Theme| text::Style {
+                        color: Some(Color {
+                            a: 0.7,
+                            ..theme.palette().text
+                        }),
+                    });
+
             #[cfg(feature = "velopack")]
             let check_updates_cb = checkbox(state.settings.general.check_for_updates_on_startup)
                 .label(state.l10n.tr("settings-check-updates"))
@@ -218,7 +234,16 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                     session_pinned_cb,
                 ]
                 .spacing(8),
-            ];
+                column![
+                    text(state.l10n.tr("filter-documents"))
+                        .font(BOLD_FONT)
+                        .size(14),
+                    show_documents_cb,
+                    show_documents_desc,
+                ]
+                .spacing(6),
+            ]
+            .spacing(12);
 
             #[cfg(feature = "velopack")]
             {
@@ -287,11 +312,16 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                 .style(iced::widget::button::secondary);
 
             let sections = KeyActionSection::iter().map(|section| {
+                let direct_rows: Vec<Element<'_, Message>> = KeyAction::iter()
+                    .filter(|action| action.section() == section && action.subsection().is_none())
+                    .map(|action| keybinding_row(state, action))
+                    .collect();
                 let subsections: Vec<Element<'_, Message>> = KeyActionSubsection::iter()
                     .filter_map(|subsection| {
                         let rows: Vec<Element<'_, Message>> = KeyAction::iter()
                             .filter(|action| {
-                                action.section() == section && action.subsection() == subsection
+                                action.section() == section
+                                    && action.subsection() == Some(subsection)
                             })
                             .map(|action| keybinding_row(state, action))
                             .collect();
@@ -305,7 +335,9 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                         }
                     })
                     .collect();
-                keybinding_section(state.l10n.tr(section.l10n_key()), subsections)
+                let items: Vec<Element<'_, Message>> =
+                    direct_rows.into_iter().chain(subsections).collect();
+                keybinding_section(state.l10n.tr(section.l10n_key()), items)
             });
 
             let bindings_column =
