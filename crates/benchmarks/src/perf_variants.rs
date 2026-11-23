@@ -504,7 +504,7 @@ pub fn synthetic_media_entries(n: usize) -> Vec<MediaEntry> {
     let exts = [
         "jpg", "png", "jpeg", "gif", "mp4", "mkv", "webm", "bmp", "tiff", "webp", "mp3", "flac",
         "wav", "avi", "mov", "m4v", "aac", "ogg", "opus", "m4a", "wmv", "flv", "qoi", "tga",
-        "avif", "txt", "md", "csv",
+        "avif", "pdf", "txt", "md", "csv",
     ];
     (0..n)
         .map(|i| {
@@ -555,6 +555,8 @@ mod tests {
             "SVG",
             "svgz",
             "SVGZ",
+            "pdf",
+            "PDF",
             "txt",
             "TXT",
             "md",
@@ -567,6 +569,10 @@ mod tests {
             let b = detect_media_type_hashset(&p, true);
             assert_eq!(a, b, "ext={}", ext);
         }
+        assert_eq!(
+            detect_media_type_hashset(Path::new("report.pdf"), true),
+            MediaType::Document
+        );
         assert_eq!(
             detect_media_type_hashset(Path::new("notes.txt"), true),
             MediaType::Document

@@ -29,7 +29,7 @@ pub static NATIVE_AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "ogg", "wav", "aac", "m4a", "wma", "opus", "aiff",
 ];
 
-pub static NATIVE_DOCUMENT_EXTS: &[&str] = &["md", "markdown", "txt", "csv", "tsv"];
+pub static NATIVE_DOCUMENT_EXTS: &[&str] = &["pdf", "md", "markdown", "txt", "csv", "tsv"];
 
 pub static SYSTEM_REGISTRY: OnceLock<MediaRegistry> = OnceLock::new();
 
@@ -44,6 +44,7 @@ pub enum MediaType {
 /// High-level document family used for UI icons, metadata labels, and preview dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DocumentKind {
+    Pdf,
     Markdown,
     PlainText,
 }
@@ -52,6 +53,7 @@ impl DocumentKind {
     /// Classifies a lowercase or mixed-case file extension (without leading dot).
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_lowercase().as_str() {
+            "pdf" => Some(Self::Pdf),
             "md" | "markdown" => Some(Self::Markdown),
             "txt" | "csv" | "tsv" => Some(Self::PlainText),
             _ => None,
@@ -318,12 +320,17 @@ mod tests {
     #[test]
     fn test_document_extensions_and_kind() {
         let exts = MediaType::Document.extensions();
+        assert!(exts.contains(&"pdf"));
         assert!(exts.contains(&"md"));
         assert!(exts.contains(&"markdown"));
         assert!(exts.contains(&"txt"));
         assert!(exts.contains(&"csv"));
         assert!(exts.contains(&"tsv"));
 
+        assert_eq!(
+            MediaRegistry::determine_type("PDF"),
+            Some(MediaType::Document)
+        );
         assert_eq!(
             MediaRegistry::determine_type("MD"),
             Some(MediaType::Document)
@@ -332,6 +339,7 @@ mod tests {
             MediaRegistry::determine_type("txt"),
             Some(MediaType::Document)
         );
+        assert_eq!(DocumentKind::from_extension("pdf"), Some(DocumentKind::Pdf));
         assert_eq!(
             DocumentKind::from_extension("md"),
             Some(DocumentKind::Markdown)

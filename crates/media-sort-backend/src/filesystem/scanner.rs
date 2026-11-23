@@ -142,6 +142,8 @@ mod tests {
     #[test]
     fn test_classify_media_documents() {
         for p in [
+            "sample.pdf",
+            "SAMPLE.PDF",
             "readme.md",
             "guide.MARKDOWN",
             "notes.txt",
