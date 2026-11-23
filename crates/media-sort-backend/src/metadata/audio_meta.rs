@@ -1,37 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::image_meta::MetadataError;
+use crate::metadata::{MetadataError, build_file_section, merge_sections};
 
 pub fn extract_audio_metadata(
     path: &Path,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, MetadataError> {
     let mut dirs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
-    // Validate that the file exists and is accessible
-    let meta = std::fs::metadata(path)?;
-
     // 1. Add basic file metadata
-    let mut file_sec: BTreeMap<String, String> = BTreeMap::new();
-    if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) {
-        file_sec.insert("Name".into(), name);
-    }
-    let bytes = meta.len();
-    let size_str = if bytes >= 1024 * 1024 {
-        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} KB", bytes as f64 / 1024.0)
-    };
-    file_sec.insert("Size".into(), size_str);
-
-    if let Ok(modified) = meta.modified() {
-        let datetime: chrono::DateTime<chrono::Local> = modified.into();
-        file_sec.insert(
-            "Modified".into(),
-            datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
-        );
-    }
-    dirs.insert("File".into(), file_sec);
+    dirs.insert("File".into(), build_file_section(path)?);
 
     // 2. Read specific audio tags
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -44,13 +22,7 @@ pub fn extract_audio_metadata(
     };
 
     if let Ok(tags) = specific_tags {
-        for (sec_name, sec_data) in tags {
-            if sec_name == "File" {
-                dirs.entry("File".into()).or_default().extend(sec_data);
-            } else {
-                dirs.insert(sec_name, sec_data);
-            }
-        }
+        merge_sections(&mut dirs, tags);
     }
 
     Ok(dirs)

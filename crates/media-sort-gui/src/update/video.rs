@@ -11,7 +11,9 @@ pub fn handle_video_message(state: &mut AppState, msg: iced_mpv::PlayerMessage) 
                 state.cache.media_errors.record(path, error);
             }
             iced_mpv::VideoEvent::PlayExternally(path) => {
-                super::tasks::open_externally(&path);
+                if let Err(e) = media_sort_backend::platform::open_externally(&path) {
+                    tracing::error!("Failed to open file externally: {e}");
+                }
             }
             // The first committed frame proves the file is playable, so any
             // previously recorded error (e.g. from thumbnail generation) is

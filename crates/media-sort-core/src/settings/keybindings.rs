@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use strum::{EnumIter, IntoEnumIterator};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -242,6 +243,268 @@ impl Default for KeyBindings {
     }
 }
 
+/// Top-level sections used to group [`KeyAction`] rows in the settings UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum KeyActionSection {
+    Images,
+    Folders,
+    Other,
+}
+
+impl KeyActionSection {
+    /// Iterates over all [`KeyActionSection`] variants in display order.
+    pub fn iter() -> KeyActionSectionIter {
+        <Self as IntoEnumIterator>::iter()
+    }
+
+    /// Returns the Fluent localization key for this section heading.
+    pub const fn l10n_key(self) -> &'static str {
+        match self {
+            Self::Images => "keybindings-images",
+            Self::Folders => "keybindings-folders",
+            Self::Other => "keybindings-other",
+        }
+    }
+}
+
+/// Subsections within a [`KeyActionSection`] in the settings UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum KeyActionSubsection {
+    Management,
+    Selection,
+    Search,
+    Metadata,
+    Open,
+    Pinned,
+    History,
+}
+
+impl KeyActionSubsection {
+    /// Iterates over all [`KeyActionSubsection`] variants in declaration order.
+    pub fn iter() -> KeyActionSubsectionIter {
+        <Self as IntoEnumIterator>::iter()
+    }
+
+    /// Returns the Fluent localization key for this subsection heading.
+    pub const fn l10n_key(self) -> &'static str {
+        match self {
+            Self::Management => "keybindings-management",
+            Self::Selection => "keybindings-selection",
+            Self::Search => "keybindings-search",
+            Self::Metadata => "keybindings-metadata",
+            Self::Open => "keybindings-open",
+            Self::Pinned => "keybindings-pinned",
+            Self::History => "keybindings-history",
+        }
+    }
+}
+
+/// All configurable keybinding actions in canonical UI/list order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum KeyAction {
+    MoveToFolder,
+    CopyToFolder,
+    Delete,
+    Rename,
+    GoLeft,
+    GoRight,
+    CreateFolder,
+    FolderUp,
+    FolderLeft,
+    FolderDown,
+    FolderRight,
+    Undo,
+    Redo,
+    OpenFolder,
+    OpenSelectedFolder,
+    Pin,
+    PinSelected,
+    Unpin,
+    MovePinnedUp,
+    MovePinnedDown,
+    SearchImages,
+    ToggleMetadataPanel,
+    RevealInFileManager,
+}
+
+impl KeyAction {
+    /// Iterates over all [`KeyAction`] variants in canonical order.
+    pub fn iter() -> KeyActionIter {
+        <Self as IntoEnumIterator>::iter()
+    }
+
+    /// Returns the stable snake_case identifier matching the [`KeyBindings`] field name.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::MoveToFolder => "move_to_folder",
+            Self::CopyToFolder => "copy_to_folder",
+            Self::Delete => "delete",
+            Self::Rename => "rename",
+            Self::GoLeft => "go_left",
+            Self::GoRight => "go_right",
+            Self::CreateFolder => "create_folder",
+            Self::FolderUp => "folder_up",
+            Self::FolderLeft => "folder_left",
+            Self::FolderDown => "folder_down",
+            Self::FolderRight => "folder_right",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::OpenFolder => "open_folder",
+            Self::OpenSelectedFolder => "open_selected_folder",
+            Self::Pin => "pin",
+            Self::PinSelected => "pin_selected",
+            Self::Unpin => "unpin",
+            Self::MovePinnedUp => "move_pinned_up",
+            Self::MovePinnedDown => "move_pinned_down",
+            Self::SearchImages => "search_images",
+            Self::ToggleMetadataPanel => "toggle_metadata_panel",
+            Self::RevealInFileManager => "reveal_in_file_manager",
+        }
+    }
+
+    /// Returns the Fluent localization key for this action's settings label.
+    pub const fn l10n_key(self) -> &'static str {
+        match self {
+            Self::MoveToFolder => "keybindings-move",
+            Self::CopyToFolder => "keybindings-copy",
+            Self::Delete => "keybindings-delete",
+            Self::Rename => "keybindings-rename",
+            Self::GoLeft => "keybindings-select-left",
+            Self::GoRight => "keybindings-select-right",
+            Self::CreateFolder => "keybindings-create-folder",
+            Self::FolderUp => "keybindings-select-above",
+            Self::FolderLeft => "keybindings-collapse",
+            Self::FolderDown => "keybindings-select-below",
+            Self::FolderRight => "keybindings-expand",
+            Self::Undo => "keybindings-undo",
+            Self::Redo => "keybindings-redo",
+            Self::OpenFolder => "keybindings-open-folder",
+            Self::OpenSelectedFolder => "keybindings-open-selected",
+            Self::Pin => "keybindings-pin",
+            Self::PinSelected => "keybindings-pin-selected",
+            Self::Unpin => "keybindings-unpin",
+            Self::MovePinnedUp => "keybindings-move-pinned-up",
+            Self::MovePinnedDown => "keybindings-move-pinned-down",
+            Self::SearchImages => "keybindings-search-images",
+            Self::ToggleMetadataPanel => "keybindings-toggle-metadata",
+            Self::RevealInFileManager => "keybindings-reveal-in-file-manager",
+        }
+    }
+
+    /// Returns the top-level settings section containing this action.
+    pub const fn section(self) -> KeyActionSection {
+        match self {
+            Self::MoveToFolder
+            | Self::CopyToFolder
+            | Self::Delete
+            | Self::Rename
+            | Self::RevealInFileManager
+            | Self::GoLeft
+            | Self::GoRight
+            | Self::SearchImages
+            | Self::ToggleMetadataPanel => KeyActionSection::Images,
+            Self::CreateFolder
+            | Self::FolderUp
+            | Self::FolderLeft
+            | Self::FolderDown
+            | Self::FolderRight
+            | Self::OpenFolder
+            | Self::OpenSelectedFolder
+            | Self::Pin
+            | Self::PinSelected
+            | Self::Unpin
+            | Self::MovePinnedUp
+            | Self::MovePinnedDown => KeyActionSection::Folders,
+            Self::Undo | Self::Redo => KeyActionSection::Other,
+        }
+    }
+
+    /// Returns the subsection within [`KeyAction::section`] containing this action.
+    pub const fn subsection(self) -> KeyActionSubsection {
+        match self {
+            Self::MoveToFolder
+            | Self::CopyToFolder
+            | Self::Delete
+            | Self::Rename
+            | Self::RevealInFileManager
+            | Self::CreateFolder => KeyActionSubsection::Management,
+            Self::GoLeft
+            | Self::GoRight
+            | Self::FolderUp
+            | Self::FolderLeft
+            | Self::FolderDown
+            | Self::FolderRight => KeyActionSubsection::Selection,
+            Self::SearchImages => KeyActionSubsection::Search,
+            Self::ToggleMetadataPanel => KeyActionSubsection::Metadata,
+            Self::OpenFolder | Self::OpenSelectedFolder => KeyActionSubsection::Open,
+            Self::Pin
+            | Self::PinSelected
+            | Self::Unpin
+            | Self::MovePinnedUp
+            | Self::MovePinnedDown => KeyActionSubsection::Pinned,
+            Self::Undo | Self::Redo => KeyActionSubsection::History,
+        }
+    }
+
+    /// Returns an immutable reference to this action's binding in `kb`.
+    pub const fn binding(self, kb: &KeyBindings) -> &KeyBinding {
+        match self {
+            Self::MoveToFolder => &kb.move_to_folder,
+            Self::CopyToFolder => &kb.copy_to_folder,
+            Self::Delete => &kb.delete,
+            Self::Rename => &kb.rename,
+            Self::GoLeft => &kb.go_left,
+            Self::GoRight => &kb.go_right,
+            Self::CreateFolder => &kb.create_folder,
+            Self::FolderUp => &kb.folder_up,
+            Self::FolderLeft => &kb.folder_left,
+            Self::FolderDown => &kb.folder_down,
+            Self::FolderRight => &kb.folder_right,
+            Self::Undo => &kb.undo,
+            Self::Redo => &kb.redo,
+            Self::OpenFolder => &kb.open_folder,
+            Self::OpenSelectedFolder => &kb.open_selected_folder,
+            Self::Pin => &kb.pin,
+            Self::PinSelected => &kb.pin_selected,
+            Self::Unpin => &kb.unpin,
+            Self::MovePinnedUp => &kb.move_pinned_up,
+            Self::MovePinnedDown => &kb.move_pinned_down,
+            Self::SearchImages => &kb.search_images,
+            Self::ToggleMetadataPanel => &kb.toggle_metadata_panel,
+            Self::RevealInFileManager => &kb.reveal_in_file_manager,
+        }
+    }
+
+    /// Returns a mutable reference to this action's binding in `kb`.
+    pub const fn binding_mut(self, kb: &mut KeyBindings) -> &mut KeyBinding {
+        match self {
+            Self::MoveToFolder => &mut kb.move_to_folder,
+            Self::CopyToFolder => &mut kb.copy_to_folder,
+            Self::Delete => &mut kb.delete,
+            Self::Rename => &mut kb.rename,
+            Self::GoLeft => &mut kb.go_left,
+            Self::GoRight => &mut kb.go_right,
+            Self::CreateFolder => &mut kb.create_folder,
+            Self::FolderUp => &mut kb.folder_up,
+            Self::FolderLeft => &mut kb.folder_left,
+            Self::FolderDown => &mut kb.folder_down,
+            Self::FolderRight => &mut kb.folder_right,
+            Self::Undo => &mut kb.undo,
+            Self::Redo => &mut kb.redo,
+            Self::OpenFolder => &mut kb.open_folder,
+            Self::OpenSelectedFolder => &mut kb.open_selected_folder,
+            Self::Pin => &mut kb.pin,
+            Self::PinSelected => &mut kb.pin_selected,
+            Self::Unpin => &mut kb.unpin,
+            Self::MovePinnedUp => &mut kb.move_pinned_up,
+            Self::MovePinnedDown => &mut kb.move_pinned_down,
+            Self::SearchImages => &mut kb.search_images,
+            Self::ToggleMetadataPanel => &mut kb.toggle_metadata_panel,
+            Self::RevealInFileManager => &mut kb.reveal_in_file_manager,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::settings::keybindings::{Key, KeyBinding};
@@ -381,5 +644,79 @@ mod tests {
         assert!(!kb.ctrl);
         assert!(!kb.shift);
         assert!(!kb.alt);
+    }
+
+    #[test]
+    fn test_key_action_count_and_order() {
+        use crate::settings::keybindings::KeyAction;
+
+        let actions: Vec<KeyAction> = KeyAction::iter().collect();
+        assert_eq!(actions.len(), 23);
+        assert_eq!(actions[0], KeyAction::MoveToFolder);
+        assert_eq!(actions[3], KeyAction::Rename);
+        assert_eq!(actions[22], KeyAction::RevealInFileManager);
+    }
+
+    #[test]
+    fn test_key_action_ids_unique_and_match_toml_fields() {
+        use std::collections::HashSet;
+
+        use crate::settings::keybindings::{KeyAction, KeyBindings};
+
+        let toml_val = toml::Value::try_from(KeyBindings::default()).unwrap();
+        let table = toml_val.as_table().unwrap();
+        let mut seen = HashSet::new();
+
+        for action in KeyAction::iter() {
+            let id = action.id();
+            assert!(!id.is_empty());
+            assert!(seen.insert(id), "duplicate KeyAction id: {id}");
+            assert!(
+                table.contains_key(id),
+                "KeyAction id {id} missing from KeyBindings TOML table"
+            );
+        }
+        assert_eq!(seen.len(), table.len());
+    }
+
+    #[test]
+    fn test_key_action_binding_roundtrip() {
+        use crate::settings::keybindings::{KeyAction, KeyBindings};
+
+        for (idx, action) in KeyAction::iter().enumerate() {
+            let mut kb = KeyBindings::default();
+            let marker = Key::F1;
+            {
+                let target = action.binding_mut(&mut kb);
+                target.key = marker;
+                target.ctrl = idx % 2 == 0;
+                target.shift = idx % 3 == 0;
+                target.alt = idx % 5 == 0;
+                target.meta = idx % 7 == 0;
+            }
+            let read_back = action.binding(&kb);
+            assert_eq!(read_back.key, marker);
+            assert_eq!(read_back.ctrl, idx % 2 == 0);
+            assert_eq!(read_back.shift, idx % 3 == 0);
+            assert_eq!(read_back.alt, idx % 5 == 0);
+            assert_eq!(read_back.meta, idx % 7 == 0);
+        }
+    }
+
+    #[test]
+    fn test_key_action_l10n_keys_non_empty() {
+        use crate::settings::keybindings::{KeyAction, KeyActionSection, KeyActionSubsection};
+
+        for section in KeyActionSection::iter() {
+            assert!(!section.l10n_key().is_empty());
+        }
+        for subsection in KeyActionSubsection::iter() {
+            assert!(!subsection.l10n_key().is_empty());
+        }
+        for action in KeyAction::iter() {
+            assert!(!action.l10n_key().is_empty());
+            assert!(!action.section().l10n_key().is_empty());
+            assert!(!action.subsection().l10n_key().is_empty());
+        }
     }
 }

@@ -1,10 +1,16 @@
+pub mod audio;
 pub mod drag_drop;
+pub mod file_ops;
 pub mod filesystem;
 pub mod folder;
+pub mod image;
 pub mod keyboard;
 pub mod media;
+pub mod metadata;
+pub mod preview;
+pub mod scroll;
 pub mod settings;
-pub mod tasks;
+pub mod thumbnails;
 pub mod video;
 
 #[cfg(test)]
@@ -35,6 +41,7 @@ pub fn update(state: &mut AppState, message: Message) -> Task<Message> {
         Message::Video(video_msg) => video::handle_video_message(state, video_msg),
         Message::Folder(folder_msg) => folder::handle_folder_message(state, folder_msg),
         Message::Media(media_msg) => media::handle_media_message(state, media_msg),
+        Message::Audio(audio_msg) => audio::handle_audio_message(state, audio_msg),
         Message::Settings(settings_msg) => settings::handle_settings_message(state, settings_msg),
         Message::DragDrop(drag_drop_msg) => {
             drag_drop::handle_drag_drop_message(state, drag_drop_msg)
@@ -66,7 +73,9 @@ pub fn update(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::OpenUrl(url) => {
             #[cfg(not(test))]
-            tasks::open_externally(std::path::Path::new(&url));
+            if let Err(e) = media_sort_backend::platform::open_url(&url) {
+                tracing::error!("Failed to open URL: {e}");
+            }
             #[cfg(test)]
             let _ = url;
             Task::none()
@@ -145,7 +154,7 @@ fn handle_tick(state: &mut AppState, instant: Instant) -> Task<Message> {
 
     if refresh_thumbnails {
         Task::batch(vec![
-            tasks::load_visible_thumbnails(state),
+            thumbnails::load_visible_thumbnails(state),
             bg_task,
             automation_task,
         ])
@@ -174,47 +183,13 @@ pub fn poll_background_channels(state: &mut AppState) -> Task<Message> {
     }
 
     let (new_entries, scan_finished) = if let Some(ref rx) = state.media_grid.scan_receiver {
-        let mut new_entries: Vec<media_sort_core::models::MediaEntry> = rx
-            .try_iter()
-            .map(|path| {
-                let media_type =
-                    crate::state::detect_media_type(&path, state.settings.general.animate_gifs);
-                let file_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                let animated = media_sort_backend::media::image_decoder::is_animated_gif(&path);
-                media_sort_core::models::MediaEntry {
-                    path,
-                    media_type,
-                    file_name,
-                    animated,
-                }
-            })
-            .collect();
+        let mut new_entries: Vec<media_sort_core::models::MediaEntry> = rx.try_iter().collect();
         // Drain any item that arrived between try_iter() and this loop; only
-        // treat Disconnected (not an Ok'd item) as "scan finished". Without
-        // this, a single item landing in the nanosecond window between
-        // try_iter() and a bare try_recv() would be consumed and silently
-        // dropped.
+        // treat Disconnected (not an Ok'd item) as "scan finished".
         let mut disconnected = false;
         loop {
             match rx.try_recv() {
-                Ok(path) => {
-                    let media_type =
-                        crate::state::detect_media_type(&path, state.settings.general.animate_gifs);
-                    let file_name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.display().to_string());
-                    let animated = media_sort_backend::media::image_decoder::is_animated_gif(&path);
-                    new_entries.push(media_sort_core::models::MediaEntry {
-                        path,
-                        media_type,
-                        file_name,
-                        animated,
-                    });
-                }
+                Ok(entry) => new_entries.push(entry),
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -227,7 +202,7 @@ pub fn poll_background_channels(state: &mut AppState) -> Task<Message> {
         (Vec::new(), false)
     };
     if state.media_grid.scan_replace {
-        // Watcher-driven refresh: buffer the drained paths; the entries
+        // Watcher-driven refresh: buffer the drained entries; the entries
         // list is swapped wholesale when the scan finishes.
         state.media_grid.scan_buffer.extend(new_entries);
     } else if !new_entries.is_empty() {
@@ -245,7 +220,7 @@ pub fn poll_background_channels(state: &mut AppState) -> Task<Message> {
             state.media_grid.rebuild_lower_names();
             state.cache.thumbnail_tracker.cancel_debounce();
             bg_tasks.extend(apply_refresh_selection(state));
-            bg_tasks.push(tasks::load_visible_thumbnails(state));
+            bg_tasks.push(thumbnails::load_visible_thumbnails(state));
         } else {
             state
                 .media_grid
@@ -267,8 +242,8 @@ pub fn poll_background_channels(state: &mut AppState) -> Task<Message> {
                 }
             }
             state.cache.thumbnail_tracker.cancel_debounce();
-            bg_tasks.push(tasks::load_visible_thumbnails(state));
-            bg_tasks.push(tasks::select_and_load_entry(state, select_idx));
+            bg_tasks.push(thumbnails::load_visible_thumbnails(state));
+            bg_tasks.push(preview::select_and_load_entry(state, select_idx));
         }
         // Watcher events arrived while the scan ran: the finished result
         // is already stale, start a replace-mode refresh immediately (it
@@ -302,7 +277,7 @@ fn apply_refresh_selection(state: &mut AppState) -> Vec<Task<Message>> {
         }
         None => {
             if let Some(fallback) = state.media_grid.selected_index {
-                tasks.push(tasks::select_and_load_entry(state, fallback));
+                tasks.push(preview::select_and_load_entry(state, fallback));
             }
         }
     }

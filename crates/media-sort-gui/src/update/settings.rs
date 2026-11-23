@@ -11,13 +11,13 @@ pub fn handle_settings_message(state: &mut AppState, msg: SettingsMessage) -> Ta
             state.settings.mark_dirty();
             Task::none()
         }
-        SettingsMessage::EditKeyBinding(index) => {
+        SettingsMessage::EditKeyBinding(action) => {
             if let SettingsUiState::Keybindings {
                 editing_keybinding,
                 waiting_for_key,
             } = &mut state.settings_ui
             {
-                *editing_keybinding = Some(index);
+                *editing_keybinding = Some(action);
                 *waiting_for_key = true;
             }
             Task::none()

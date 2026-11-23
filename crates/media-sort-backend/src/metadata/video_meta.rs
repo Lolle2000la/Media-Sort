@@ -1,37 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::image_meta::MetadataError;
+use crate::metadata::{MetadataError, build_file_section, merge_sections};
 
 pub fn extract_video_metadata(
     path: &Path,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, MetadataError> {
     let mut dirs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
-    // Validate that the file exists and is accessible
-    let meta = std::fs::metadata(path)?;
-
     // 1. Add basic file metadata
-    let mut file_sec: BTreeMap<String, String> = BTreeMap::new();
-    if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) {
-        file_sec.insert("Name".into(), name);
-    }
-    let bytes = meta.len();
-    let size_str = if bytes >= 1024 * 1024 {
-        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} KB", bytes as f64 / 1024.0)
-    };
-    file_sec.insert("Size".into(), size_str);
-
-    if let Ok(modified) = meta.modified() {
-        let datetime: chrono::DateTime<chrono::Local> = modified.into();
-        file_sec.insert(
-            "Modified".into(),
-            datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
-        );
-    }
-    dirs.insert("File".into(), file_sec);
+    dirs.insert("File".into(), build_file_section(path)?);
 
     // 2. Read specific video tags
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -42,13 +20,7 @@ pub fn extract_video_metadata(
     };
 
     if let Ok(tags) = specific_tags {
-        for (sec_name, sec_data) in tags {
-            if sec_name == "File" {
-                dirs.entry("File".into()).or_default().extend(sec_data);
-            } else {
-                dirs.insert(sec_name, sec_data);
-            }
-        }
+        merge_sections(&mut dirs, tags);
     }
 
     Ok(dirs)
@@ -100,6 +72,22 @@ fn extract_matroska_metadata(
     extract_generic_container_metadata(path)
 }
 
+fn collect_revision_tags(
+    revision: &symphonia::core::meta::MetadataRevision,
+    container_sec: &mut BTreeMap<String, String>,
+) {
+    for tag in &revision.media.tags {
+        let key = match &tag.std {
+            Some(std_key) => format!("{std_key:?}"),
+            None => tag.raw.key.clone(),
+        };
+        let val = tag.raw.value.to_string();
+        if !val.trim().is_empty() {
+            container_sec.insert(key, val);
+        }
+    }
+}
+
 pub fn extract_generic_container_metadata(
     path: &Path,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, MetadataError> {
@@ -126,34 +114,14 @@ pub fn extract_generic_container_metadata(
             let mut metadata = format.metadata();
             let mut container_sec = BTreeMap::new();
 
-            // Get all revisions
             while !metadata.is_latest() {
                 if let Some(revision) = metadata.pop() {
-                    for tag in &revision.media.tags {
-                        let key = match &tag.std {
-                            Some(std_key) => format!("{:?}", std_key),
-                            None => tag.raw.key.clone(),
-                        };
-                        let val = tag.raw.value.to_string();
-                        if !val.trim().is_empty() {
-                            container_sec.insert(key, val);
-                        }
-                    }
+                    collect_revision_tags(&revision, &mut container_sec);
                 }
             }
 
-            // Also check the current/latest revision
             if let Some(revision) = metadata.current() {
-                for tag in &revision.media.tags {
-                    let key = match &tag.std {
-                        Some(std_key) => format!("{:?}", std_key),
-                        None => tag.raw.key.clone(),
-                    };
-                    let val = tag.raw.value.to_string();
-                    if !val.trim().is_empty() {
-                        container_sec.insert(key, val);
-                    }
-                }
+                collect_revision_tags(revision, &mut container_sec);
             }
 
             if !container_sec.is_empty() {

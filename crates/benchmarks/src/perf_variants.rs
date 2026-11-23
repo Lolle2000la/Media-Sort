@@ -260,7 +260,7 @@ static EXT_MAP: OnceLock<HashMap<&'static str, MediaType>> = OnceLock::new();
 fn ext_map() -> &'static HashMap<&'static str, MediaType> {
     EXT_MAP.get_or_init(|| {
         let mut m = HashMap::new();
-        for ty in [MediaType::Image, MediaType::Video, MediaType::Audio] {
+        for ty in MediaType::iter() {
             for ext in ty.extensions() {
                 m.insert(*ext, ty);
             }
@@ -283,8 +283,7 @@ fn ascii_lowercase_stack<'b>(ext: &str, buf: &'b mut [u8; 32]) -> Option<&'b str
 pub fn detect_media_type_baseline(path: &Path, _animate_gifs: bool) -> MediaType {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let ext = ext.to_lowercase();
-    [MediaType::Image, MediaType::Video, MediaType::Audio]
-        .into_iter()
+    MediaType::iter()
         .find(|ty| ty.extensions().contains(&ext.as_str()))
         .unwrap_or(MediaType::Image)
 }

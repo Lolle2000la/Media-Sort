@@ -24,6 +24,9 @@ rayon.workspace = true
 turbojpeg = "1.5"
 resvg.workspace = true
 flate2.workspace = true
+open.workspace = true
+ico.workspace = true
+lru.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg.workspace = true

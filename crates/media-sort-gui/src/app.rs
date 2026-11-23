@@ -21,35 +21,150 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
     base_view
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeOption {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub theme: Option<iced::Theme>,
+}
+
+impl std::fmt::Display for ThemeOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+pub static THEME_OPTIONS: &[ThemeOption] = &[
+    ThemeOption {
+        key: "Auto",
+        name: "Auto",
+        theme: None,
+    },
+    ThemeOption {
+        key: "Light",
+        name: "Light",
+        theme: Some(iced::Theme::Light),
+    },
+    ThemeOption {
+        key: "Dark",
+        name: "Dark",
+        theme: Some(iced::Theme::Dark),
+    },
+    ThemeOption {
+        key: "Dracula",
+        name: "Dracula",
+        theme: Some(iced::Theme::Dracula),
+    },
+    ThemeOption {
+        key: "Nord",
+        name: "Nord",
+        theme: Some(iced::Theme::Nord),
+    },
+    ThemeOption {
+        key: "SolarizedLight",
+        name: "Solarized Light",
+        theme: Some(iced::Theme::SolarizedLight),
+    },
+    ThemeOption {
+        key: "SolarizedDark",
+        name: "Solarized Dark",
+        theme: Some(iced::Theme::SolarizedDark),
+    },
+    ThemeOption {
+        key: "GruvboxLight",
+        name: "Gruvbox Light",
+        theme: Some(iced::Theme::GruvboxLight),
+    },
+    ThemeOption {
+        key: "GruvboxDark",
+        name: "Gruvbox Dark",
+        theme: Some(iced::Theme::GruvboxDark),
+    },
+    ThemeOption {
+        key: "CatppuccinLatte",
+        name: "Catppuccin Latte",
+        theme: Some(iced::Theme::CatppuccinLatte),
+    },
+    ThemeOption {
+        key: "CatppuccinFrappe",
+        name: "Catppuccin Frappe",
+        theme: Some(iced::Theme::CatppuccinFrappe),
+    },
+    ThemeOption {
+        key: "CatppuccinMacchiato",
+        name: "Catppuccin Macchiato",
+        theme: Some(iced::Theme::CatppuccinMacchiato),
+    },
+    ThemeOption {
+        key: "CatppuccinMocha",
+        name: "Catppuccin Mocha",
+        theme: Some(iced::Theme::CatppuccinMocha),
+    },
+    ThemeOption {
+        key: "TokyoNight",
+        name: "Tokyo Night",
+        theme: Some(iced::Theme::TokyoNight),
+    },
+    ThemeOption {
+        key: "TokyoNightStorm",
+        name: "Tokyo Night Storm",
+        theme: Some(iced::Theme::TokyoNightStorm),
+    },
+    ThemeOption {
+        key: "TokyoNightLight",
+        name: "Tokyo Night Light",
+        theme: Some(iced::Theme::TokyoNightLight),
+    },
+    ThemeOption {
+        key: "KanagawaWave",
+        name: "Kanagawa Wave",
+        theme: Some(iced::Theme::KanagawaWave),
+    },
+    ThemeOption {
+        key: "KanagawaDragon",
+        name: "Kanagawa Dragon",
+        theme: Some(iced::Theme::KanagawaDragon),
+    },
+    ThemeOption {
+        key: "KanagawaLotus",
+        name: "Kanagawa Lotus",
+        theme: Some(iced::Theme::KanagawaLotus),
+    },
+    ThemeOption {
+        key: "Moonfly",
+        name: "Moonfly",
+        theme: Some(iced::Theme::Moonfly),
+    },
+    ThemeOption {
+        key: "Nightfly",
+        name: "Nightfly",
+        theme: Some(iced::Theme::Nightfly),
+    },
+    ThemeOption {
+        key: "Oxocarbon",
+        name: "Oxocarbon",
+        theme: Some(iced::Theme::Oxocarbon),
+    },
+    ThemeOption {
+        key: "Ferra",
+        name: "Ferra",
+        theme: Some(iced::Theme::Ferra),
+    },
+];
+
 pub fn theme(state: &AppState) -> iced::Theme {
-    match state.settings.general.theme.as_str() {
-        "Auto" => match state.system_theme {
+    if state.settings.general.theme == "Auto" {
+        return match state.system_theme {
             iced::theme::Mode::Dark => iced::Theme::Dark,
             iced::theme::Mode::Light | iced::theme::Mode::None => iced::Theme::Light,
-        },
-        "Dark" => iced::Theme::Dark,
-        "Dracula" => iced::Theme::Dracula,
-        "Nord" => iced::Theme::Nord,
-        "SolarizedLight" => iced::Theme::SolarizedLight,
-        "SolarizedDark" => iced::Theme::SolarizedDark,
-        "GruvboxLight" => iced::Theme::GruvboxLight,
-        "GruvboxDark" => iced::Theme::GruvboxDark,
-        "CatppuccinLatte" => iced::Theme::CatppuccinLatte,
-        "CatppuccinFrappe" => iced::Theme::CatppuccinFrappe,
-        "CatppuccinMacchiato" => iced::Theme::CatppuccinMacchiato,
-        "CatppuccinMocha" => iced::Theme::CatppuccinMocha,
-        "TokyoNight" => iced::Theme::TokyoNight,
-        "TokyoNightStorm" => iced::Theme::TokyoNightStorm,
-        "TokyoNightLight" => iced::Theme::TokyoNightLight,
-        "KanagawaWave" => iced::Theme::KanagawaWave,
-        "KanagawaDragon" => iced::Theme::KanagawaDragon,
-        "KanagawaLotus" => iced::Theme::KanagawaLotus,
-        "Moonfly" => iced::Theme::Moonfly,
-        "Nightfly" => iced::Theme::Nightfly,
-        "Oxocarbon" => iced::Theme::Oxocarbon,
-        "Ferra" => iced::Theme::Ferra,
-        _ => iced::Theme::Light,
+        };
     }
+
+    THEME_OPTIONS
+        .iter()
+        .find(|opt| opt.key == state.settings.general.theme)
+        .and_then(|opt| opt.theme.clone())
+        .unwrap_or(iced::Theme::Light)
 }
 
 pub fn subscription(state: &AppState) -> Subscription<Message> {

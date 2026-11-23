@@ -26,9 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use media_sort_backend::filesystem::scanner::scan_media_files;
+use media_sort_backend::filesystem::scanner::scan_media_entries;
 use media_sort_core::history::History;
-use media_sort_core::media_type::{MediaRegistry, MediaType};
 use media_sort_core::models::PinnedFolder;
 use media_sort_core::path_utils::paths_equal;
 use media_sort_core::settings::store::SettingsStore;
@@ -64,6 +63,7 @@ pub struct AppState {
     pub metadata: MetadataPanelState,
     pub settings_ui: SettingsUiState,
     pub drag_drop: DragDropState,
+    pub selected_file_size: Option<u64>,
 
     /// Transient user-facing status banner (text + monotonic expiry
     /// instant). Rendered by the main layout, cleared on the next tick
@@ -170,6 +170,7 @@ impl AppState {
             metadata,
             settings_ui: SettingsUiState::default(),
             drag_drop: DragDropState::new(),
+            selected_file_size: None,
             status_message: None,
             system_theme: iced::theme::Mode::None,
             watch_generation: AtomicU64::new(0),
@@ -193,6 +194,38 @@ impl AppState {
             text,
             expires_at: Instant::now() + Duration::from_secs(5),
         });
+    }
+
+    pub fn is_update_prompt_visible(&self) -> bool {
+        #[cfg(feature = "velopack")]
+        {
+            self.show_update_prompt
+        }
+        #[cfg(not(feature = "velopack"))]
+        {
+            false
+        }
+    }
+
+    /// Clear all active preview state (metadata, full image, file size,
+    /// video selection, and audio playback/cover) without altering audio
+    /// volume, mute, or the underlying player instance.
+    pub fn clear_active_preview(&mut self) {
+        self.metadata.current = None;
+        self.cache.selected_image = None;
+        self.selected_file_size = None;
+        self.video.select(None);
+        crate::update::audio::reset(self);
+    }
+
+    /// Persist the current UI pinned-folder list into `settings.pinned_folders.paths`.
+    pub fn sync_pinned_folders_to_settings(&mut self) {
+        self.settings.pinned_folders.paths = self
+            .folder
+            .pinned_folders
+            .iter()
+            .map(|p| p.path.display().to_string())
+            .collect();
     }
 
     pub fn open_folder(&mut self, path: &Path) {
@@ -223,33 +256,26 @@ impl AppState {
         // end. `GridScrolled` events keep it in sync afterwards, and
         // `viewport_window` clamps defensively either way.
         self.media_grid.scroll.offset_x = 0.0;
-        self.metadata.current = None;
         self.folder.selected_folder = None;
         self.folder.selected_folder_idx = None;
-        self.cache.selected_image = None;
         self.cache.image_cache.clear();
-        self.video.select(None);
         self.cache.media_errors.clear();
-        if let Some(ref player) = self.audio.player {
-            player.stop();
-        }
-        self.audio.playing = false;
-        self.audio.position = 0.0;
+        self.clear_active_preview();
 
         self.folder.tree_refresh_pending = false;
         self.start_async_folder_tree();
 
-        self.media_grid.scan_receiver = Some(scan_media_files(path));
+        self.media_grid.scan_receiver =
+            Some(scan_media_entries(path, self.settings.general.animate_gifs));
         self.media_grid.pending_select_index = Some(0);
     }
 
     /// Kick off an asynchronous media scan of `current_folder`. The GUI
     /// thread drops to an empty grid immediately; `poll_background_channels`
-    /// drains the receiver on subsequent `Tick`s, classifies each entry,
-    /// and finally calls `select_and_load_entry(state, select_idx)` once the
-    /// scan finishes. Used by `open_folder` and by Undo/Redo — routes what
-    /// used to be a blocking on-UI-thread rescan into the existing async
-    /// pipeline.
+    /// drains the receiver on subsequent `Tick`s and finally calls
+    /// `select_and_load_entry(state, select_idx)` once the scan finishes.
+    /// Used by `open_folder` and by Undo/Redo — routes what used to be a
+    /// blocking on-UI-thread rescan into the existing async pipeline.
     pub fn start_async_media_scan(&mut self, select_idx: usize) {
         let Some(folder) = self.folder.current_folder.clone() else {
             return;
@@ -263,11 +289,14 @@ impl AppState {
         self.media_grid.scan_buffer.clear();
         self.media_grid.pending_refresh = false;
         self.media_grid.refresh_select_path = None;
-        // Clear video state so a late FrameReady from the previously-selected
-        // video can't repopulate the video state during the rescan (the
-        // previously-selected path would otherwise match a stale mpv frame).
-        self.video.select(None);
-        self.media_grid.scan_receiver = Some(scan_media_files(&folder));
+        // Clear active preview (including video selection) so a late
+        // FrameReady or CoverLoaded from the previously-selected media can't
+        // repopulate preview state during the rescan.
+        self.clear_active_preview();
+        self.media_grid.scan_receiver = Some(scan_media_entries(
+            &folder,
+            self.settings.general.animate_gifs,
+        ));
         self.media_grid.pending_select_index = Some(select_idx);
     }
 
@@ -300,7 +329,10 @@ impl AppState {
         });
         self.media_grid.scan_replace = true;
         self.media_grid.scan_buffer.clear();
-        self.media_grid.scan_receiver = Some(scan_media_files(folder));
+        self.media_grid.scan_receiver = Some(scan_media_entries(
+            folder,
+            self.settings.general.animate_gifs,
+        ));
     }
 
     /// Watcher-driven folder tree rebuild. Coalesces like
@@ -446,12 +478,7 @@ impl AppState {
                 .any(|p| p.path == pinned.path)
             {
                 self.folder.pinned_folders.push(pinned);
-                self.settings.pinned_folders.paths = self
-                    .folder
-                    .pinned_folders
-                    .iter()
-                    .map(|p| p.path.display().to_string())
-                    .collect();
+                self.sync_pinned_folders_to_settings();
                 self.build_folder_tree();
             }
         }
@@ -459,12 +486,7 @@ impl AppState {
 
     pub fn unpin_folder(&mut self, path: &Path) {
         self.folder.pinned_folders.retain(|p| p.path != path);
-        self.settings.pinned_folders.paths = self
-            .folder
-            .pinned_folders
-            .iter()
-            .map(|p| p.path.display().to_string())
-            .collect();
+        self.sync_pinned_folders_to_settings();
         self.build_folder_tree();
     }
 
@@ -484,12 +506,7 @@ impl AppState {
             .any(|p| p.path == pinned.path)
         {
             self.folder.pinned_folders.push(pinned);
-            self.settings.pinned_folders.paths = self
-                .folder
-                .pinned_folders
-                .iter()
-                .map(|p| p.path.display().to_string())
-                .collect();
+            self.sync_pinned_folders_to_settings();
             self.build_folder_tree();
         }
     }
@@ -508,12 +525,7 @@ impl AppState {
                 self.folder.folder_tree.swap(pos + 1, pos);
             }
             self.folder.invalidate_visible_folders_cache();
-            self.settings.pinned_folders.paths = self
-                .folder
-                .pinned_folders
-                .iter()
-                .map(|p| p.path.display().to_string())
-                .collect();
+            self.sync_pinned_folders_to_settings();
             self.settings.mark_dirty();
         }
     }
@@ -532,12 +544,7 @@ impl AppState {
                 self.folder.folder_tree.swap(pos + 1, pos + 2);
             }
             self.folder.invalidate_visible_folders_cache();
-            self.settings.pinned_folders.paths = self
-                .folder
-                .pinned_folders
-                .iter()
-                .map(|p| p.path.display().to_string())
-                .collect();
+            self.sync_pinned_folders_to_settings();
             self.settings.mark_dirty();
         }
     }
@@ -548,12 +555,7 @@ impl AppState {
             self.folder.folder_tree.swap(pos_a + 1, pos_b + 1);
         }
         self.folder.invalidate_visible_folders_cache();
-        self.settings.pinned_folders.paths = self
-            .folder
-            .pinned_folders
-            .iter()
-            .map(|p| p.path.display().to_string())
-            .collect();
+        self.sync_pinned_folders_to_settings();
     }
 
     /// Re-derives the pinned-folder UI list from the settings store after
@@ -589,150 +591,118 @@ impl AppState {
     }
 }
 
-/// Detects the media type for a file path using a two-tier resolution:
-///
-/// 1. **Fast first pass** — checks the compile-time baseline extensions from
-///    [`MediaType::extensions`]. This covers all native formats plus the
-///    hardcoded video subset without touching the global registry.
-/// 2. **Registry fallback** — if the extension didn't match the baseline,
-///    queries [`MediaRegistry::determine_type`] which accounts for
-///    mpv-discovered formats that may not be in the hardcoded list.
-/// 3. **Default** — unknown extensions fall back to `MediaType::Image`.
-///
-/// After classification, GIF files get special handling: static GIFs and
-/// GIFs with animation disabled are reclassified as `Image`.
-pub(crate) fn detect_media_type(path: &std::path::Path, animate_gifs: bool) -> MediaType {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let media_type = [MediaType::Image, MediaType::Video, MediaType::Audio]
-        .into_iter()
-        .find(|ty| ty.extensions().contains(&ext.as_str()))
-        .or_else(|| MediaRegistry::determine_type(&ext))
-        .unwrap_or(MediaType::Image);
-    if media_type == MediaType::Video && ext == "gif" {
-        if media_sort_backend::media::image_decoder::is_animated_gif(path) == Some(false) {
-            return MediaType::Image;
-        }
-        if !animate_gifs {
-            return MediaType::Image;
-        }
-    }
-    media_type
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use media_sort_backend::filesystem::scanner::classify_media;
+    use media_sort_core::media_type::MediaType;
     use media_sort_core::models::{FolderNode, MediaEntry, PinnedFolder};
     use media_sort_core::settings::store::SettingsStore;
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn test_detect_media_type_image() {
+    fn test_classify_media_image() {
         assert_eq!(
-            detect_media_type(Path::new("test.jpg"), true),
+            classify_media(Path::new("test.jpg"), true).0,
             MediaType::Image
         );
         assert_eq!(
-            detect_media_type(Path::new("test.png"), true),
+            classify_media(Path::new("test.png"), true).0,
             MediaType::Image
         );
         assert_eq!(
-            detect_media_type(Path::new("test.jpeg"), true),
+            classify_media(Path::new("test.jpeg"), true).0,
             MediaType::Image
         );
         assert_eq!(
-            detect_media_type(Path::new("test.bmp"), true),
+            classify_media(Path::new("test.bmp"), true).0,
             MediaType::Image
         );
         assert_eq!(
-            detect_media_type(Path::new("vector.svg"), true),
+            classify_media(Path::new("vector.svg"), true).0,
             MediaType::Image
         );
         assert_eq!(
-            detect_media_type(Path::new("icon.SVGZ"), true),
-            MediaType::Image
-        );
-    }
-
-    #[test]
-    fn test_detect_media_type_video() {
-        assert_eq!(
-            detect_media_type(Path::new("test.mp4"), true),
-            MediaType::Video
-        );
-        assert_eq!(
-            detect_media_type(Path::new("test.mkv"), true),
-            MediaType::Video
-        );
-        assert_eq!(
-            detect_media_type(Path::new("test.webm"), true),
-            MediaType::Video
-        );
-        assert_eq!(
-            detect_media_type(Path::new("test.mov"), true),
-            MediaType::Video
-        );
-        assert_eq!(
-            detect_media_type(Path::new("test.gif"), true),
-            MediaType::Video
-        );
-    }
-
-    #[test]
-    fn test_detect_media_type_audio() {
-        assert_eq!(
-            detect_media_type(Path::new("test.mp3"), true),
-            MediaType::Audio
-        );
-        assert_eq!(
-            detect_media_type(Path::new("test.flac"), true),
-            MediaType::Audio
-        );
-        assert_eq!(
-            detect_media_type(Path::new("test.wav"), true),
-            MediaType::Audio
-        );
-        assert_eq!(
-            detect_media_type(Path::new("test.ogg"), true),
-            MediaType::Audio
-        );
-    }
-
-    #[test]
-    fn test_detect_media_type_unknown_fallback() {
-        assert_eq!(
-            detect_media_type(Path::new("test.xyz"), true),
-            MediaType::Image
-        );
-        assert_eq!(detect_media_type(Path::new("test"), true), MediaType::Image);
-        assert_eq!(
-            detect_media_type(Path::new("test.doc"), true),
+            classify_media(Path::new("icon.SVGZ"), true).0,
             MediaType::Image
         );
     }
 
     #[test]
-    fn test_detect_media_type_case_insensitive() {
+    fn test_classify_media_video() {
         assert_eq!(
-            detect_media_type(Path::new("test.JPG"), true),
-            MediaType::Image
+            classify_media(Path::new("test.mp4"), true).0,
+            MediaType::Video
         );
         assert_eq!(
-            detect_media_type(Path::new("test.MP3"), true),
-            MediaType::Audio
+            classify_media(Path::new("test.mkv"), true).0,
+            MediaType::Video
         );
         assert_eq!(
-            detect_media_type(Path::new("test.Mp4"), true),
+            classify_media(Path::new("test.webm"), true).0,
+            MediaType::Video
+        );
+        assert_eq!(
+            classify_media(Path::new("test.mov"), true).0,
+            MediaType::Video
+        );
+        assert_eq!(
+            classify_media(Path::new("test.gif"), true).0,
             MediaType::Video
         );
     }
 
     #[test]
-    fn test_detect_media_type_static_gif() {
+    fn test_classify_media_audio() {
+        assert_eq!(
+            classify_media(Path::new("test.mp3"), true).0,
+            MediaType::Audio
+        );
+        assert_eq!(
+            classify_media(Path::new("test.flac"), true).0,
+            MediaType::Audio
+        );
+        assert_eq!(
+            classify_media(Path::new("test.wav"), true).0,
+            MediaType::Audio
+        );
+        assert_eq!(
+            classify_media(Path::new("test.ogg"), true).0,
+            MediaType::Audio
+        );
+    }
+
+    #[test]
+    fn test_classify_media_unknown_fallback() {
+        assert_eq!(
+            classify_media(Path::new("test.xyz"), true).0,
+            MediaType::Image
+        );
+        assert_eq!(classify_media(Path::new("test"), true).0, MediaType::Image);
+        assert_eq!(
+            classify_media(Path::new("test.doc"), true).0,
+            MediaType::Image
+        );
+    }
+
+    #[test]
+    fn test_classify_media_case_insensitive() {
+        assert_eq!(
+            classify_media(Path::new("test.JPG"), true).0,
+            MediaType::Image
+        );
+        assert_eq!(
+            classify_media(Path::new("test.MP3"), true).0,
+            MediaType::Audio
+        );
+        assert_eq!(
+            classify_media(Path::new("test.Mp4"), true).0,
+            MediaType::Video
+        );
+    }
+
+    #[test]
+    fn test_classify_media_static_gif() {
         let dir = std::env::temp_dir().join("mediasort_test_static_gif");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("static.gif");
@@ -740,7 +710,7 @@ mod tests {
         let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
         img.save(&path).unwrap();
 
-        assert_eq!(detect_media_type(&path, true), MediaType::Image);
+        assert_eq!(classify_media(&path, true).0, MediaType::Image);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1302,19 +1272,16 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_media_type_animate_gifs_false() {
+    fn test_classify_media_animate_gifs_false() {
         assert_eq!(
-            detect_media_type(Path::new("test.gif"), false),
+            classify_media(Path::new("test.gif"), false).0,
             MediaType::Image
         );
     }
 
     #[test]
-    fn test_detect_media_type_empty_extension() {
-        assert_eq!(
-            detect_media_type(Path::new("test."), true),
-            MediaType::Image
-        );
+    fn test_classify_media_empty_extension() {
+        assert_eq!(classify_media(Path::new("test."), true).0, MediaType::Image);
     }
 
     #[test]

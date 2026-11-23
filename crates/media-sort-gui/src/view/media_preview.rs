@@ -94,9 +94,10 @@ pub fn media_preview_view(state: &AppState) -> Element<'_, Message> {
         }
     };
 
-    let file_size_str = std::fs::metadata(&entry.path)
-        .map(|m| format_file_size(m.len()))
-        .unwrap_or_else(|_| "???".to_string());
+    let file_size_str = state
+        .selected_file_size
+        .map(format_file_size)
+        .unwrap_or_else(|| "???".to_string());
 
     let file_info = row![
         container(

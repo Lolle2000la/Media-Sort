@@ -9,6 +9,7 @@ mod linux_desktop;
 mod message;
 mod state;
 mod subscriptions;
+mod thumbnails;
 mod update;
 mod view;
 mod widgets;

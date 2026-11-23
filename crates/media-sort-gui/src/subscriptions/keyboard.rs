@@ -1,7 +1,7 @@
 use iced::Subscription;
 use iced::keyboard::{self, Key as IcedKey};
 
-use media_sort_core::settings::keybindings::Key;
+use media_sort_core::settings::keybindings::{Key, KeyAction, KeyBinding, KeyBindings};
 
 use crate::message::Message;
 
@@ -82,90 +82,40 @@ pub(crate) fn key_to_enum(key: IcedKey) -> Option<Key> {
     }
 }
 
-pub fn keybinding_list(
-    state: &crate::state::AppState,
-) -> Vec<(String, media_sort_core::settings::keybindings::KeyBinding)> {
-    let kb = &state.settings.keybindings;
-    vec![
-        ("move_to_folder".into(), kb.move_to_folder.clone()),
-        ("copy_to_folder".into(), kb.copy_to_folder.clone()),
-        ("delete".into(), kb.delete.clone()),
-        ("rename".into(), kb.rename.clone()),
-        ("go_left".into(), kb.go_left.clone()),
-        ("go_right".into(), kb.go_right.clone()),
-        ("create_folder".into(), kb.create_folder.clone()),
-        ("folder_up".into(), kb.folder_up.clone()),
-        ("folder_left".into(), kb.folder_left.clone()),
-        ("folder_down".into(), kb.folder_down.clone()),
-        ("folder_right".into(), kb.folder_right.clone()),
-        ("undo".into(), kb.undo.clone()),
-        ("redo".into(), kb.redo.clone()),
-        ("open_folder".into(), kb.open_folder.clone()),
-        (
-            "open_selected_folder".into(),
-            kb.open_selected_folder.clone(),
-        ),
-        ("pin".into(), kb.pin.clone()),
-        ("pin_selected".into(), kb.pin_selected.clone()),
-        ("unpin".into(), kb.unpin.clone()),
-        ("move_pinned_up".into(), kb.move_pinned_up.clone()),
-        ("move_pinned_down".into(), kb.move_pinned_down.clone()),
-        ("search_images".into(), kb.search_images.clone()),
-        (
-            "toggle_metadata_panel".into(),
-            kb.toggle_metadata_panel.clone(),
-        ),
-        (
-            "reveal_in_file_manager".into(),
-            kb.reveal_in_file_manager.clone(),
-        ),
-    ]
+/// Match a captured keypress + modifier tuple against configured [`KeyBindings`]
+/// without allocating.
+pub fn find_matching_action(
+    kb: &KeyBindings,
+    key: Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) -> Option<KeyAction> {
+    KeyAction::iter().find(|action| {
+        let binding = action.binding(kb);
+        binding.key == key && binding.ctrl == ctrl && binding.shift == shift && binding.alt == alt
+    })
 }
 
-pub fn update_keybinding(
-    kb: &mut media_sort_core::settings::keybindings::KeyBindings,
-    name: &str,
+/// Update the keybinding for `action` in `kb`.
+pub fn set_keybinding(
+    kb: &mut KeyBindings,
+    action: KeyAction,
     key: Key,
     ctrl: bool,
     shift: bool,
     alt: bool,
 ) {
-    let binding = media_sort_core::settings::keybindings::KeyBinding {
+    *action.binding_mut(kb) = KeyBinding {
         key,
         ctrl,
         shift,
         alt,
         meta: false,
     };
-    match name {
-        "move_to_folder" => kb.move_to_folder = binding,
-        "copy_to_folder" => kb.copy_to_folder = binding,
-        "delete" => kb.delete = binding,
-        "rename" => kb.rename = binding,
-        "go_left" => kb.go_left = binding,
-        "go_right" => kb.go_right = binding,
-        "create_folder" => kb.create_folder = binding,
-        "folder_up" => kb.folder_up = binding,
-        "folder_left" => kb.folder_left = binding,
-        "folder_down" => kb.folder_down = binding,
-        "folder_right" => kb.folder_right = binding,
-        "undo" => kb.undo = binding,
-        "redo" => kb.redo = binding,
-        "open_folder" => kb.open_folder = binding,
-        "open_selected_folder" => kb.open_selected_folder = binding,
-        "pin" => kb.pin = binding,
-        "pin_selected" => kb.pin_selected = binding,
-        "unpin" => kb.unpin = binding,
-        "move_pinned_up" => kb.move_pinned_up = binding,
-        "move_pinned_down" => kb.move_pinned_down = binding,
-        "search_images" => kb.search_images = binding,
-        "toggle_metadata_panel" => kb.toggle_metadata_panel = binding,
-        "reveal_in_file_manager" => kb.reveal_in_file_manager = binding,
-        _ => {}
-    }
 }
 
-pub fn format_keybinding(binding: &media_sort_core::settings::keybindings::KeyBinding) -> String {
+pub fn format_keybinding(binding: &KeyBinding) -> String {
     let mut parts: Vec<String> = Vec::new();
     if binding.ctrl {
         parts.push("Ctrl".into());
@@ -276,9 +226,16 @@ mod tests {
     }
 
     #[test]
-    fn test_update_keybinding_known_name() {
+    fn test_set_keybinding_updates_action() {
         let mut kb = KeyBindings::default();
-        update_keybinding(&mut kb, "undo", Key::Character('Z'), true, false, false);
+        set_keybinding(
+            &mut kb,
+            KeyAction::Undo,
+            Key::Character('Z'),
+            true,
+            false,
+            false,
+        );
         assert_eq!(kb.undo.key, Key::Character('Z'));
         assert!(kb.undo.ctrl);
         assert!(!kb.undo.shift);
@@ -286,48 +243,37 @@ mod tests {
     }
 
     #[test]
-    fn test_update_keybinding_unknown_name() {
-        let mut kb = KeyBindings::default();
-        let saved = kb.redo.key;
-        update_keybinding(
-            &mut kb,
-            "nonexistent_action",
-            Key::Character('X'),
-            false,
-            false,
-            false,
+    fn test_find_matching_action_matches_defaults() {
+        let kb = KeyBindings::default();
+        assert_eq!(
+            find_matching_action(&kb, Key::Character('Q'), false, false, false),
+            Some(KeyAction::Undo)
         );
-        assert_eq!(kb.redo.key, saved);
+        assert_eq!(
+            find_matching_action(&kb, Key::Character('L'), false, false, false),
+            Some(KeyAction::RevealInFileManager)
+        );
+        assert_eq!(
+            find_matching_action(&kb, Key::ArrowUp, false, true, false),
+            Some(KeyAction::CopyToFolder)
+        );
+        assert_eq!(
+            find_matching_action(&kb, Key::F9, false, false, false),
+            None
+        );
     }
 
     #[test]
-    fn test_keybinding_list_length() {
-        use crate::state::AppState;
-        use media_sort_core::settings::store::SettingsStore;
-
-        let state = AppState::new(SettingsStore::default());
-        let list = keybinding_list(&state);
-        assert!(list.len() > 20);
-        let names: Vec<&str> = list.iter().map(|(name, _)| name.as_str()).collect();
-        assert!(names.contains(&"undo"));
-        assert!(names.contains(&"redo"));
-        assert!(names.contains(&"delete"));
-    }
-
-    #[test]
-    fn test_keybinding_list_has_known_actions() {
-        use crate::state::AppState;
-        use media_sort_core::settings::store::SettingsStore;
-
-        let state = AppState::new(SettingsStore::default());
-        let list = keybinding_list(&state);
-        let names: Vec<&str> = list.iter().map(|(name, _)| name.as_str()).collect();
-        assert!(names.contains(&"undo"));
-        assert!(names.contains(&"redo"));
-        assert!(names.contains(&"delete"));
-        assert!(names.contains(&"rename"));
-        assert!(names.contains(&"move_to_folder"));
-        assert!(names.contains(&"reveal_in_file_manager"));
+    fn test_key_action_covers_all_expected_actions() {
+        let actions: Vec<KeyAction> = KeyAction::iter().collect();
+        assert_eq!(actions.len(), 23);
+        let ids: Vec<&str> = actions.iter().map(|a| a.id()).collect();
+        assert!(ids.contains(&"undo"));
+        assert!(ids.contains(&"redo"));
+        assert!(ids.contains(&"delete"));
+        assert!(ids.contains(&"rename"));
+        assert!(ids.contains(&"move_to_folder"));
+        assert!(ids.contains(&"reveal_in_file_manager"));
     }
 
     #[test]

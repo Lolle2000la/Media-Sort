@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use strum::EnumIter;
+use strum::{EnumIter, IntoEnumIterator};
 
 fn native_image_extensions() -> &'static [&'static str] {
     static EXTS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -68,9 +68,13 @@ impl MediaType {
         }
     }
 
+    /// Iterates over all [`MediaType`] variants in declaration order.
+    pub fn iter() -> MediaTypeIter {
+        <Self as IntoEnumIterator>::iter()
+    }
+
     pub fn all_extensions() -> Vec<&'static str> {
-        [Self::Image, Self::Video, Self::Audio]
-            .iter()
+        Self::iter()
             .flat_map(|ty| ty.extensions().iter().copied())
             .collect()
     }
