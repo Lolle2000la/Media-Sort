@@ -87,9 +87,10 @@
 #
 #   * the Flatpak manifest (flatpak/app.mediasort.MediaSort.yml), which pins the
 #     same projects separately. It is a separate Flathub submission built
-#     against a different runtime, so bumping both from one query would ship a
-#     combination neither was tested with; bump it by hand and let
-#     .github/workflows/flatpak-build.yml judge it.
+#     against a different runtime, with a different module set and tag+commit
+#     pins instead of archives, so it has its own bumper:
+#     scripts/bump-flatpak.py, run by .github/workflows/flatpak-bump.yml. The
+#     two are separate PRs on purpose, so each is judged by its own build.
 #   * the Rust dependencies, the Windows libmpv/ffmpeg bundle and the snap --
 #     Renovate and their workflows own those.
 #   * the container base image (`ubuntu:22.04`): that is the payload's glibc

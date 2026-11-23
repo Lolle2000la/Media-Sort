@@ -1,0 +1,296 @@
+name: Flatpak Dependency Bump
+
+# Weekly proposal of upstream bumps for the Flatpak manifest's dependency
+# modules (mpv, libass, libplacebo, zimg, wayland-protocols, libXpresent in
+# flatpak/app.mediasort.MediaSort.yml).
+#
+# The manifest pins each upstream as a `type: git` source with a tag *and* the
+# commit it resolves to (Flathub's linter rejects a tag-only source), which
+# Renovate cannot maintain: it can find a new tag but not prove which commit it
+# points at. `scripts/bump-flatpak.py` does that, and this workflow runs it on a
+# schedule:
+#
+#   1. `check` queries every upstream and reports whether any pin is behind,
+#      honouring the same 14-day soak as the AppImage bump and the repository's
+#      Renovate policy (AGENTS.md "Dependency updates (Renovate)").
+#   2. `bump` re-runs it with `--apply`, commits the rewritten manifest on
+#      `chore/flatpak-bump`, runs the same Flatpak build as
+#      .github/workflows/flatpak-build.yml (the shared
+#      .github/actions/flatpak-gate composite), and then creates -- or
+#      force-updates -- the draft pull request. "Create, or replace if the last
+#      one is still open": an open PR with that head branch is updated in place
+#      instead of a second PR being opened.
+#
+# Scope, deliberately: only the dependency modules move. The `media-sort` git
+# source (tag + commit of this repository) and the `cargo-vendor.tar.gz` archive
+# are release-owned -- they move when a release is cut, and Flathub's external
+# data checker keeps them in step -- and the Freedesktop runtime version is a
+# human decision. The AppImage has its own bumper (`.github/workflows/
+# appimage-bump.yml`) because it is a different runtime and a different pin set;
+# the two are intentionally separate PRs so each is gated by its own build.
+#
+# The job fails if the Gate step fails, even though the PR is still opened or
+# updated (with the failure recorded in its body), so the scheduled run shows
+# red. A dispatch from a branch runs the apply and the gate (the real pre-merge
+# validation) but never the commit/push/PR steps.
+#
+# TOKEN CAVEAT: a branch pushed with the workflow's own GITHUB_TOKEN does not
+# trigger other workflows, so the PR's own CI would never run. That is only
+# about the PR's *checks*: the in-job Flatpak gate is authoritative. Set a
+# `FLATPAK_BUMP_TOKEN` secret (or reuse `APPIMAGE_BUMP_TOKEN`) -- a fine-grained
+# PAT with `Contents: read/write` and `Pull requests: read/write` on this
+# repository -- to make the push/PR run as a real user and let the normal
+# workflows fire.
+on:
+  schedule:
+    # Mondays 06:20 UTC, after the AppImage bump starts.
+    - cron: '20 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      min_age_days:
+        description: 'Soak period in days before an upstream release is eligible (0 disables it)'
+        required: false
+        default: '14'
+      dry_run:
+        description: 'Only report; never push a branch or open a pull request'
+        type: boolean
+        default: false
+
+# Permissions are scoped per job: `check` only reads, and only `bump` may write.
+concurrency:
+  group: flatpak-bump
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check upstream pins
+    # Forks must never open PRs against themselves.
+    if: github.repository == 'Lolle2000la/Media-Sort'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.probe.outputs.changed }}
+    env:
+      # The script reads GITHUB_TOKEN/GH_TOKEN for its GitHub API calls.
+      GH_TOKEN: ${{ secrets.FLATPAK_BUMP_TOKEN || secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A dispatch from a branch validates *that* branch's scripts; the
+          # schedule (and any dispatch from master) runs master.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'master' }}
+          token: ${{ secrets.FLATPAK_BUMP_TOKEN || secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+
+      - name: Query upstream pins
+        id: probe
+        env:
+          MIN_AGE_DAYS: ${{ github.event.inputs.min_age_days }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          MIN_AGE_DAYS="${MIN_AGE_DAYS:-14}"
+
+          # A manual dry run also shows the full report table; the scheduled run
+          # only needs the delta lines.
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "--- report (min-age ${MIN_AGE_DAYS}d) ---"
+            python3 scripts/bump-flatpak.py --min-age-days "$MIN_AGE_DAYS"
+          fi
+
+          # --check exits 2 when at least one pin is behind, 0 when not, and 1
+          # when an upstream could not be queried at all.
+          set +e
+          OUTPUT=$(python3 scripts/bump-flatpak.py --check --min-age-days "$MIN_AGE_DAYS" 2>&1)
+          STATUS=$?
+          set -e
+
+          printf '%s\n' "$OUTPUT"
+          {
+            echo "### Flatpak upstream pins"
+            echo
+            echo "Soak period: ${MIN_AGE_DAYS} days."
+            echo
+            echo '```'
+            printf '%s\n' "$OUTPUT"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          case "$STATUS" in
+            2) echo "changed=1" >>"$GITHUB_OUTPUT" ;;
+            0) echo "changed=0" >>"$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::scripts/bump-flatpak.py --check failed with exit $STATUS"
+              exit "$STATUS"
+              ;;
+          esac
+
+  bump:
+    name: Open or update the bump PR
+    needs: check
+    # Same fork guard as `check`: this is the job that writes.
+    if: >-
+      github.repository == 'Lolle2000la/Media-Sort' &&
+      needs.check.outputs.changed == '1' &&
+      github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    # Only this job writes (a branch push and a PR).
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.FLATPAK_BUMP_TOKEN || secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+      BRANCH: chore/flatpak-bump
+      TITLE: 'chore(flatpak): bump bundled upstream versions'
+      MIN_AGE_DAYS: ${{ github.event.inputs.min_age_days }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A dispatch from a branch applies that branch's script (the gate
+          # still runs; the push/PR steps are skipped because the ref is not
+          # master). The schedule runs master.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'master' }}
+          # The bump branch is force-updated, which needs the full history.
+          fetch-depth: 0
+          token: ${{ secrets.FLATPAK_BUMP_TOKEN || secrets.APPIMAGE_BUMP_TOKEN || github.token }}
+
+      # The lease for the force-push is taken HERE, at job start, and passed to
+      # the push as an explicit expected value, so a maintainer commit made to
+      # the bump branch while this job runs fails the push instead of being
+      # silently discarded (the same rule as appimage-bump.yml).
+      - name: Record the bump branch's current tip (the push lease)
+        id: lease
+        run: |
+          set -euo pipefail
+          TIP=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
+          echo "tip=$TIP" >>"$GITHUB_OUTPUT"
+          echo "bump branch tip at job start: ${TIP:-<does not exist yet>}"
+
+      - name: Apply the bumps
+        id: apply
+        run: |
+          set -euo pipefail
+          MIN_AGE_DAYS="${MIN_AGE_DAYS:-14}"
+          MANIFEST=flatpak/app.mediasort.MediaSort.yml
+          # 2>&1: the script logs "nothing to apply" / "updated N module(s)" on
+          # stderr, and the no-op decision below reads them.
+          python3 scripts/bump-flatpak.py --apply --min-age-days "$MIN_AGE_DAYS" 2>&1 | tee apply.log
+
+          if git diff --quiet -- "$MANIFEST"; then
+            # `check` and `bump` are separate jobs and master moves between
+            # them: if a bump PR was merged (or the newest release aged past
+            # the soak) in between, --apply legitimately has nothing left to
+            # write. That is a green no-op, not a failed run.
+            if grep -q 'nothing to apply' apply.log; then
+              echo "::notice::nothing to apply -- every pin is already current, so there is no branch or PR to update"
+              echo "changed=0" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::--apply reported updates but changed the manifest"
+            exit 1
+          fi
+
+          # The gate needs the runtime branch the manifest targets. It is a
+          # human-bumped choice, not something this workflow moves.
+          RUNTIME_VERSION=$(sed -n "s/^runtime-version: '\(.*\)'$/\1/p" "$MANIFEST")
+          if [ -z "$RUNTIME_VERSION" ]; then
+            echo "::error::could not read runtime-version from $MANIFEST"
+            exit 1
+          fi
+
+          echo "changed=1" >>"$GITHUB_OUTPUT"
+          echo "runtime_version=$RUNTIME_VERSION" >>"$GITHUB_OUTPUT"
+          git diff -- "$MANIFEST"
+
+      # Everything that writes is skipped unless this runs from master, so a
+      # dispatch on a PR branch is a real (writable-nothing) pre-merge check.
+      - name: Commit and push the bump branch
+        if: steps.apply.outputs.changed == '1' && github.ref_name == 'master'
+        env:
+          LEASE: ${{ steps.lease.outputs.tip }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$BRANCH"
+          # Only the manifest: the apply writes nothing else, and a stray file
+          # must not ride along into the PR.
+          git add flatpak/app.mediasort.MediaSort.yml
+          git commit -m "$TITLE"
+
+          if [ -n "$LEASE" ]; then
+            git push --force-with-lease="refs/heads/$BRANCH:$LEASE" origin "$BRANCH"
+          else
+            # No bump branch existed at job start: a plain, non-force push. It
+            # creates the branch, and still refuses to overwrite one that
+            # appeared in the meantime.
+            git push origin "$BRANCH"
+          fi
+
+      # The authoritative verification when no PAT is configured, and a second
+      # opinion even when there is one: the same flatpak-builder build Flathub
+      # runs, with the bumped manifest. Runs on a branch dispatch too -- that is
+      # what makes a dispatch a real pre-merge validation.
+      - name: Gate (build the Flatpak)
+        id: gate
+        if: steps.apply.outputs.changed == '1'
+        continue-on-error: true
+        uses: ./.github/actions/flatpak-gate
+        with:
+          runtime-version: ${{ steps.apply.outputs.runtime_version }}
+          save-cache: 'false'
+
+      - name: Open or update the pull request
+        if: steps.apply.outputs.changed == '1' && github.ref_name == 'master'
+        env:
+          GATE: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GATE" = "success" ]; then
+            GATE_LINE="**Flatpak gate: passed.** The manifest built with \`flatpak-builder\` on the runtime it targets (the same \`.github/actions/flatpak-gate\` composite \`.github/workflows/flatpak-build.yml\` runs)."
+          else
+            GATE_LINE="**Flatpak gate: FAILED.** This pin combination does not build in this runtime (see the *Gate (build the Flatpak)* step of [this run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})). Do not merge it; pin the previous release of the offending module in \`flatpak/app.mediasort.MediaSort.yml\` instead."
+          fi
+
+          {
+            echo '## Flatpak upstream bump'
+            echo
+            echo 'Every dependency module in `flatpak/app.mediasort.MediaSort.yml` was re-checked against its upstream by `scripts/bump-flatpak.py`. Each git source keeps its tag *and* the commit that tag resolves to, because Flathub rejects a tag-only source; the commit is resolved with `git ls-remote`, never copied from a branch head.'
+            echo
+            printf '```\n'
+            cat apply.log
+            printf '```\n'
+            echo
+            echo "$GATE_LINE"
+            echo
+            echo '---'
+            echo
+            echo '### Before merging'
+            echo
+            echo '- [ ] The gate above is green.'
+            echo '- [ ] Nothing here needs a *deliberate* pin instead of "newest": an upstream major that breaks mpv would show up as a red gate, and the fix is to pin the previous release of that module by hand.'
+            echo
+            echo '### Scope'
+            echo
+            echo 'Only the dependency modules move. The `media-sort` source (tag + commit) and the `cargo-vendor.tar.gz` archive are release-owned and are updated when a release is cut; the Freedesktop runtime version stays a human choice. The AppImage has its own bumper and its own PR, because the two payloads are built against different runtimes.'
+            echo
+            echo '> Automated by `.github/workflows/flatpak-bump.yml`. Without a `FLATPAK_BUMP_TOKEN` (or `APPIMAGE_BUMP_TOKEN`) secret this branch was pushed with the workflow token, so no other workflow ran on it: the gate above is then the only verification.'
+          } >pr-body.md
+
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "updating open PR #$EXISTING"
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file pr-body.md
+          else
+            echo "no open PR for $BRANCH; opening a draft"
+            gh pr create --draft --base master --head "$BRANCH" --title "$TITLE" --body-file pr-body.md
+          fi
+
+      - name: Fail when the gate failed
+        if: steps.apply.outputs.changed == '1' && steps.gate.outcome != 'success'
+        run: |
+          echo "::error::the Flatpak gate failed for this bump; the PR records the failure, and this run is red on purpose"
+          exit 1
