@@ -168,6 +168,8 @@ fn get_keybinding(
         20 => &kb.search_images,
         21 => &kb.toggle_metadata_panel,
         22 => &kb.reveal_in_file_manager,
+        23 => &kb.previous_page,
+        24 => &kb.next_page,
         _ => panic!("Invalid keybinding index: {}", idx),
     }
 }
@@ -541,6 +543,15 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                 ],
             );
 
+            // Documents Section
+            let documents_section = keybinding_section(
+                state.l10n.tr("keybindings-documents-section"),
+                vec![
+                    keybinding_row(state, 23, state.l10n.tr("keybindings-previous-page")),
+                    keybinding_row(state, 24, state.l10n.tr("keybindings-next-page")),
+                ],
+            );
+
             // Other Section
             let other_history = keybinding_subsection(
                 state.l10n.tr("keybindings-history"),
@@ -552,8 +563,14 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
             let other_section =
                 keybinding_section(state.l10n.tr("keybindings-other"), vec![other_history]);
 
-            let bindings_column =
-                column![restore_btn, images_section, folders_section, other_section,].spacing(16);
+            let bindings_column = column![
+                restore_btn,
+                images_section,
+                folders_section,
+                documents_section,
+                other_section,
+            ]
+            .spacing(16);
 
             scrollable(bindings_column).height(Length::Fill).into()
         }

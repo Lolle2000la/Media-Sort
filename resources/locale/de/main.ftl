@@ -46,6 +46,7 @@ keybindings-press-key = Taste drücken...
 keybindings-images = Medien
 keybindings-folders = Ordner
 keybindings-other = Sonstiges
+keybindings-documents-section = Dokumente
 keybindings-management = Verwaltung
 keybindings-selection = Auswahl
 keybindings-search = Suche
@@ -76,6 +77,8 @@ keybindings-select-below = Ordner darunter auswählen
 keybindings-expand = Ordner aufklappen (Unterordner anzeigen)
 keybindings-undo = Rückgängig
 keybindings-redo = Wiederherstellen
+keybindings-previous-page = Vorherige Seite / Tabelle
+keybindings-next-page = Nächste Seite / Tabelle
 
 # Other UI
 ui-folder = Ordner

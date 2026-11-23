@@ -119,6 +119,8 @@ pub fn keybinding_list(
             "reveal_in_file_manager".into(),
             kb.reveal_in_file_manager.clone(),
         ),
+        ("previous_page".into(), kb.previous_page.clone()),
+        ("next_page".into(), kb.next_page.clone()),
     ]
 }
 
@@ -161,6 +163,8 @@ pub fn update_keybinding(
         "search_images" => kb.search_images = binding,
         "toggle_metadata_panel" => kb.toggle_metadata_panel = binding,
         "reveal_in_file_manager" => kb.reveal_in_file_manager = binding,
+        "previous_page" => kb.previous_page = binding,
+        "next_page" => kb.next_page = binding,
         _ => {}
     }
 }
@@ -307,7 +311,7 @@ mod tests {
 
         let state = AppState::new(SettingsStore::default());
         let list = keybinding_list(&state);
-        assert!(list.len() > 20);
+        assert_eq!(list.len(), 25);
         let names: Vec<&str> = list.iter().map(|(name, _)| name.as_str()).collect();
         assert!(names.contains(&"undo"));
         assert!(names.contains(&"redo"));
@@ -328,6 +332,8 @@ mod tests {
         assert!(names.contains(&"rename"));
         assert!(names.contains(&"move_to_folder"));
         assert!(names.contains(&"reveal_in_file_manager"));
+        assert!(names.contains(&"previous_page"));
+        assert!(names.contains(&"next_page"));
     }
 
     #[test]

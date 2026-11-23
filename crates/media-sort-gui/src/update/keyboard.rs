@@ -270,13 +270,29 @@ pub fn handle_key_captured(
                 "search_images" => {
                     return Task::done(Message::Media(MediaMessage::SearchFocused));
                 }
+                "previous_page" => {
+                    if can_navigate_document(state) {
+                        return super::media::handle_media_message(
+                            state,
+                            MediaMessage::DocumentPrevPage,
+                        );
+                    } else {
+                        continue;
+                    }
+                }
+                "next_page" => {
+                    if can_navigate_document(state) {
+                        return super::media::handle_media_message(
+                            state,
+                            MediaMessage::DocumentNextPage,
+                        );
+                    } else {
+                        continue;
+                    }
+                }
                 _ => {}
             }
         }
-    }
-
-    if let Some(doc_msg) = document_nav_message(state, key, ctrl, shift, alt) {
-        return Task::done(Message::Media(doc_msg));
     }
 
     match key {
@@ -288,23 +304,6 @@ pub fn handle_key_captured(
     }
 
     Task::none()
-}
-
-pub(crate) fn document_nav_message(
-    state: &AppState,
-    key: Key,
-    ctrl: bool,
-    shift: bool,
-    alt: bool,
-) -> Option<MediaMessage> {
-    if ctrl || shift || alt || !can_navigate_document(state) {
-        return None;
-    }
-    match key {
-        Key::PageUp => Some(MediaMessage::DocumentPrevPage),
-        Key::PageDown => Some(MediaMessage::DocumentNextPage),
-        _ => None,
-    }
 }
 
 fn can_navigate_document(state: &AppState) -> bool {

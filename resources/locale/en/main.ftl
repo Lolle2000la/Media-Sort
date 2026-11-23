@@ -46,6 +46,7 @@ keybindings-press-key = Press a key...
 keybindings-images = Media
 keybindings-folders = Folders
 keybindings-other = Other
+keybindings-documents-section = Documents
 keybindings-management = Management
 keybindings-selection = Selection
 keybindings-search = Search
@@ -76,6 +77,8 @@ keybindings-select-below = Select the folder below
 keybindings-expand = Expand folder (list sub-folders)
 keybindings-undo = Undo
 keybindings-redo = Redo
+keybindings-previous-page = Previous page / sheet
+keybindings-next-page = Next page / sheet
 
 # Other UI
 ui-folder = Folder

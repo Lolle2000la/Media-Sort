@@ -46,6 +46,7 @@ keybindings-press-key = キーを押してください...
 keybindings-images = メディア
 keybindings-folders = フォルダ
 keybindings-other = その他
+keybindings-documents-section = ドキュメント
 keybindings-management = 管理
 keybindings-selection = 選択
 keybindings-search = 検索
@@ -76,6 +77,8 @@ keybindings-select-below = 下のフォルダを選択
 keybindings-expand = フォルダを展開（サブフォルダを表示）
 keybindings-undo = 元に戻す
 keybindings-redo = やり直し
+keybindings-previous-page = 前のページ / シート
+keybindings-next-page = 次のページ / シート
 
 # Other UI
 ui-folder = フォルダ

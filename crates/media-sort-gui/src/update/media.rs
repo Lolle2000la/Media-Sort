@@ -606,24 +606,38 @@ fn actual_page_from_preview(
     }
 }
 
+fn step_index(current: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        (current + 1).min(len - 1)
+    } else {
+        current.saturating_sub(1)
+    }
+}
+
 fn navigate_document_page(state: &mut AppState, forward: bool) -> Task<Message> {
     use crate::state::document::DocumentPreviewData;
 
-    if let Some(DocumentPreviewData::Slides {
-        slides,
-        slide_index,
-    }) = &mut state.document.data
-    {
-        if slides.is_empty() {
+    match &mut state.document.data {
+        Some(DocumentPreviewData::Slides {
+            slides,
+            slide_index,
+        }) => {
+            if !slides.is_empty() {
+                *slide_index = step_index(*slide_index, slides.len(), forward);
+                state.document.page_index = *slide_index;
+            }
             return Task::none();
         }
-        *slide_index = if forward {
-            (*slide_index + 1).min(slides.len() - 1)
-        } else {
-            slide_index.saturating_sub(1)
-        };
-        state.document.page_index = *slide_index;
-        return Task::none();
+        Some(DocumentPreviewData::Spreadsheet {
+            sheets,
+            active_sheet,
+        }) => {
+            if !sheets.is_empty() {
+                *active_sheet = step_index(*active_sheet, sheets.len(), forward);
+            }
+            return Task::none();
+        }
+        _ => {}
     }
 
     let Some(path) = state.document.current_path.clone() else {
@@ -640,11 +654,7 @@ fn navigate_document_page(state: &mut AppState, forward: bool) -> Task<Message> 
     if total == 0 {
         return Task::none();
     }
-    let new_page = if forward {
-        (state.document.page_index + 1).min(total - 1)
-    } else {
-        state.document.page_index.saturating_sub(1)
-    };
+    let new_page = step_index(state.document.page_index, total, forward);
     if new_page == state.document.page_index {
         return Task::none();
     }

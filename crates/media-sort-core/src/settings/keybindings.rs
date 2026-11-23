@@ -206,10 +206,22 @@ pub struct KeyBindings {
     pub toggle_metadata_panel: KeyBinding,
     #[serde(default = "default_reveal_in_file_manager_binding")]
     pub reveal_in_file_manager: KeyBinding,
+    #[serde(default = "default_previous_page_binding")]
+    pub previous_page: KeyBinding,
+    #[serde(default = "default_next_page_binding")]
+    pub next_page: KeyBinding,
 }
 
 fn default_reveal_in_file_manager_binding() -> KeyBinding {
     KeyBinding::new(Key::Character('L'))
+}
+
+fn default_previous_page_binding() -> KeyBinding {
+    KeyBinding::new(Key::PageUp)
+}
+
+fn default_next_page_binding() -> KeyBinding {
+    KeyBinding::new(Key::PageDown)
 }
 
 impl Default for KeyBindings {
@@ -237,7 +249,9 @@ impl Default for KeyBindings {
             move_pinned_down: KeyBinding::new(Key::Character('S')).with_ctrl(),
             search_images: KeyBinding::new(Key::Character('I')),
             toggle_metadata_panel: KeyBinding::new(Key::Character('M')),
-            reveal_in_file_manager: KeyBinding::new(Key::Character('L')),
+            reveal_in_file_manager: default_reveal_in_file_manager_binding(),
+            previous_page: default_previous_page_binding(),
+            next_page: default_next_page_binding(),
         }
     }
 }
@@ -381,5 +395,44 @@ mod tests {
         assert!(!kb.ctrl);
         assert!(!kb.shift);
         assert!(!kb.alt);
+    }
+
+    #[test]
+    fn test_keybindings_page_navigation_defaults() {
+        let kbs = crate::settings::keybindings::KeyBindings::default();
+        assert_eq!(kbs.previous_page.key, Key::PageUp);
+        assert!(!kbs.previous_page.ctrl);
+        assert!(!kbs.previous_page.shift);
+        assert!(!kbs.previous_page.alt);
+        assert!(!kbs.previous_page.meta);
+
+        assert_eq!(kbs.next_page.key, Key::PageDown);
+        assert!(!kbs.next_page.ctrl);
+        assert!(!kbs.next_page.shift);
+        assert!(!kbs.next_page.alt);
+        assert!(!kbs.next_page.meta);
+    }
+
+    #[test]
+    fn test_keybindings_omitted_page_navigation_uses_defaults() {
+        let mut value =
+            serde_json::to_value(crate::settings::keybindings::KeyBindings::default()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("previous_page");
+        obj.remove("next_page");
+
+        let deserialized: crate::settings::keybindings::KeyBindings =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(deserialized.previous_page.key, Key::PageUp);
+        assert!(!deserialized.previous_page.ctrl);
+        assert!(!deserialized.previous_page.shift);
+        assert!(!deserialized.previous_page.alt);
+        assert!(!deserialized.previous_page.meta);
+
+        assert_eq!(deserialized.next_page.key, Key::PageDown);
+        assert!(!deserialized.next_page.ctrl);
+        assert!(!deserialized.next_page.shift);
+        assert!(!deserialized.next_page.alt);
+        assert!(!deserialized.next_page.meta);
     }
 }

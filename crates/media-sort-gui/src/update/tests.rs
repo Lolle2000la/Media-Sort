@@ -1824,14 +1824,16 @@ fn test_document_link_url_validation() {
     );
 }
 
-#[test]
-fn test_keyboard_page_up_down_document_navigation() {
-    use crate::update::keyboard::document_nav_message;
+fn setup_document_nav_state() -> AppState {
+    use crate::state::document::DocumentPreviewData;
+    use media_sort_backend::media::DecodedImage;
+    use media_sort_backend::media::document::DocumentPreview;
 
     let mut state = AppState::new(SettingsStore::default());
+    let doc_path = PathBuf::from("/test/a.pdf");
     state.media_grid.entries = vec![
         MediaEntry {
-            path: PathBuf::from("/test/a.pdf"),
+            path: doc_path.clone(),
             media_type: MediaType::Document,
             file_name: "a.pdf".into(),
             animated: None,
@@ -1843,27 +1845,171 @@ fn test_keyboard_page_up_down_document_navigation() {
             animated: None,
         },
     ];
+    state.media_grid.rebuild_lower_names();
     state.media_grid.selected_index = Some(0);
 
+    let page0 = DocumentPreviewData::from_backend(&DocumentPreview::PagedImage {
+        image: DecodedImage::new(2, 2, vec![10; 16]),
+        page_index: 0,
+        total_pages: 3,
+    });
+    let page1 = DocumentPreviewData::from_backend(&DocumentPreview::PagedImage {
+        image: DecodedImage::new(2, 2, vec![20; 16]),
+        page_index: 1,
+        total_pages: 3,
+    });
+    state
+        .cache
+        .document_cache
+        .push((doc_path.clone(), 0), page0.clone());
+    state
+        .cache
+        .document_cache
+        .push((doc_path.clone(), 1), page1);
+    state.document.current_path = Some(doc_path);
+    state.document.page_index = 0;
+    state.document.data = Some(page0);
+    state
+}
+
+#[test]
+fn test_keyboard_page_up_down_document_navigation() {
+    let mut state = setup_document_nav_state();
+
+    // Default PageDown / PageUp navigate document pages when a document is selected.
+    let _ = handle_key_captured(&mut state, Key::PageDown, false, false, false);
+    assert_eq!(state.document.page_index, 1);
+    let _ = handle_key_captured(&mut state, Key::PageUp, false, false, false);
+    assert_eq!(state.document.page_index, 0);
+
+    // Ignored with modifiers, search focus, open modals/dialogs, or non-document selection.
+    let _ = handle_key_captured(&mut state, Key::PageDown, true, false, false);
+    assert_eq!(state.document.page_index, 0);
+
+    state.media_grid.search.focused = true;
+    let _ = handle_key_captured(&mut state, Key::PageDown, false, false, false);
+    assert_eq!(state.document.page_index, 0);
+    state.media_grid.search.focused = false;
+
+    state.settings_ui = SettingsUiState::Settings;
+    let _ = handle_key_captured(&mut state, Key::PageDown, false, false, false);
+    assert_eq!(state.document.page_index, 0);
+    state.settings_ui = SettingsUiState::Hidden;
+
+    state.show_credits = true;
+    let _ = handle_key_captured(&mut state, Key::PageDown, false, false, false);
+    assert_eq!(state.document.page_index, 0);
+    state.show_credits = false;
+
+    state.media_grid.selected_index = Some(1);
+    let _ = handle_key_captured(&mut state, Key::PageDown, false, false, false);
+    assert_eq!(state.document.page_index, 0);
+}
+
+#[test]
+fn test_keyboard_custom_document_navigation_keybindings() {
+    use media_sort_core::settings::keybindings::KeyBinding;
+
+    let mut state = setup_document_nav_state();
+    state.settings.keybindings.previous_page = KeyBinding::new(Key::Character('['));
+    state.settings.keybindings.next_page = KeyBinding::new(Key::Character(']'));
+
+    // Old default keys no longer navigate once remapped.
+    let _ = handle_key_captured(&mut state, Key::PageDown, false, false, false);
+    assert_eq!(state.document.page_index, 0);
+
+    // Custom keys navigate forward and back.
+    let _ = handle_key_captured(&mut state, Key::Character(']'), false, false, false);
+    assert_eq!(state.document.page_index, 1);
+    let _ = handle_key_captured(&mut state, Key::Character('['), false, false, false);
+    assert_eq!(state.document.page_index, 0);
+
+    // Guard still prevents document navigation on non-document entries.
+    state.media_grid.selected_index = Some(1);
+    let _ = handle_key_captured(&mut state, Key::Character(']'), false, false, false);
+    assert_eq!(state.document.page_index, 0);
+}
+
+#[test]
+fn test_document_spreadsheet_sheet_navigation() {
+    use crate::state::document::DocumentPreviewData;
+    use media_sort_backend::media::document::SheetData;
+
+    let make_sheet = |name: &str| SheetData {
+        name: name.into(),
+        headers: vec![],
+        rows: vec![],
+        total_rows: 0,
+        total_cols: 0,
+        truncated: false,
+    };
+
+    let mut state = AppState::new(SettingsStore::default());
+    state.document.data = Some(DocumentPreviewData::Spreadsheet {
+        sheets: vec![make_sheet("S1"), make_sheet("S2"), make_sheet("S3")],
+        active_sheet: 0,
+    });
+
+    // Clamps at 0 when stepping backward from the first sheet.
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentPrevPage));
     assert!(matches!(
-        document_nav_message(&state, Key::PageDown, false, false, false),
-        Some(MediaMessage::DocumentNextPage)
-    ));
-    assert!(matches!(
-        document_nav_message(&state, Key::PageUp, false, false, false),
-        Some(MediaMessage::DocumentPrevPage)
+        state.document.data,
+        Some(DocumentPreviewData::Spreadsheet {
+            active_sheet: 0,
+            ..
+        })
     ));
 
-    // Ignored with modifiers, search focus, open dialog, or non-document selection
-    assert!(document_nav_message(&state, Key::PageDown, true, false, false).is_none());
-    state.media_grid.search.focused = true;
-    assert!(document_nav_message(&state, Key::PageDown, false, false, false).is_none());
-    state.media_grid.search.focused = false;
-    state.settings_ui = SettingsUiState::Settings;
-    assert!(document_nav_message(&state, Key::PageDown, false, false, false).is_none());
-    state.settings_ui = SettingsUiState::Hidden;
-    state.media_grid.selected_index = Some(1);
-    assert!(document_nav_message(&state, Key::PageDown, false, false, false).is_none());
+    // Steps forward through sheets and clamps at sheets.len() - 1.
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::Spreadsheet {
+            active_sheet: 1,
+            ..
+        })
+    ));
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::Spreadsheet {
+            active_sheet: 2,
+            ..
+        })
+    ));
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::Spreadsheet {
+            active_sheet: 2,
+            ..
+        })
+    ));
+
+    // Steps backward again.
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentPrevPage));
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::Spreadsheet {
+            active_sheet: 1,
+            ..
+        })
+    ));
+
+    // Empty sheet list is a safe no-op.
+    state.document.data = Some(DocumentPreviewData::Spreadsheet {
+        sheets: vec![],
+        active_sheet: 0,
+    });
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentNextPage));
+    let _ = update(&mut state, Message::Media(MediaMessage::DocumentPrevPage));
+    assert!(matches!(
+        state.document.data,
+        Some(DocumentPreviewData::Spreadsheet {
+            active_sheet: 0,
+            ..
+        })
+    ));
 }
 
 #[test]
