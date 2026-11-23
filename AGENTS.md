@@ -252,6 +252,7 @@ Note: `app::update()` (`crates/media-sort-gui/src/app.rs:10`) delegates to the `
 | `filesystem/watcher.rs` | `notify`-based OS watcher: `watch_directories()` watches any set of directories non-recursively, classifies events into `Added`/`Removed`/`Modified`/`Renamed` (drops `Access` noise) and debounces bursts through a private 100 ms debounce thread — `notify-debouncer-mini` was rejected because it reduces every event to `(path, Any)` and would destroy the kind information the GUI routing relies on. Each debounced burst is delivered as ONE channel message (a 500-file copy = 1 message), and consumers treat a batch as "something changed, re-scan", never as a complete diff. **Rename classification:** backends that pair both sides (inotify) emit one event with two paths → `Renamed(from, to)`; Windows delivers the two sides as separate single-path `Name(From)`/`Name(To)` events and macOS (kqueue — the workspace pins the `macos_kqueue` notify feature) emits `Name(Any)` with the old path only, so a single-path side is classified by existence — the side that still exists is `Added` (destination), the vanished side is `Removed` (source). The existence check runs at flush time (100 ms+ after the event; create-then-delete windows can misclassify — fine for a refresh heuristic). |
 | `media/format_pipeline.rs` | Per-format thumbnail/preview dispatch (private, shared by thumbnail.rs + image_decoder.rs) |
 | `media/image_decoder.rs` | Full-resolution image loading via `image` crate; `load_preview()` (capped preview decode) |
+| `media/svg.rs` | Pure-Rust `SVG`/`SVGZ` dimension reading and rasterization via `resvg` (bounded SVGZ decompression via `flate2`; blocks external/local file `<image>` refs) |
 | `media/audio_decoder.rs` | `AudioPlayer` using `rodio` output + `symphonia` decoding. With the `pulse` feature, `audio_decoder/pulse.rs` writes to PulseAudio directly instead of a cpal device (the Flatpak enables it; see the Flatpak section) |
 | `media/thumbnail.rs` | Thumbnail generation (dispatches into format_pipeline) |
 | `metadata/image_meta.rs` | EXIF extraction via `kamadak-exif` |
@@ -544,6 +545,7 @@ The benchmarks crate builds the same vendored static libjpeg-turbo as the backen
 | `wgpu` + `winit` + `ash` + `raw-window-handle` | Vulkan interop for video frames |
 | `symphonia` (all codecs) + `rodio` | Audio decoding and output |
 | `kamadak-exif` + `id3` + `metaflac` + `mp4ameta` | Metadata extraction |
+| `resvg` + `flate2` | Pure-Rust `SVG`/`SVGZ` rendering (blocks external/local file `<image>` refs; bounded SVGZ decompression via `flate2`) |
 | `notify` | Filesystem watcher |
 | `walkdir` | Media file scanning |
 | `trash` | Cross-platform delete-to-trash |

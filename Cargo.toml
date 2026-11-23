@@ -75,6 +75,8 @@ rfd = "0.18"
 ico = "0.6"
 fast_image_resize = { version = "6.0", features = ["image", "rayon"] }
 rayon = "1.12"
+resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+flate2 = "1"
 
 [profile.release]
 opt-level = 3
