@@ -3,7 +3,7 @@ use std::path::Path;
 
 use media_sort_core::media_type::DocumentKind;
 
-use crate::media::document::text;
+use crate::media::document::{pdf, text};
 use crate::metadata::{MetadataError, build_file_section, merge_sections};
 
 /// Extracts `"File"` and `"Document"` metadata sections for the metadata inspector.
@@ -18,6 +18,7 @@ pub fn extract_document_metadata(
 
     let kind = DocumentKind::from_path(path);
     let kind_label = match kind {
+        Some(DocumentKind::Pdf) => "PDF",
         Some(DocumentKind::Markdown) => "Markdown",
         Some(DocumentKind::PlainText) => "Text",
         None => "Document",
@@ -27,6 +28,7 @@ pub fn extract_document_metadata(
     doc_sec.insert("Kind".into(), kind_label.into());
 
     let specific = match kind {
+        Some(DocumentKind::Pdf) => pdf::extract_pdf_metadata(path),
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) => {
             text::extract_text_metadata(path)
         }

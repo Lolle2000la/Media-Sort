@@ -349,6 +349,7 @@ fn document_icon(path: &std::path::Path) -> lucide_icons::Icon {
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     match DocumentKind::from_path(path) {
+        Some(DocumentKind::Pdf) => lucide_icons::Icon::FileText,
         Some(DocumentKind::Markdown) => lucide_icons::Icon::FileCode,
         Some(DocumentKind::PlainText) => {
             if matches!(ext.as_str(), "csv" | "tsv") {

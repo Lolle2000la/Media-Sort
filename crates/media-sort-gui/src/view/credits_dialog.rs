@@ -122,6 +122,7 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
             "https://github.com/cykooz/fast_image_resize",
         ),
         ("Fluent", "https://github.com/projectfluent/fluent-rs"),
+        ("hayro", "https://github.com/LaurenzV/hayro"),
         ("ico", "https://github.com/mdsteele/rust-ico"),
         ("Iced", "https://github.com/iced-rs/iced"),
         ("iced_wgpu", "https://github.com/iced-rs/iced"),

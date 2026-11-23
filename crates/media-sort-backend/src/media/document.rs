@@ -4,8 +4,11 @@ use media_sort_core::media_type::DocumentKind;
 
 use super::DecodedImage;
 
+pub mod pdf;
 pub mod text;
 
+/// Hard upper bound on reading a full PDF document into memory.
+pub(crate) const MAX_PDF_FILE_BYTES: u64 = 128 * 1024 * 1024;
 /// Hard upper bound on plain-text / Markdown / CSV preview reads.
 pub(crate) const MAX_TEXT_PREVIEW_BYTES: u64 = 256 * 1024;
 /// Maximum lines rendered for plain text previews before truncation indicator.
@@ -14,6 +17,9 @@ pub(crate) const MAX_TEXT_PREVIEW_LINES: usize = 2_000;
 pub(crate) const MAX_SHEET_ROWS: usize = 500;
 /// Maximum columns extracted per spreadsheet or CSV/TSV table preview.
 pub(crate) const MAX_SHEET_COLS: usize = 64;
+/// Target preview bounding box for paged bitmap documents (PDF, comics, soffice pages).
+pub const PREVIEW_TARGET_WIDTH: u32 = 1200;
+pub const PREVIEW_TARGET_HEIGHT: u32 = 1600;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocumentError {
@@ -81,21 +87,24 @@ pub enum DocumentPreview {
 
 /// Generates a bounded thumbnail for `path` with explicit converter options.
 ///
-/// Returns `Ok(None)` cleanly when no thumbnail is available (e.g. plain text or Markdown).
+/// Returns `Ok(None)` cleanly when no thumbnail is available (e.g. plain text, Markdown, or
+/// encrypted PDFs).
 pub fn generate_document_thumbnail_with_options(
     path: &Path,
-    _max_width: u32,
-    _max_height: u32,
+    max_width: u32,
+    max_height: u32,
     _enable_libreoffice: bool,
 ) -> Result<Option<DecodedImage>, DocumentError> {
     match DocumentKind::from_path(path) {
+        Some(DocumentKind::Pdf) => pdf::render_pdf_thumbnail(path, max_width, max_height),
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) | None => Ok(None),
     }
 }
 
 /// Generates a bounded thumbnail for `path` using default converter options.
 ///
-/// Returns `Ok(None)` cleanly when no thumbnail is available (e.g. plain text or Markdown).
+/// Returns `Ok(None)` cleanly when no thumbnail is available (e.g. plain text, Markdown, or
+/// encrypted PDFs).
 pub fn generate_document_thumbnail(
     path: &Path,
     max_width: u32,
@@ -107,10 +116,11 @@ pub fn generate_document_thumbnail(
 /// Loads the interactive preview payload for a document at `page_index`.
 pub fn load_document_preview(
     path: &Path,
-    _page_index: usize,
+    page_index: usize,
     _enable_libreoffice: bool,
 ) -> Result<DocumentPreview, DocumentError> {
     match DocumentKind::from_path(path) {
+        Some(DocumentKind::Pdf) => pdf::load_pdf_preview(path, page_index),
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) => {
             text::load_text_preview(path)
         }
