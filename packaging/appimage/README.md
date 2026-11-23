@@ -194,9 +194,10 @@ mpv (`-Dlibmpv=true -Dcplayer=false -Dgl=disabled -Degl=disabled
 * `-Dx11=enabled -Dwayland=enabled -Dvaapi=enabled -Dvaapi-x11=enabled
   -Dvaapi-wayland=enabled` (with `-Dvaapi-drm=disabled`): mpv gates VA-API
   behind a display backend, so both are enabled to get hardware decoding on X11
-  and Wayland sessions alike. That is why `wayland-protocols` is built (mpv
-  needs >= 1.31, jammy ships 1.25) and `libXpresent`/`libXss` headers are
-  installed.
+  and Wayland sessions alike. That is why `wayland` is built (mpv needs
+  wayland-client and its `wayland-scanner` >= 1.23, jammy ships 1.20) and
+  `wayland-protocols` too (mpv needs >= 1.38, jammy ships 1.25), and why
+  `libXpresent`/`libXss` headers are installed.
 * `-Dzimg=enabled`: the software renderer converts every frame with zimg when
   it is present and with swscale when it is not. At 4K that is ~7 ms vs ~66 ms
   per frame (30 fps vs ~6.6 fps with hardware decoding).
@@ -212,8 +213,8 @@ mpv (`-Dlibmpv=true -Dcplayer=false -Dgl=disabled -Degl=disabled
   autotools configure is the one exception and gets
   `--libdir="$PREFIX/lib"`, since it has no multiarch notion here.
 
-**libplacebo cannot be skipped.** mpv 0.41.0's `meson.build` asks for it
-unconditionally (`dependency('libplacebo', version: '>=6.338.2')`, no
+**libplacebo cannot be skipped.** mpv 0.42.0's `meson.build` asks for it
+unconditionally (`dependency('libplacebo', version: '>= 7.387.0')`, no
 `required:` and no `-Dlibplacebo` switch), so it is built with
 `-Dvulkan=disabled -Dopengl=disabled -Dd3d11=disabled -Dshaderc=disabled
 -Dglslang=disabled` – link-only, no GPU stack. libplacebo needs meson >= 0.63
