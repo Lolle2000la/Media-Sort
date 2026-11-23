@@ -819,3 +819,216 @@ fn test_markdown_plain_text_nul_binary_and_metadata() {
         Some("Binary")
     );
 }
+
+#[test]
+fn test_epub_cover_chapters_metadata_and_path_traversal() {
+    let dir = TempDir::new("epub");
+    let epub_path = dir.path().join("book.epub");
+    let cover_png = solid_png_bytes(130, 50, 210);
+
+    let container_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+
+    let content_opf = br#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">urn:uuid:12345</dc:identifier>
+    <dc:title>EPUB Test Book</dc:title>
+    <dc:creator>Ada Lovelace</dc:creator>
+    <dc:publisher>Test Press</dc:publisher>
+    <dc:language>en</dc:language>
+    <meta name="cover" content="cover-img"/>
+  </metadata>
+  <manifest>
+    <item id="cover-img" href="images/cover.png" media-type="image/png" properties="cover-image"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+  </spine>
+</package>"#;
+
+    let ch1_xhtml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Chapter One</title></head>
+  <body>
+    <h1>Chapter One</h1>
+    <p>First <strong>bold</strong> chapter body.</p>
+  </body>
+</html>"#;
+
+    let ch2_xhtml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Chapter Two</title></head>
+  <body>
+    <h1>Chapter Two</h1>
+    <p>Second chapter body.</p>
+  </body>
+</html>"#;
+
+    write_zip_entries(
+        &epub_path,
+        &[
+            (
+                "mimetype",
+                b"application/epub+zip",
+                CompressionMethod::Stored,
+            ),
+            (
+                "META-INF/container.xml",
+                container_xml,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "OEBPS/content.opf",
+                content_opf,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "OEBPS/images/cover.png",
+                &cover_png,
+                CompressionMethod::Deflated,
+            ),
+            ("OEBPS/ch1.xhtml", ch1_xhtml, CompressionMethod::Deflated),
+            ("OEBPS/ch2.xhtml", ch2_xhtml, CompressionMethod::Deflated),
+        ],
+    );
+
+    let thumb = generate_document_thumbnail(&epub_path, 128, 128)
+        .expect("epub thumbnail result")
+        .expect("epub cover thumbnail");
+    assert_solid_color_close(&thumb, [130, 50, 210]);
+
+    let ch0 = load_document_preview(&epub_path, 0, false).expect("epub chapter 0 preview");
+    match ch0 {
+        DocumentPreview::Markdown {
+            markdown,
+            chapter_index,
+            total_chapters,
+            cover,
+        } => {
+            assert_eq!(chapter_index, Some(0));
+            assert_eq!(total_chapters, Some(2));
+            assert!(markdown.contains("# Chapter One"));
+            assert!(markdown.contains("First **bold** chapter body."));
+            let cover_img = cover.expect("chapter 0 should include cover image");
+            assert_solid_color_close(&cover_img, [130, 50, 210]);
+        }
+        other => panic!("expected Markdown for epub chapter 0, got {other:?}"),
+    }
+
+    let ch1 = load_document_preview(&epub_path, 1, false).expect("epub chapter 1 preview");
+    match ch1 {
+        DocumentPreview::Markdown {
+            markdown,
+            chapter_index,
+            total_chapters,
+            cover,
+        } => {
+            assert_eq!(chapter_index, Some(1));
+            assert_eq!(total_chapters, Some(2));
+            assert!(markdown.contains("# Chapter Two"));
+            assert!(markdown.contains("Second chapter body."));
+            assert!(cover.is_none(), "chapter 1 should not include cover");
+        }
+        other => panic!("expected Markdown for epub chapter 1, got {other:?}"),
+    }
+
+    let meta = extract_document_metadata(&epub_path).expect("epub metadata");
+    let doc = &meta["Document"];
+    assert_eq!(doc.get("Kind").map(String::as_str), Some("EPUB"));
+    assert_eq!(doc.get("Title").map(String::as_str), Some("EPUB Test Book"));
+    assert_eq!(doc.get("Author").map(String::as_str), Some("Ada Lovelace"));
+    assert_eq!(doc.get("Chapters").map(String::as_str), Some("2"));
+    assert_eq!(doc.get("Publisher").map(String::as_str), Some("Test Press"));
+    assert_eq!(doc.get("Language").map(String::as_str), Some("en"));
+
+    // Path traversal rejection: root OPF referencing `../escape.xhtml`
+    let root_traversal_epub = dir.path().join("traversal_root.epub");
+    let root_container = br#"<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+    let traversal_opf = br#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="escape" href="../escape.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="escape"/></spine>
+</package>"#;
+    write_zip_entries(
+        &root_traversal_epub,
+        &[
+            (
+                "META-INF/container.xml",
+                root_container,
+                CompressionMethod::Deflated,
+            ),
+            ("content.opf", traversal_opf, CompressionMethod::Deflated),
+            (
+                "../escape.xhtml",
+                b"<html><body>escaped</body></html>",
+                CompressionMethod::Deflated,
+            ),
+        ],
+    );
+
+    let traversal_preview =
+        load_document_preview(&root_traversal_epub, 0, false).expect("traversal preview result");
+    assert!(
+        matches!(
+            traversal_preview,
+            DocumentPreview::Unavailable {
+                reason: DocumentUnavailableReason::UnsupportedOrCorrupt(_)
+            }
+        ),
+        "expected UnsupportedOrCorrupt for ../escape.xhtml traversal, got {traversal_preview:?}"
+    );
+    let traversal_meta =
+        extract_document_metadata(&root_traversal_epub).expect("traversal metadata");
+    assert_eq!(
+        traversal_meta["Document"]
+            .get("Chapters")
+            .map(String::as_str),
+        Some("0")
+    );
+
+    // Path traversal rejection in container.xml full-path
+    let container_traversal_epub = dir.path().join("traversal_container.epub");
+    let evil_container = br#"<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="../escape.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#;
+    write_zip_entries(
+        &container_traversal_epub,
+        &[
+            (
+                "META-INF/container.xml",
+                evil_container,
+                CompressionMethod::Deflated,
+            ),
+            ("../escape.opf", traversal_opf, CompressionMethod::Deflated),
+        ],
+    );
+    let container_preview = load_document_preview(&container_traversal_epub, 0, false)
+        .expect("container traversal preview result");
+    assert!(
+        matches!(
+            container_preview,
+            DocumentPreview::Unavailable {
+                reason: DocumentUnavailableReason::UnsupportedOrCorrupt(_)
+            }
+        ),
+        "expected UnsupportedOrCorrupt for container traversal, got {container_preview:?}"
+    );
+}

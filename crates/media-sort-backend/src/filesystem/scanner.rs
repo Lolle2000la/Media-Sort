@@ -148,6 +148,7 @@ mod tests {
             "COMIC.CB7",
             "comic.cbt",
             "comic.cbr",
+            "book.epub",
             "readme.md",
             "guide.MARKDOWN",
             "notes.txt",
