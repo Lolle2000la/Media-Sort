@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod document;
 pub mod drag_drop;
 pub mod file_ops;
 pub mod filesystem;
@@ -39,6 +40,7 @@ pub fn update(state: &mut AppState, message: Message) -> Task<Message> {
     match message {
         Message::Tick(instant) => handle_tick(state, instant),
         Message::Video(video_msg) => video::handle_video_message(state, video_msg),
+        Message::Document(doc_msg) => document::handle_document_message(state, doc_msg),
         Message::Folder(folder_msg) => folder::handle_folder_message(state, folder_msg),
         Message::Media(media_msg) => media::handle_media_message(state, media_msg),
         Message::Audio(audio_msg) => audio::handle_audio_message(state, audio_msg),

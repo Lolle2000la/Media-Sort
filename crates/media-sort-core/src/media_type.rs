@@ -29,6 +29,8 @@ pub static NATIVE_AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "ogg", "wav", "aac", "m4a", "wma", "opus", "aiff",
 ];
 
+pub static NATIVE_DOCUMENT_EXTS: &[&str] = &["md", "markdown", "txt", "csv", "tsv"];
+
 pub static SYSTEM_REGISTRY: OnceLock<MediaRegistry> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
@@ -36,13 +38,39 @@ pub enum MediaType {
     Image,
     Video,
     Audio,
+    Document,
+}
+
+/// High-level document family used for UI icons, metadata labels, and preview dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DocumentKind {
+    Markdown,
+    PlainText,
+}
+
+impl DocumentKind {
+    /// Classifies a lowercase or mixed-case file extension (without leading dot).
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "md" | "markdown" => Some(Self::Markdown),
+            "txt" | "csv" | "tsv" => Some(Self::PlainText),
+            _ => None,
+        }
+    }
+
+    /// Classifies a filesystem path by its extension.
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .and_then(Self::from_extension)
+    }
 }
 
 impl MediaType {
     /// Returns the **compile-time baseline** extensions for this media type.
     ///
-    /// For images and audio, this is the definitive list — those formats are
-    /// handled natively and do not depend on any external runtime.
+    /// For images, audio, and documents, this is the definitive list — those
+    /// formats do not depend on any external video runtime.
     ///
     /// For video, the returned list is a **hardcoded fallback subset**. The
     /// actual set of playable video formats depends on the libmpv build
@@ -65,6 +93,7 @@ impl MediaType {
                 "mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "gif",
             ],
             MediaType::Audio => NATIVE_AUDIO_EXTS,
+            MediaType::Document => NATIVE_DOCUMENT_EXTS,
         }
     }
 
@@ -87,13 +116,14 @@ pub struct MediaRegistry {
 
 impl MediaRegistry {
     /// Initializes the global registry with the set of extensions discovered in the
-    /// underlying `libmpv` build. Native image and audio formats are always included
-    /// first so the native stack wins any overlap. Subsequent calls are ignored — the
-    /// registry can only be set once per process.
+    /// underlying `libmpv` build. Native image, audio, and document formats are always
+    /// included first so the native stack wins any overlap. Subsequent calls are ignored —
+    /// the registry can only be set once per process.
     pub fn init(mpv_discovered: HashSet<String>) {
         let mut allowed: HashSet<String> = native_image_extensions()
             .iter()
             .chain(NATIVE_AUDIO_EXTS.iter())
+            .chain(NATIVE_DOCUMENT_EXTS.iter())
             .map(|ext| (*ext).to_string())
             .collect();
 
@@ -117,6 +147,7 @@ impl MediaRegistry {
         let mut set: HashSet<String> = native_image_extensions()
             .iter()
             .chain(NATIVE_AUDIO_EXTS.iter())
+            .chain(NATIVE_DOCUMENT_EXTS.iter())
             .map(|ext| (*ext).to_string())
             .collect();
         set.extend(
@@ -132,8 +163,9 @@ impl MediaRegistry {
     /// order:
     /// 1. Native image formats
     /// 2. Native audio formats
-    /// 3. Anything supported by the discovered `libmpv` build is treated as `Video`
-    /// 4. Returns `None` when the extension does not match any known handler.
+    /// 3. Native document formats
+    /// 4. Anything supported by the discovered `libmpv` build is treated as `Video`
+    /// 5. Returns `None` when the extension does not match any known handler.
     ///
     /// This is the **authoritative** type check — it accounts for the full
     /// set of formats that mpv reported at startup, which may be broader than
@@ -148,6 +180,9 @@ impl MediaRegistry {
         }
         if NATIVE_AUDIO_EXTS.contains(&ext_lower.as_str()) {
             return Some(MediaType::Audio);
+        }
+        if NATIVE_DOCUMENT_EXTS.contains(&ext_lower.as_str()) {
+            return Some(MediaType::Document);
         }
 
         let registry = SYSTEM_REGISTRY.get()?;
@@ -194,6 +229,9 @@ mod tests {
         }
         for ext in NATIVE_AUDIO_EXTS {
             assert!(fallback.contains(*ext), "missing native audio ext {ext}");
+        }
+        for ext in NATIVE_DOCUMENT_EXTS {
+            assert!(fallback.contains(*ext), "missing native document ext {ext}");
         }
     }
 
@@ -251,6 +289,7 @@ mod tests {
         let image_exts = MediaType::Image.extensions();
         let video_exts = MediaType::Video.extensions();
         let audio_exts = MediaType::Audio.extensions();
+        let document_exts = MediaType::Document.extensions();
 
         for ext in image_exts {
             assert!(all.contains(ext), "image ext {} not in all_extensions", ext);
@@ -261,12 +300,59 @@ mod tests {
         for ext in audio_exts {
             assert!(all.contains(ext), "audio ext {} not in all_extensions", ext);
         }
+        for ext in document_exts {
+            assert!(
+                all.contains(ext),
+                "document ext {} not in all_extensions",
+                ext
+            );
+        }
 
         assert_eq!(
             all.len(),
-            image_exts.len() + video_exts.len() + audio_exts.len(),
+            image_exts.len() + video_exts.len() + audio_exts.len() + document_exts.len(),
             "all_extensions count mismatch"
         );
+    }
+
+    #[test]
+    fn test_document_extensions_and_kind() {
+        let exts = MediaType::Document.extensions();
+        assert!(exts.contains(&"md"));
+        assert!(exts.contains(&"markdown"));
+        assert!(exts.contains(&"txt"));
+        assert!(exts.contains(&"csv"));
+        assert!(exts.contains(&"tsv"));
+
+        assert_eq!(
+            MediaRegistry::determine_type("MD"),
+            Some(MediaType::Document)
+        );
+        assert_eq!(
+            MediaRegistry::determine_type("txt"),
+            Some(MediaType::Document)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("md"),
+            Some(DocumentKind::Markdown)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("MARKDOWN"),
+            Some(DocumentKind::Markdown)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("txt"),
+            Some(DocumentKind::PlainText)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("csv"),
+            Some(DocumentKind::PlainText)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("tsv"),
+            Some(DocumentKind::PlainText)
+        );
+        assert_eq!(DocumentKind::from_extension("jpg"), None);
     }
 
     #[test]

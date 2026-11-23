@@ -1,4 +1,5 @@
 pub mod audio_meta;
+pub mod document_meta;
 pub mod image_meta;
 pub mod video_meta;
 
@@ -86,5 +87,6 @@ pub fn extract_metadata(
         MediaType::Image => image_meta::extract_image_metadata(path),
         MediaType::Audio => audio_meta::extract_audio_metadata(path),
         MediaType::Video => video_meta::extract_video_metadata(path),
+        MediaType::Document => document_meta::extract_document_metadata(path),
     }
 }

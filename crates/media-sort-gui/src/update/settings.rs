@@ -72,6 +72,11 @@ pub fn handle_settings_message(state: &mut AppState, msg: SettingsMessage) -> Ta
             state.settings.mark_dirty();
             Task::none()
         }
+        SettingsMessage::ToggleShowDocumentsByDefault(val) => {
+            state.settings.general.show_documents_by_default = val;
+            state.settings.mark_dirty();
+            Task::none()
+        }
         SettingsMessage::Save => {
             state.settings.mark_dirty();
             Task::none()
@@ -141,6 +146,8 @@ pub fn handle_settings_loaded(
     match *result {
         Ok(settings) => {
             state.settings = settings;
+            state.media_grid.type_filter.documents =
+                state.settings.general.show_documents_by_default;
             #[cfg(target_os = "windows")]
             {
                 if state.settings.general.integration_with_windows

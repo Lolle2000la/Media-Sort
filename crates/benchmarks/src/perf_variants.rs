@@ -504,7 +504,7 @@ pub fn synthetic_media_entries(n: usize) -> Vec<MediaEntry> {
     let exts = [
         "jpg", "png", "jpeg", "gif", "mp4", "mkv", "webm", "bmp", "tiff", "webp", "mp3", "flac",
         "wav", "avi", "mov", "m4v", "aac", "ogg", "opus", "m4a", "wmv", "flv", "qoi", "tga",
-        "avif",
+        "avif", "txt", "md", "csv",
     ];
     (0..n)
         .map(|i| {
@@ -518,6 +518,7 @@ pub fn synthetic_media_entries(n: usize) -> Vec<MediaEntry> {
                 "mp3" | "flac" | "wav" | "aac" | "m4a" | "ogg" | "opus" | "wma" | "aiff" => {
                     MediaType::Audio
                 }
+                _ if MediaType::Document.extensions().contains(&ext) => MediaType::Document,
                 _ => MediaType::Image,
             };
             MediaEntry {
@@ -554,6 +555,10 @@ mod tests {
             "SVG",
             "svgz",
             "SVGZ",
+            "txt",
+            "TXT",
+            "md",
+            "csv",
             "unknown_ext",
             "this_is_not_a_real_extension",
         ] {
@@ -562,6 +567,14 @@ mod tests {
             let b = detect_media_type_hashset(&p, true);
             assert_eq!(a, b, "ext={}", ext);
         }
+        assert_eq!(
+            detect_media_type_hashset(Path::new("notes.txt"), true),
+            MediaType::Document
+        );
+        assert_eq!(
+            detect_media_type_hashset(Path::new("readme.md"), true),
+            MediaType::Document
+        );
         assert_eq!(
             detect_media_type_hashset(Path::new("icon.svg"), true),
             MediaType::Image

@@ -41,6 +41,11 @@ pub struct GeneralSettings {
     /// shared between running instances).
     #[serde(default)]
     pub session_pinned_folders: bool,
+
+    /// Whether the active-session Documents filter chip starts enabled when
+    /// opening a folder.
+    #[serde(default = "default_true")]
+    pub show_documents_by_default: bool,
 }
 
 impl Default for GeneralSettings {
@@ -58,6 +63,7 @@ impl Default for GeneralSettings {
             locale: None,
             folder_tree_width: default_folder_tree_width(),
             session_pinned_folders: false,
+            show_documents_by_default: true,
         }
     }
 }

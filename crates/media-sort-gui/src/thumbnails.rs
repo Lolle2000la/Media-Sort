@@ -1,3 +1,4 @@
+mod document;
 mod image;
 mod pool;
 mod video;
@@ -57,6 +58,10 @@ pub fn generate_thumbnail_with_options(
 ) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
     if should_keep.as_ref().is_some_and(|keep| !keep(path)) {
         return Ok(None);
+    }
+
+    if media_type == MediaType::Document {
+        return document::generate_document_thumbnail(path, should_keep);
     }
 
     if media_type == MediaType::Video && !video::is_gif_path(path) {
@@ -290,6 +295,30 @@ mod tests {
             None,
             Some(keep),
         );
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn test_generate_thumbnail_text_document_returns_ok_none() {
+        let dir = std::env::temp_dir().join("mediasort_test_doc_no_thumb");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, b"hello document").unwrap();
+
+        match generate_thumbnail(&path, MediaType::Document, None) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("plain text has no thumbnail; expected Ok(None)"),
+            Err(e) => panic!("plain text must not fail thumbnail generation: {e:?}"),
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_generate_thumbnail_with_options_document_cancelled_returns_ok_none() {
+        let path = std::path::PathBuf::from("/nonexistent/notes.txt");
+        let keep: KeepPredicate = Arc::new(|_| false);
+        let result = generate_thumbnail_with_options(&path, MediaType::Document, None, Some(keep));
         assert!(matches!(result, Ok(None)));
     }
 }

@@ -21,11 +21,16 @@ pub fn classify_media(path: &Path, animate_gifs: bool) -> (MediaType, Option<boo
         .unwrap_or("")
         .to_lowercase();
 
-    let media_type = [MediaType::Image, MediaType::Video, MediaType::Audio]
-        .into_iter()
-        .find(|ty| ty.extensions().contains(&ext.as_str()))
-        .or_else(|| MediaRegistry::determine_type(&ext))
-        .unwrap_or(MediaType::Image);
+    let media_type = [
+        MediaType::Image,
+        MediaType::Audio,
+        MediaType::Document,
+        MediaType::Video,
+    ]
+    .into_iter()
+    .find(|ty| ty.extensions().contains(&ext.as_str()))
+    .or_else(|| MediaRegistry::determine_type(&ext))
+    .unwrap_or(MediaType::Image);
 
     if media_type == MediaType::Video && ext == "gif" {
         let animated = crate::media::image_decoder::is_animated_gif(path);
@@ -135,6 +140,22 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_media_documents() {
+        for p in [
+            "readme.md",
+            "guide.MARKDOWN",
+            "notes.txt",
+            "data.csv",
+            "table.tsv",
+        ] {
+            assert_eq!(
+                classify_media(Path::new(p), true),
+                (MediaType::Document, None)
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_media_unknown_fallback() {
         for p in ["test.xyz", "test", "test.doc", "test."] {
             assert_eq!(classify_media(Path::new(p), true), (MediaType::Image, None));
@@ -207,7 +228,7 @@ mod tests {
         let img = image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 30]));
         img.save(dir.join("photo.jpg")).unwrap();
         write_gif(&dir.join("anim.gif"), 2);
-        std::fs::write(dir.join("notes.txt"), b"ignore").unwrap();
+        std::fs::write(dir.join("notes.bin"), b"ignore").unwrap();
 
         let entries: Vec<_> = scan_media_entries(&dir, true).into_iter().collect();
         assert_eq!(entries.len(), 2);

@@ -111,6 +111,7 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
         ("bytemuck", "https://github.com/Lokathor/bytemuck"),
         ("Chrono", "https://github.com/chronotope/chrono"),
         ("Clap", "https://github.com/clap-rs/clap"),
+        ("csv", "https://github.com/BurntSushi/rust-csv"),
         ("dirs", "https://github.com/dirs-dev/dirs-rs"),
         (
             "embed-resource",

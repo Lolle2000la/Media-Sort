@@ -122,6 +122,42 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             }
             Task::none()
         }
+        MediaMessage::ToggleTypeFilter(ty) => {
+            let previously_selected_path = state.media_grid.selected_index.and_then(|idx| {
+                state
+                    .media_grid
+                    .filtered_entries()
+                    .get(idx)
+                    .map(|entry| entry.path.clone())
+            });
+
+            state.media_grid.type_filter.toggle(ty);
+
+            let filtered = state.media_grid.filtered_entries();
+            if filtered.is_empty() {
+                drop(filtered);
+                state.media_grid.selected_index = None;
+                state.clear_active_preview();
+                Task::none()
+            } else {
+                let preserved_idx = previously_selected_path.and_then(|prev_path| {
+                    filtered.iter().position(|entry| entry.path == prev_path)
+                });
+                drop(filtered);
+                if let Some(idx) = preserved_idx {
+                    state.media_grid.selected_index = Some(idx);
+                    Task::batch(vec![
+                        super::thumbnails::load_visible_thumbnails(state),
+                        super::scroll::scroll_to_selected_entry(state, idx),
+                    ])
+                } else {
+                    Task::batch(vec![
+                        super::thumbnails::load_visible_thumbnails(state),
+                        super::preview::select_and_load_entry(state, 0),
+                    ])
+                }
+            }
+        }
     }
 }
 

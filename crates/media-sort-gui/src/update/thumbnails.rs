@@ -22,27 +22,23 @@ pub fn load_visible_thumbnails(state: &mut AppState) -> Task<Message> {
         .iter()
         .map(|e| (e.path.clone(), (e.media_type, e.animated)))
         .collect();
+    drop(filtered);
 
-    Task::batch(
-        load_queue
-            .into_iter()
-            .filter(|path| {
-                !state.cache.thumbnail_cache.contains(path)
-                    && !state.cache.media_errors.has_error(path)
-            })
-            .map(|path| {
-                let (media_type, animated) = entry_meta
-                    .get(&path)
-                    .copied()
-                    .unwrap_or((MediaType::Image, None));
-                load_thumbnail(
-                    path,
-                    state.cache.thumbnail_tracker.clone_checker(),
-                    media_type,
-                    animated,
-                )
-            }),
-    )
+    let checker = state.cache.thumbnail_tracker.clone_checker();
+    let mut tasks = Vec::new();
+    for path in load_queue {
+        if !state.cache.thumbnail_cache.contains(&path)
+            && !state.cache.media_errors.has_error(&path)
+            && state.cache.thumbnails_in_flight.insert(path.clone())
+        {
+            let (media_type, animated) = entry_meta
+                .get(&path)
+                .copied()
+                .unwrap_or((MediaType::Image, None));
+            tasks.push(load_thumbnail(path, checker.clone(), media_type, animated));
+        }
+    }
+    Task::batch(tasks)
 }
 
 /// Retain `paths_meta` in the visibility tracker and schedule thumbnail
@@ -56,19 +52,17 @@ pub fn load_around_selection(
         .thumbnail_tracker
         .retain_paths(paths_meta.iter().map(|(p, _, _)| p.clone()));
 
-    Task::batch(
-        paths_meta
-            .into_iter()
-            .filter(|(p, _, _)| !state.cache.thumbnail_cache.contains(p))
-            .map(|(p, mt, animated)| {
-                load_thumbnail(
-                    p,
-                    state.cache.thumbnail_tracker.clone_checker(),
-                    mt,
-                    animated,
-                )
-            }),
-    )
+    let checker = state.cache.thumbnail_tracker.clone_checker();
+    let mut tasks = Vec::new();
+    for (p, mt, animated) in paths_meta {
+        if !state.cache.thumbnail_cache.contains(&p)
+            && !state.cache.media_errors.has_error(&p)
+            && state.cache.thumbnails_in_flight.insert(p.clone())
+        {
+            tasks.push(load_thumbnail(p, checker.clone(), mt, animated));
+        }
+    }
+    Task::batch(tasks)
 }
 
 pub fn load_thumbnail(
@@ -106,6 +100,7 @@ pub fn handle_thumbnail_ready(
     h: u32,
     data: Vec<u8>,
 ) -> Task<Message> {
+    state.cache.thumbnails_in_flight.remove(&path);
     if !data.is_empty() && w > 0 && h > 0 {
         state.cache.media_errors.remove(&path);
         let handle = iced::widget::image::Handle::from_rgba(w, h, data);
@@ -119,6 +114,7 @@ pub fn handle_thumbnail_failed(
     path: PathBuf,
     err: ThumbnailError,
 ) -> Task<Message> {
+    state.cache.thumbnails_in_flight.remove(&path);
     match err {
         ThumbnailError::Transient(rest) => {
             // Transient failure (queue timeout, dead worker pool), not a decode
@@ -136,6 +132,7 @@ pub fn handle_thumbnail_failed(
     Task::none()
 }
 
-pub fn handle_thumbnail_cancelled(_state: &mut AppState, _path: PathBuf) -> Task<Message> {
+pub fn handle_thumbnail_cancelled(state: &mut AppState, path: PathBuf) -> Task<Message> {
+    state.cache.thumbnails_in_flight.remove(&path);
     Task::none()
 }

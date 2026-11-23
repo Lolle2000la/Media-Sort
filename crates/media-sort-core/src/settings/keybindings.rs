@@ -207,10 +207,22 @@ pub struct KeyBindings {
     pub toggle_metadata_panel: KeyBinding,
     #[serde(default = "default_reveal_in_file_manager_binding")]
     pub reveal_in_file_manager: KeyBinding,
+    #[serde(default = "default_previous_page_binding")]
+    pub previous_page: KeyBinding,
+    #[serde(default = "default_next_page_binding")]
+    pub next_page: KeyBinding,
 }
 
 fn default_reveal_in_file_manager_binding() -> KeyBinding {
     KeyBinding::new(Key::Character('L'))
+}
+
+fn default_previous_page_binding() -> KeyBinding {
+    KeyBinding::new(Key::PageUp)
+}
+
+fn default_next_page_binding() -> KeyBinding {
+    KeyBinding::new(Key::PageDown)
 }
 
 impl Default for KeyBindings {
@@ -238,7 +250,9 @@ impl Default for KeyBindings {
             move_pinned_down: KeyBinding::new(Key::Character('S')).with_ctrl(),
             search_images: KeyBinding::new(Key::Character('I')),
             toggle_metadata_panel: KeyBinding::new(Key::Character('M')),
-            reveal_in_file_manager: KeyBinding::new(Key::Character('L')),
+            reveal_in_file_manager: default_reveal_in_file_manager_binding(),
+            previous_page: default_previous_page_binding(),
+            next_page: default_next_page_binding(),
         }
     }
 }
@@ -248,6 +262,7 @@ impl Default for KeyBindings {
 pub enum KeyActionSection {
     Images,
     Folders,
+    Documents,
     Other,
 }
 
@@ -262,6 +277,7 @@ impl KeyActionSection {
         match self {
             Self::Images => "keybindings-images",
             Self::Folders => "keybindings-folders",
+            Self::Documents => "keybindings-documents-section",
             Self::Other => "keybindings-other",
         }
     }
@@ -325,6 +341,8 @@ pub enum KeyAction {
     SearchImages,
     ToggleMetadataPanel,
     RevealInFileManager,
+    PreviousPage,
+    NextPage,
 }
 
 impl KeyAction {
@@ -359,6 +377,8 @@ impl KeyAction {
             Self::SearchImages => "search_images",
             Self::ToggleMetadataPanel => "toggle_metadata_panel",
             Self::RevealInFileManager => "reveal_in_file_manager",
+            Self::PreviousPage => "previous_page",
+            Self::NextPage => "next_page",
         }
     }
 
@@ -388,6 +408,8 @@ impl KeyAction {
             Self::SearchImages => "keybindings-search-images",
             Self::ToggleMetadataPanel => "keybindings-toggle-metadata",
             Self::RevealInFileManager => "keybindings-reveal-in-file-manager",
+            Self::PreviousPage => "keybindings-previous-page",
+            Self::NextPage => "keybindings-next-page",
         }
     }
 
@@ -415,34 +437,36 @@ impl KeyAction {
             | Self::Unpin
             | Self::MovePinnedUp
             | Self::MovePinnedDown => KeyActionSection::Folders,
+            Self::PreviousPage | Self::NextPage => KeyActionSection::Documents,
             Self::Undo | Self::Redo => KeyActionSection::Other,
         }
     }
 
-    /// Returns the subsection within [`KeyAction::section`] containing this action.
-    pub const fn subsection(self) -> KeyActionSubsection {
+    /// Returns the optional subsection within [`KeyAction::section`] containing this action.
+    pub const fn subsection(self) -> Option<KeyActionSubsection> {
         match self {
             Self::MoveToFolder
             | Self::CopyToFolder
             | Self::Delete
             | Self::Rename
             | Self::RevealInFileManager
-            | Self::CreateFolder => KeyActionSubsection::Management,
+            | Self::CreateFolder => Some(KeyActionSubsection::Management),
             Self::GoLeft
             | Self::GoRight
             | Self::FolderUp
             | Self::FolderLeft
             | Self::FolderDown
-            | Self::FolderRight => KeyActionSubsection::Selection,
-            Self::SearchImages => KeyActionSubsection::Search,
-            Self::ToggleMetadataPanel => KeyActionSubsection::Metadata,
-            Self::OpenFolder | Self::OpenSelectedFolder => KeyActionSubsection::Open,
+            | Self::FolderRight => Some(KeyActionSubsection::Selection),
+            Self::SearchImages => Some(KeyActionSubsection::Search),
+            Self::ToggleMetadataPanel => Some(KeyActionSubsection::Metadata),
+            Self::OpenFolder | Self::OpenSelectedFolder => Some(KeyActionSubsection::Open),
             Self::Pin
             | Self::PinSelected
             | Self::Unpin
             | Self::MovePinnedUp
-            | Self::MovePinnedDown => KeyActionSubsection::Pinned,
-            Self::Undo | Self::Redo => KeyActionSubsection::History,
+            | Self::MovePinnedDown => Some(KeyActionSubsection::Pinned),
+            Self::PreviousPage | Self::NextPage => None,
+            Self::Undo | Self::Redo => Some(KeyActionSubsection::History),
         }
     }
 
@@ -472,6 +496,8 @@ impl KeyAction {
             Self::SearchImages => &kb.search_images,
             Self::ToggleMetadataPanel => &kb.toggle_metadata_panel,
             Self::RevealInFileManager => &kb.reveal_in_file_manager,
+            Self::PreviousPage => &kb.previous_page,
+            Self::NextPage => &kb.next_page,
         }
     }
 
@@ -501,6 +527,8 @@ impl KeyAction {
             Self::SearchImages => &mut kb.search_images,
             Self::ToggleMetadataPanel => &mut kb.toggle_metadata_panel,
             Self::RevealInFileManager => &mut kb.reveal_in_file_manager,
+            Self::PreviousPage => &mut kb.previous_page,
+            Self::NextPage => &mut kb.next_page,
         }
     }
 }
@@ -651,10 +679,12 @@ mod tests {
         use crate::settings::keybindings::KeyAction;
 
         let actions: Vec<KeyAction> = KeyAction::iter().collect();
-        assert_eq!(actions.len(), 23);
+        assert_eq!(actions.len(), 25);
         assert_eq!(actions[0], KeyAction::MoveToFolder);
         assert_eq!(actions[3], KeyAction::Rename);
         assert_eq!(actions[22], KeyAction::RevealInFileManager);
+        assert_eq!(actions[23], KeyAction::PreviousPage);
+        assert_eq!(actions[24], KeyAction::NextPage);
     }
 
     #[test]
@@ -716,7 +746,48 @@ mod tests {
         for action in KeyAction::iter() {
             assert!(!action.l10n_key().is_empty());
             assert!(!action.section().l10n_key().is_empty());
-            assert!(!action.subsection().l10n_key().is_empty());
+            if let Some(subsection) = action.subsection() {
+                assert!(!subsection.l10n_key().is_empty());
+            }
         }
+    }
+
+    #[test]
+    fn test_keybindings_page_navigation_defaults() {
+        let kbs = crate::settings::keybindings::KeyBindings::default();
+        assert_eq!(kbs.previous_page.key, Key::PageUp);
+        assert!(!kbs.previous_page.ctrl);
+        assert!(!kbs.previous_page.shift);
+        assert!(!kbs.previous_page.alt);
+        assert!(!kbs.previous_page.meta);
+
+        assert_eq!(kbs.next_page.key, Key::PageDown);
+        assert!(!kbs.next_page.ctrl);
+        assert!(!kbs.next_page.shift);
+        assert!(!kbs.next_page.alt);
+        assert!(!kbs.next_page.meta);
+    }
+
+    #[test]
+    fn test_keybindings_omitted_page_navigation_uses_defaults() {
+        let mut value =
+            serde_json::to_value(crate::settings::keybindings::KeyBindings::default()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("previous_page");
+        obj.remove("next_page");
+
+        let deserialized: crate::settings::keybindings::KeyBindings =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(deserialized.previous_page.key, Key::PageUp);
+        assert!(!deserialized.previous_page.ctrl);
+        assert!(!deserialized.previous_page.shift);
+        assert!(!deserialized.previous_page.alt);
+        assert!(!deserialized.previous_page.meta);
+
+        assert_eq!(deserialized.next_page.key, Key::PageDown);
+        assert!(!deserialized.next_page.ctrl);
+        assert!(!deserialized.next_page.shift);
+        assert!(!deserialized.next_page.alt);
+        assert!(!deserialized.next_page.meta);
     }
 }

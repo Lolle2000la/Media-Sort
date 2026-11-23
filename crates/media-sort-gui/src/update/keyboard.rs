@@ -3,7 +3,9 @@ use media_sort_core::media_type::MediaType;
 use media_sort_core::models::MediaEntry;
 use media_sort_core::settings::keybindings::{Key, KeyAction};
 
-use crate::message::{AudioMessage, FolderMessage, MediaMessage, Message, SettingsMessage};
+use crate::message::{
+    AudioMessage, DocumentMessage, FolderMessage, MediaMessage, Message, SettingsMessage,
+};
 use crate::state::{AppState, SettingsUiState};
 use crate::subscriptions::keyboard;
 
@@ -267,7 +269,13 @@ pub fn handle_key_captured(
             KeyAction::SearchImages => {
                 return Task::done(Message::Media(MediaMessage::SearchFocused));
             }
-            KeyAction::Undo | KeyAction::Redo => {}
+            KeyAction::PreviousPage if active_media_type(state) == Some(MediaType::Document) => {
+                return super::document::handle_document_message(state, DocumentMessage::PrevPage);
+            }
+            KeyAction::NextPage if active_media_type(state) == Some(MediaType::Document) => {
+                return super::document::handle_document_message(state, DocumentMessage::NextPage);
+            }
+            KeyAction::Undo | KeyAction::Redo | KeyAction::PreviousPage | KeyAction::NextPage => {}
         }
     }
 

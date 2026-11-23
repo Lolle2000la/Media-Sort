@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use media_sort_backend::filesystem::watcher::FileSystemEvent;
+use media_sort_backend::media::document::DocumentPreview;
+use media_sort_core::media_type::MediaType;
 use media_sort_core::settings::keybindings::{Key, KeyAction};
 use media_sort_core::settings::store::SettingsStore;
 
@@ -35,6 +37,8 @@ pub enum Message {
     Audio(AudioMessage),
     #[serde(skip_deserializing)]
     Video(iced_mpv::PlayerMessage),
+    #[serde(skip_deserializing)]
+    Document(DocumentMessage),
     #[serde(skip_deserializing)]
     DragDrop(DragDropMessage),
     /// Filesystem watcher batch: external add/remove/rename/modify events
@@ -94,6 +98,7 @@ pub enum SettingsMessage {
     StartDragMetadataDivider,
     OpenAdvanced,
     ToggleHardwareDecoding,
+    ToggleShowDocumentsByDefault(bool),
 }
 
 #[derive(Debug, Clone, serde::Deserialize, iced_automation_macros::AutomationKeycap)]
@@ -169,6 +174,21 @@ pub enum MediaMessage {
     MetadataLoaded(Result<BTreeMap<String, BTreeMap<String, String>>, String>),
     OpenExternal(PathBuf),
     RevealInExplorer(PathBuf),
+    #[serde(skip_deserializing)]
+    ToggleTypeFilter(MediaType),
+}
+
+#[derive(Debug, Clone)]
+pub enum DocumentMessage {
+    Loaded {
+        path: PathBuf,
+        page_index: usize,
+        result: Result<DocumentPreview, String>,
+    },
+    PrevPage,
+    NextPage,
+    SelectSheet(usize),
+    LinkClicked(String),
 }
 
 #[derive(Debug, Clone)]

@@ -2,7 +2,55 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use media_sort_core::media_type::MediaType;
 use media_sort_core::models::MediaEntry;
+
+/// Active-session media type filter toggles for the media grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaTypeFilter {
+    pub images: bool,
+    pub video: bool,
+    pub audio: bool,
+    pub documents: bool,
+}
+
+impl Default for MediaTypeFilter {
+    fn default() -> Self {
+        Self {
+            images: true,
+            video: true,
+            audio: true,
+            documents: true,
+        }
+    }
+}
+
+impl MediaTypeFilter {
+    /// Returns `true` when entries of `media_type` should be shown.
+    pub fn is_enabled(&self, media_type: MediaType) -> bool {
+        match media_type {
+            MediaType::Image => self.images,
+            MediaType::Video => self.video,
+            MediaType::Audio => self.audio,
+            MediaType::Document => self.documents,
+        }
+    }
+
+    /// Toggles visibility of `media_type` in the active session.
+    pub fn toggle(&mut self, media_type: MediaType) {
+        match media_type {
+            MediaType::Image => self.images = !self.images,
+            MediaType::Video => self.video = !self.video,
+            MediaType::Audio => self.audio = !self.audio,
+            MediaType::Document => self.documents = !self.documents,
+        }
+    }
+
+    /// Returns `true` when every media type filter is enabled.
+    pub fn is_all_enabled(&self) -> bool {
+        self.images && self.video && self.audio && self.documents
+    }
+}
 
 /// Snapshot of the media grid's scrollable viewport. Updated whenever the
 /// scrollable reports a new viewport via its `on_scroll` callback.
@@ -38,6 +86,7 @@ pub struct MediaGridState {
     pub lower_names: Vec<String>,
     pub selected_index: Option<usize>,
     pub search: SearchState,
+    pub type_filter: MediaTypeFilter,
     pub scroll: MediaGridScrollState,
     pub scan_receiver: Option<mpsc::Receiver<MediaEntry>>,
     /// Index to select after the background scan completes.
@@ -62,6 +111,7 @@ impl fmt::Debug for MediaGridState {
             .field("entries_len", &self.entries.len())
             .field("selected_index", &self.selected_index)
             .field("search", &self.search)
+            .field("type_filter", &self.type_filter)
             .field("scroll", &self.scroll)
             .field("scan_receiver", &self.scan_receiver.is_some())
             .field("pending_select_index", &self.pending_select_index)
@@ -72,22 +122,50 @@ impl fmt::Debug for MediaGridState {
 }
 
 impl MediaGridState {
+    /// Returns entry counts across all scanned items in `[images, video, audio, documents]` order.
+    pub fn type_counts(&self) -> [usize; 4] {
+        let mut counts = [0usize; 4];
+        for entry in &self.entries {
+            match entry.media_type {
+                MediaType::Image => counts[0] += 1,
+                MediaType::Video => counts[1] += 1,
+                MediaType::Audio => counts[2] += 1,
+                MediaType::Document => counts[3] += 1,
+            }
+        }
+        counts
+    }
+
     pub fn filtered_entries(&self) -> Vec<&MediaEntry> {
-        if self.search.query.is_empty() {
+        let has_query = !self.search.query.is_empty();
+        if !has_query && self.type_filter.is_all_enabled() {
             return self.entries.iter().collect();
+        }
+        if !has_query {
+            return self
+                .entries
+                .iter()
+                .filter(|e| self.type_filter.is_enabled(e.media_type))
+                .collect();
         }
         let query_lower = self.search.query.to_lowercase();
         if self.lower_names.len() == self.entries.len() {
             self.entries
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| self.lower_names[*i].contains(&query_lower))
+                .filter(|(i, e)| {
+                    self.type_filter.is_enabled(e.media_type)
+                        && self.lower_names[*i].contains(&query_lower)
+                })
                 .map(|(_, e)| e)
                 .collect()
         } else {
             self.entries
                 .iter()
-                .filter(|e| e.file_name.to_lowercase().contains(&query_lower))
+                .filter(|e| {
+                    self.type_filter.is_enabled(e.media_type)
+                        && e.file_name.to_lowercase().contains(&query_lower)
+                })
                 .collect()
         }
     }

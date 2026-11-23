@@ -1,7 +1,7 @@
 pub(super) use super::scroll::{calculate_scroll_into_view_1d, relative_position_for};
 pub(super) use super::*;
 pub(super) use crate::message::{
-    AudioMessage, FolderMessage, MediaMessage, Message, SettingsMessage,
+    AudioMessage, DocumentMessage, FolderMessage, MediaMessage, Message, SettingsMessage,
 };
 pub(super) use crate::state::{AppState, SettingsUiState};
 pub(super) use crate::update::keyboard::{handle_key_captured, is_modal_open};
@@ -100,6 +100,7 @@ pub(super) fn setup_data_dir_with_files(name: &str) -> (PathBuf, PathBuf, PathBu
     (root, file, dest)
 }
 
+mod document;
 mod file_operations;
 mod filesystem_watcher;
 mod keyboard_and_modals;

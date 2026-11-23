@@ -1,6 +1,7 @@
 mod audio;
 mod cache;
 mod create_folder_modal;
+pub mod document;
 pub mod drag_drop;
 mod folder;
 mod folder_inspection;
@@ -13,6 +14,7 @@ mod settings_ui;
 pub use audio::AudioPlaybackState;
 pub use cache::CacheState;
 pub use create_folder_modal::CreateFolderModalState;
+pub use document::DocumentPreviewState;
 pub use drag_drop::DragDropState;
 pub use folder::FolderState;
 pub use media_grid::{MediaGridScrollState, MediaGridState, SearchState};
@@ -59,6 +61,7 @@ pub struct AppState {
     pub create_folder: CreateFolderModalState,
     pub video: iced_mpv::VideoState,
     pub audio: AudioPlaybackState,
+    pub document: DocumentPreviewState,
     pub cache: CacheState,
     pub metadata: MetadataPanelState,
     pub settings_ui: SettingsUiState,
@@ -131,13 +134,14 @@ impl AppState {
             ..Default::default()
         };
 
-        let media_grid = MediaGridState {
+        let mut media_grid = MediaGridState {
             search: SearchState {
                 placeholder: search_placeholder,
                 ..Default::default()
             },
             ..Default::default()
         };
+        media_grid.type_filter.documents = settings.general.show_documents_by_default;
 
         let rename = RenameModalState {
             placeholder: rename_placeholder,
@@ -166,6 +170,7 @@ impl AppState {
             create_folder,
             video: iced_mpv::VideoState::default(),
             audio: AudioPlaybackState::new(),
+            document: DocumentPreviewState::default(),
             cache: CacheState::new(),
             metadata,
             settings_ui: SettingsUiState::default(),
@@ -215,6 +220,7 @@ impl AppState {
         self.cache.selected_image = None;
         self.selected_file_size = None;
         self.video.select(None);
+        crate::update::document::reset(self);
         crate::update::audio::reset(self);
     }
 
@@ -259,6 +265,8 @@ impl AppState {
         self.folder.selected_folder = None;
         self.folder.selected_folder_idx = None;
         self.cache.image_cache.clear();
+        self.cache.document_cache.clear();
+        self.cache.thumbnails_in_flight.clear();
         self.cache.media_errors.clear();
         self.clear_active_preview();
 
@@ -786,6 +794,63 @@ mod tests {
         state.media_grid.search.query = "nonexistent".into();
         let results = state.media_grid.filtered_entries();
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_media_type_filter_and_type_counts() {
+        let mut settings = SettingsStore::default();
+        settings.general.show_documents_by_default = false;
+        let mut state = AppState::new(settings);
+        assert!(!state.media_grid.type_filter.documents);
+        assert!(state.media_grid.type_filter.images);
+
+        state.media_grid.entries = vec![
+            MediaEntry {
+                path: "/photo.jpg".into(),
+                media_type: MediaType::Image,
+                file_name: "photo.jpg".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/clip.mp4".into(),
+                media_type: MediaType::Video,
+                file_name: "clip.mp4".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/song.mp3".into(),
+                media_type: MediaType::Audio,
+                file_name: "song.mp3".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/report.txt".into(),
+                media_type: MediaType::Document,
+                file_name: "report.txt".into(),
+                animated: None,
+            },
+            MediaEntry {
+                path: "/notes.md".into(),
+                media_type: MediaType::Document,
+                file_name: "notes.md".into(),
+                animated: None,
+            },
+        ];
+
+        assert_eq!(state.media_grid.type_counts(), [1, 1, 1, 2]);
+        assert_eq!(state.media_grid.filtered_entries().len(), 3);
+
+        state.media_grid.type_filter.toggle(MediaType::Document);
+        assert!(state.media_grid.type_filter.is_enabled(MediaType::Document));
+        assert_eq!(state.media_grid.filtered_entries().len(), 5);
+
+        state.media_grid.search.query = "report".into();
+        let combined = state.media_grid.filtered_entries();
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].file_name, "report.txt");
+
+        state.media_grid.type_filter.toggle(MediaType::Document);
+        assert!(state.media_grid.filtered_entries().is_empty());
     }
 
     #[test]

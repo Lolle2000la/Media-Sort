@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn test_key_action_covers_all_expected_actions() {
         let actions: Vec<KeyAction> = KeyAction::iter().collect();
-        assert_eq!(actions.len(), 23);
+        assert_eq!(actions.len(), 25);
         let ids: Vec<&str> = actions.iter().map(|a| a.id()).collect();
         assert!(ids.contains(&"undo"));
         assert!(ids.contains(&"redo"));
@@ -274,6 +274,8 @@ mod tests {
         assert!(ids.contains(&"rename"));
         assert!(ids.contains(&"move_to_folder"));
         assert!(ids.contains(&"reveal_in_file_manager"));
+        assert!(ids.contains(&"previous_page"));
+        assert!(ids.contains(&"next_page"));
     }
 
     #[test]
