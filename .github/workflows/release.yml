@@ -526,15 +526,24 @@ jobs:
         run: |
           TAG_TEXT=$(git tag -l --format='%(contents)' ${{ github.ref_name }} | sed '/-----BEGIN/,/-----END/d')
           # A release title rides in the tag message as a `Release-Title:`
-          # trailer written by scripts/release.sh. Pull it out of the typed
-          # message (unset when no trailer was written, so the release keeps the
-          # tag as its name) and hand it to the publish step through the
-          # environment; the remaining body becomes the published notes.
-          RELEASE_TITLE="$(printf '%s\n' "$TAG_TEXT" | sed -n 's/^Release-Title:[[:space:]]*//p' | tail -n 1)"
+          # trailer written by scripts/release.sh, always as the FINAL line. Only
+          # that last line is treated as a trailer (and only it is dropped), so
+          # release notes that merely quote the syntax keep every line and set
+          # no title; without a trailer the notes stay byte-identical to a
+          # release cut before titles existed.
+          LAST_LINE="$(printf '%s\n' "$TAG_TEXT" | tail -n 1)"
+          if [[ "$LAST_LINE" == Release-Title:* ]]; then
+            RELEASE_TITLE="${LAST_LINE#Release-Title:}"
+            RELEASE_TITLE="${RELEASE_TITLE#"${RELEASE_TITLE%%[![:space:]]*}"}"
+            RELEASE_TITLE="${RELEASE_TITLE%"${RELEASE_TITLE##*[![:space:]]}"}"
+            TAG_BODY="$(printf '%s\n' "$TAG_TEXT" | sed '$d')"
+          else
+            RELEASE_TITLE=""
+            TAG_BODY="$TAG_TEXT"
+          fi
           if [ -n "$RELEASE_TITLE" ]; then
             echo "RELEASE_TITLE=$RELEASE_TITLE" >> "$GITHUB_ENV"
           fi
-          TAG_BODY="$(printf '%s\n' "$TAG_TEXT" | sed '/^Release-Title:/d')"
           if [ ! -z "$TAG_BODY" ]; then
             echo "$TAG_BODY" > CHANGES.md
             echo -e "\n\n## Changelog" >> CHANGES.md
