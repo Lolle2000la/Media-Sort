@@ -4,11 +4,16 @@ use media_sort_core::media_type::DocumentKind;
 
 use super::DecodedImage;
 
+pub mod comic;
 pub mod pdf;
 pub mod text;
 
 /// Hard upper bound on reading a full PDF document into memory.
 pub(crate) const MAX_PDF_FILE_BYTES: u64 = 128 * 1024 * 1024;
+/// Hard upper bound when reading an individual image or content entry out of an archive.
+pub(crate) const MAX_ARCHIVE_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+/// Hard upper bound when reading XML / HTML / manifest entries out of an archive.
+pub(crate) const MAX_XML_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 /// Hard upper bound on plain-text / Markdown / CSV preview reads.
 pub(crate) const MAX_TEXT_PREVIEW_BYTES: u64 = 256 * 1024;
 /// Maximum lines rendered for plain text previews before truncation indicator.
@@ -97,6 +102,7 @@ pub fn generate_document_thumbnail_with_options(
 ) -> Result<Option<DecodedImage>, DocumentError> {
     match DocumentKind::from_path(path) {
         Some(DocumentKind::Pdf) => pdf::render_pdf_thumbnail(path, max_width, max_height),
+        Some(DocumentKind::Comic) => comic::extract_comic_thumbnail(path, max_width, max_height),
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) | None => Ok(None),
     }
 }
@@ -121,6 +127,7 @@ pub fn load_document_preview(
 ) -> Result<DocumentPreview, DocumentError> {
     match DocumentKind::from_path(path) {
         Some(DocumentKind::Pdf) => pdf::load_pdf_preview(path, page_index),
+        Some(DocumentKind::Comic) => comic::load_comic_preview(path, page_index),
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) => {
             text::load_text_preview(path)
         }
@@ -130,4 +137,28 @@ pub fn load_document_preview(
             ),
         }),
     }
+}
+
+/// Returns true when an archive entry path looks like a comic/cover image and is not macOS
+/// resource-fork clutter.
+pub(crate) fn is_image_entry(name: &str) -> bool {
+    let normalized = name.replace('\\', "/");
+    if normalized.ends_with('/') {
+        return false;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with("__macosx/") || lower.contains("/__macosx/") {
+        return false;
+    }
+    let file_name = normalized.rsplit('/').next().unwrap_or("");
+    if file_name.is_empty() || file_name.starts_with("._") || file_name.starts_with('.') {
+        return false;
+    }
+    let Some((_, ext)) = file_name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "png" | "webp" | "avif" | "bmp" | "gif" | "tif" | "tiff"
+    )
 }

@@ -78,7 +78,12 @@ open = { version = "5.4.0", features = ["shellexecute-on-windows"] }
 fast_image_resize = { version = "6.0", features = ["image", "rayon"] }
 rayon = "1.12"
 hayro = "0.9"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.42", features = ["encoding"] }
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "util"] }
+tar = { version = "0.4", default-features = false }
 csv = "1.4"
+rarchive = "0.1"
 resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 flate2 = "1"
 

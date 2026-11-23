@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::path::Path;
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -7,7 +8,9 @@ pub mod desktop_portal;
 #[cfg(target_os = "windows")]
 pub mod windows_shell;
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const DBUS_SHOW_ITEMS_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const DBUS_OUTPUT_CAP_BYTES: u64 = 64 * 1024;
 
 /// Returns `true` if `uri` is a well-formed `http://` or `https://` URL

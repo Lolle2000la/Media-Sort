@@ -291,6 +291,16 @@ fn resize_with_fir(
     resize_rgba_to_box(img_rgba.as_raw(), src_w, src_h, max_width, max_height)
 }
 
+/// Decodes encoded image bytes using size/memory limits and resizes to fit `max_width x max_height`.
+pub(crate) fn decode_and_resize_bytes(
+    bytes: &[u8],
+    max_width: u32,
+    max_height: u32,
+) -> Result<DecodedImage, image::ImageError> {
+    let img = super::image_decoder::decode_bytes_with_limits(bytes)?;
+    resize_with_fir(&img.to_rgba8(), max_width, max_height)
+}
+
 fn resize_rgba_to_box(
     rgba: &[u8],
     src_w: u32,

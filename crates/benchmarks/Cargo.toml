@@ -17,7 +17,6 @@ zune-core = "0.5"
 mpv-utils = { path = "../mpv-utils" }
 turbojpeg = "1.5"
 kamadak-exif.workspace = true
-webp = "0.3"
 bytemuck = "1"
 ico = "0.6"
 rayon.workspace = true
@@ -25,6 +24,7 @@ rayon.workspace = true
 [dev-dependencies]
 divan = "0.1"
 rayon.workspace = true
+webp = "0.3"
 
 [[bench]]
 name = "image_thumbnails"

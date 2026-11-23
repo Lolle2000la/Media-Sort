@@ -504,7 +504,7 @@ pub fn synthetic_media_entries(n: usize) -> Vec<MediaEntry> {
     let exts = [
         "jpg", "png", "jpeg", "gif", "mp4", "mkv", "webm", "bmp", "tiff", "webp", "mp3", "flac",
         "wav", "avi", "mov", "m4v", "aac", "ogg", "opus", "m4a", "wmv", "flv", "qoi", "tga",
-        "avif", "pdf", "txt", "md", "csv",
+        "avif", "pdf", "cbz", "txt", "md", "csv",
     ];
     (0..n)
         .map(|i| {
@@ -557,6 +557,7 @@ mod tests {
             "SVGZ",
             "pdf",
             "PDF",
+            "cbz",
             "txt",
             "TXT",
             "md",
