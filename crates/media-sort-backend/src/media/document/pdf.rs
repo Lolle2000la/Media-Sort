@@ -10,6 +10,7 @@ use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::vello_cpu::peniko::ImageAlphaType;
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
 
+use super::poppler_pipe::{self, PopplerOutcome};
 use super::{
     DecodedImage, DocumentError, DocumentPreview, DocumentUnavailableReason, MAX_PDF_FILE_BYTES,
     PREVIEW_TARGET_HEIGHT, PREVIEW_TARGET_WIDTH, read_file_capped,
@@ -308,6 +309,20 @@ pub fn render_pdf_thumbnail(
     let max_height = max_height.max(1);
     ensure_pdf_within_size_limit(path)?;
 
+    if poppler_pipe::is_available() {
+        match poppler_pipe::render_pdf_page(path, 0, max_width, max_height) {
+            PopplerOutcome::Ok((img, _)) => return Ok(Some(img)),
+            PopplerOutcome::Encrypted => return Ok(None),
+            PopplerOutcome::Err(err) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "Poppler thumbnail failed; falling back to hayro"
+                );
+            }
+        }
+    }
+
     let (key, loaded) = load_pdf_file_cached(path)?;
     let PdfLoadOutcome::Loaded(pdf) = loaded else {
         return Ok(None);
@@ -326,6 +341,36 @@ pub fn load_pdf_preview(path: &Path, page_index: usize) -> Result<DocumentPrevie
         return Ok(DocumentPreview::Unavailable {
             reason: DocumentUnavailableReason::TooLarge,
         });
+    }
+
+    if poppler_pipe::is_available() {
+        match poppler_pipe::render_pdf_page(
+            path,
+            page_index,
+            PREVIEW_TARGET_WIDTH,
+            PREVIEW_TARGET_HEIGHT,
+        ) {
+            PopplerOutcome::Ok((image, total_pages)) => {
+                let clamped_page = page_index.min(total_pages.saturating_sub(1));
+                return Ok(DocumentPreview::PagedImage {
+                    image,
+                    page_index: clamped_page,
+                    total_pages,
+                });
+            }
+            PopplerOutcome::Encrypted => {
+                return Ok(DocumentPreview::Unavailable {
+                    reason: DocumentUnavailableReason::Encrypted,
+                });
+            }
+            PopplerOutcome::Err(err) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "Poppler preview failed; falling back to hayro"
+                );
+            }
+        }
     }
 
     let (key, loaded) = load_pdf_file_cached(path)?;
@@ -374,6 +419,24 @@ pub(crate) fn render_pdf_bytes_page(
 /// Extracts PDF document metadata fields for the metadata inspector.
 pub fn extract_pdf_metadata(path: &Path) -> Result<BTreeMap<String, String>, DocumentError> {
     ensure_pdf_within_size_limit(path)?;
+
+    if poppler_pipe::is_available() {
+        match poppler_pipe::query_pdf_info(path) {
+            PopplerOutcome::Ok(info) => return Ok(info.fields),
+            PopplerOutcome::Encrypted => {
+                let mut fields = BTreeMap::new();
+                fields.insert("Encrypted".into(), "Yes".into());
+                return Ok(fields);
+            }
+            PopplerOutcome::Err(err) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %err,
+                    "Poppler pdfinfo failed; falling back to hayro"
+                );
+            }
+        }
+    }
 
     let (_, loaded) = load_pdf_file_cached(path)?;
     let mut fields = BTreeMap::new();

@@ -12,6 +12,7 @@ pub mod lok_worker;
 pub mod office;
 pub mod os_preview;
 pub mod pdf;
+pub mod poppler_pipe;
 pub mod soffice_pipe;
 pub mod text;
 
