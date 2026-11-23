@@ -39,7 +39,7 @@ pub struct MediaGridState {
     pub selected_index: Option<usize>,
     pub search: SearchState,
     pub scroll: MediaGridScrollState,
-    pub scan_receiver: Option<mpsc::Receiver<PathBuf>>,
+    pub scan_receiver: Option<mpsc::Receiver<MediaEntry>>,
     /// Index to select after the background scan completes.
     pub pending_select_index: Option<usize>,
     /// When true, the in-flight scan REPLACES [`entries`] on completion

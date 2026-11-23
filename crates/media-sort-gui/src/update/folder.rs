@@ -2,8 +2,6 @@ use iced::Task;
 
 use crate::message::{FolderMessage, Message};
 use crate::state::AppState;
-use media_sort_core::actions::move_action::MoveAction;
-use media_sort_core::actions::reversible::ReversibleAction;
 
 pub fn handle_folder_message(state: &mut AppState, msg: FolderMessage) -> Task<Message> {
     match msg {
@@ -181,42 +179,13 @@ pub fn handle_folder_message(state: &mut AppState, msg: FolderMessage) -> Task<M
         }
         FolderMessage::PinShortcut(n) => {
             let pinned_idx = (n.saturating_sub(1)) as usize;
-            if let Some(pinned) = state.folder.pinned_folders.get(pinned_idx) {
-                let target_folder = pinned.path.clone();
-                if let Some(index) = state.media_grid.selected_index {
-                    let filtered = state.media_grid.filtered_entries();
-                    if let Some(entry) = filtered.get(index) {
-                        let entry_path = entry.path.clone();
-                        match MoveAction::new(&entry_path, &target_folder) {
-                            Ok(mut action) => {
-                                if let Err(e) = action.execute() {
-                                    tracing::error!("Move failed: {e}");
-                                } else {
-                                    state.history.push_executed(Box::new(action));
-                                    state.media_grid.entries.retain(|e| e.path != entry_path);
-                                    state.media_grid.rebuild_lower_names();
-                                    return super::tasks::select_and_load_entry(state, index);
-                                }
-                            }
-                            Err(e) => {
-                                if let media_sort_core::actions::reversible::ActionError::TargetExists(
-                                    target,
-                                ) = &e
-                                {
-                                    let name = target
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| target.display().to_string());
-                                    state.set_status(
-                                        state.l10n.get("status-target-exists", &[("name", &name)]),
-                                    );
-                                } else {
-                                    tracing::error!("Cannot create move action: {e}");
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Some(target_folder) = state
+                .folder
+                .pinned_folders
+                .get(pinned_idx)
+                .map(|p| p.path.clone())
+            {
+                return super::file_ops::execute_move_to_folder(state, &target_folder);
             }
             Task::none()
         }

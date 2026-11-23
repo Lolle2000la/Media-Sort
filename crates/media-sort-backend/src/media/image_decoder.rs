@@ -177,16 +177,16 @@ fn skip_sub_blocks<R: std::io::Read + std::io::Seek>(reader: &mut R) -> bool {
 }
 
 pub fn load_image(path: &Path) -> Result<image::DynamicImage, image::ImageError> {
-    if super::svg::is_svg_path(path) {
-        return super::svg::load_svg_dynamic(path);
+    if let Some(special) = super::format_pipeline::detect_special_format(path) {
+        return super::format_pipeline::load_special_image(path, special);
     }
     let img = decode_path_with_limits(path)?;
     Ok(apply_orientation(img, path))
 }
 
 pub fn decode_image_dimensions(path: &Path) -> Result<(u32, u32), image::ImageError> {
-    if super::svg::is_svg_path(path) {
-        return super::svg::svg_dimensions(path);
+    if let Some(special) = super::format_pipeline::detect_special_format(path) {
+        return super::format_pipeline::special_image_dimensions(path, special);
     }
     let (w, h) = image::ImageReader::open(path)?
         .with_guessed_format()?
@@ -242,8 +242,10 @@ pub fn generate_thumbnail(
     max_width: u32,
     max_height: u32,
 ) -> Result<image::DynamicImage, image::ImageError> {
-    if super::svg::is_svg_path(path) {
-        let decoded = super::svg::render_svg(path, max_width, max_height)?;
+    if let Some(special) = super::format_pipeline::detect_special_format(path) {
+        let decoded = super::format_pipeline::render_special_image(
+            path, special, max_width, max_height, true,
+        )?;
         return rgba_to_dynamic(decoded.width, decoded.height, decoded.rgba);
     }
 

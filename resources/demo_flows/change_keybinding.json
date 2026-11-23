@@ -13,12 +13,12 @@
     },
     {
       "delay_ms": 1500,
-      "target": { "type": "Widget", "value": { "id": "keybinding_edit_3" } },
+      "target": { "type": "Widget", "value": { "id": "keybinding_edit_rename" } },
       "message": { "Settings": { "EditKeyBinding": 3 } }
     },
     {
       "delay_ms": 2000,
-      "target": { "type": "Widget", "value": { "id": "keybinding_edit_3" } },
+      "target": { "type": "Widget", "value": { "id": "keybinding_edit_rename" } },
       "message": { "KeyCaptured": ["N", false, false, false] }
     },
     {

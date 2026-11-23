@@ -1,10 +1,85 @@
 use iced::Task;
+use media_sort_core::media_type::MediaType;
+use media_sort_core::models::MediaEntry;
+use media_sort_core::settings::keybindings::{Key, KeyAction};
 
-use media_sort_core::settings::keybindings::Key;
-
-use crate::message::{FolderMessage, MediaMessage, Message, SettingsMessage};
+use crate::message::{AudioMessage, FolderMessage, MediaMessage, Message, SettingsMessage};
 use crate::state::{AppState, SettingsUiState};
 use crate::subscriptions::keyboard;
+
+/// Whether a top-level modal dialog (settings, credits, or update prompt) is
+/// currently open and should block global navigation/file shortcuts.
+pub fn is_modal_open(state: &AppState) -> bool {
+    state.settings_ui != SettingsUiState::Hidden
+        || state.show_credits
+        || state.is_update_prompt_visible()
+}
+
+fn active_entry(state: &AppState) -> Option<MediaEntry> {
+    let index = state.media_grid.selected_index?;
+    state
+        .media_grid
+        .filtered_entries()
+        .get(index)
+        .copied()
+        .cloned()
+}
+
+fn active_media_type(state: &AppState) -> Option<MediaType> {
+    let index = state.media_grid.selected_index?;
+    state
+        .media_grid
+        .filtered_entries()
+        .get(index)
+        .map(|entry| entry.media_type)
+}
+
+fn handle_playback_key(state: &mut AppState, key: Key) -> Task<Message> {
+    match (active_media_type(state), key) {
+        (
+            Some(MediaType::Audio),
+            Key::Space | Key::MediaPlayPause | Key::MediaPlay | Key::MediaPause,
+        ) => super::audio::handle_audio_message(state, AudioMessage::PlayPause),
+        (Some(MediaType::Audio), Key::MediaStop) => {
+            super::audio::handle_audio_message(state, AudioMessage::Stop)
+        }
+        (Some(MediaType::Audio), Key::AudioVolumeUp) => super::audio::handle_audio_message(
+            state,
+            AudioMessage::SetVolume((state.audio.volume + 5.0).min(100.0)),
+        ),
+        (Some(MediaType::Audio), Key::AudioVolumeDown) => super::audio::handle_audio_message(
+            state,
+            AudioMessage::SetVolume((state.audio.volume - 5.0).max(0.0)),
+        ),
+        (Some(MediaType::Audio), Key::AudioVolumeMute) => {
+            super::audio::handle_audio_message(state, AudioMessage::ToggleMute)
+        }
+        (
+            Some(MediaType::Video),
+            Key::Space | Key::MediaPlayPause | Key::MediaPlay | Key::MediaPause,
+        ) => {
+            state.video.toggle_pause();
+            Task::none()
+        }
+        (Some(MediaType::Video), Key::MediaStop) => {
+            state.video.stop();
+            Task::none()
+        }
+        (Some(MediaType::Video), Key::AudioVolumeUp) => {
+            state.video.set_volume(state.video.volume() + 5.0);
+            Task::none()
+        }
+        (Some(MediaType::Video), Key::AudioVolumeDown) => {
+            state.video.set_volume(state.video.volume() - 5.0);
+            Task::none()
+        }
+        (Some(MediaType::Video), Key::AudioVolumeMute) => {
+            state.video.toggle_mute();
+            Task::none()
+        }
+        _ => Task::none(),
+    }
+}
 
 pub fn handle_key_captured(
     state: &mut AppState,
@@ -21,69 +96,66 @@ pub fn handle_key_captured(
         _ => None,
     };
 
-    if let Some(idx) = waiting {
+    if let Some(action) = waiting {
         state.settings_ui = SettingsUiState::Keybindings {
             editing_keybinding: None,
             waiting_for_key: false,
         };
-        let bindings = keyboard::keybinding_list(state);
-        if idx < bindings.len() {
-            let (name, _) = &bindings[idx];
-            keyboard::update_keybinding(
-                &mut state.settings.keybindings,
-                name,
-                key,
-                ctrl,
-                shift,
-                alt,
-            );
-            state.settings.mark_dirty();
-        }
+        keyboard::set_keybinding(
+            &mut state.settings.keybindings,
+            action,
+            key,
+            ctrl,
+            shift,
+            alt,
+        );
+        state.settings.mark_dirty();
         return Task::none();
     }
 
     if state.rename.path.is_some() {
-        match key {
-            Key::Enter => {
-                return Task::done(Message::Media(MediaMessage::SubmitRename));
-            }
-            Key::Escape => {
-                return Task::done(Message::Media(MediaMessage::CancelRename));
-            }
-            _ => return Task::none(),
-        }
+        return match key {
+            Key::Enter => Task::done(Message::Media(MediaMessage::SubmitRename)),
+            Key::Escape => Task::done(Message::Media(MediaMessage::CancelRename)),
+            _ => Task::none(),
+        };
     }
 
     if state.create_folder.creating_folder_parent.is_some() {
-        match key {
-            Key::Enter => {
-                return Task::done(Message::Folder(FolderMessage::SubmitCreate(
-                    std::path::PathBuf::new(),
-                )));
-            }
-            Key::Escape => {
-                return Task::done(Message::Folder(FolderMessage::CancelCreate));
-            }
-            _ => return Task::none(),
-        }
+        return match key {
+            Key::Enter => Task::done(Message::Folder(FolderMessage::SubmitCreate(
+                std::path::PathBuf::new(),
+            ))),
+            Key::Escape => Task::done(Message::Folder(FolderMessage::CancelCreate)),
+            _ => Task::none(),
+        };
+    }
+
+    if is_modal_open(state) {
+        return Task::none();
     }
 
     if state.media_grid.search.focused {
-        match key {
+        return match key {
             Key::Enter | Key::Escape | Key::Tab => {
-                return Task::done(Message::Media(MediaMessage::SearchBlurred));
+                Task::done(Message::Media(MediaMessage::SearchBlurred))
             }
-            _ => return Task::none(),
-        }
+            _ => Task::none(),
+        };
     }
 
-    if key == Key::Space
-        && !state.media_grid.search.focused
-        && state.rename.path.is_none()
-        && state.create_folder.creating_folder_parent.is_none()
-    {
-        state.video.toggle_pause();
-        return Task::none();
+    if matches!(
+        key,
+        Key::Space
+            | Key::MediaPlayPause
+            | Key::MediaPlay
+            | Key::MediaPause
+            | Key::MediaStop
+            | Key::AudioVolumeUp
+            | Key::AudioVolumeDown
+            | Key::AudioVolumeMute
+    ) {
+        return handle_playback_key(state, key);
     }
 
     if ctrl && key == Key::Character('Q') {
@@ -91,196 +163,123 @@ pub fn handle_key_captured(
     }
 
     match key {
-        Key::MediaPlayPause | Key::MediaPlay | Key::MediaPause => {
-            state.video.toggle_pause();
-            return Task::none();
-        }
-        Key::MediaStop => {
-            state.video.stop();
-            return Task::none();
-        }
-        Key::AudioVolumeUp => {
-            state.video.set_volume(state.video.volume() + 5.0);
-            return Task::none();
-        }
-        Key::AudioVolumeDown => {
-            state.video.set_volume(state.video.volume() - 5.0);
-            return Task::none();
-        }
-        Key::AudioVolumeMute => {
-            state.video.toggle_mute();
-            return Task::none();
-        }
+        Key::MediaTrackNext => return Task::done(Message::Media(MediaMessage::GoRight)),
+        Key::MediaTrackPrevious => return Task::done(Message::Media(MediaMessage::GoLeft)),
         _ => {}
     }
 
-    match key {
-        Key::MediaTrackNext => {
-            return Task::done(Message::Media(MediaMessage::GoRight));
-        }
-        Key::MediaTrackPrevious => {
-            return Task::done(Message::Media(MediaMessage::GoLeft));
-        }
-        _ => {}
-    }
-
-    let bindings = keyboard::keybinding_list(state);
-    for (name, binding) in &bindings {
-        if binding.key == key
-            && binding.ctrl == ctrl
-            && binding.shift == shift
-            && binding.alt == alt
-        {
-            match name.as_str() {
-                "undo" if state.history.can_undo() => {
-                    return Task::done(Message::Media(MediaMessage::Undo));
-                }
-                "redo" if state.history.can_redo() => {
-                    return Task::done(Message::Media(MediaMessage::Redo));
-                }
-                "open_folder" => {
-                    return Task::done(Message::Folder(FolderMessage::Pick));
-                }
-                "toggle_metadata_panel" => {
-                    return Task::done(Message::Settings(SettingsMessage::ToggleMetadataPanel));
-                }
-                "reveal_in_file_manager" => {
-                    if let Some(index) = state.media_grid.selected_index {
-                        let filtered = state.media_grid.filtered_entries();
-                        if let Some(entry) = filtered.get(index) {
-                            return Task::done(Message::Media(MediaMessage::RevealInExplorer(
-                                entry.path.clone(),
-                            )));
-                        }
-                    }
-                }
-                "pin" => {
-                    return Task::done(Message::Folder(FolderMessage::PickPin));
-                }
-                "unpin" => {
-                    if let Some(ref c) = state.folder.current_folder {
-                        return Task::done(Message::Folder(FolderMessage::UnpinCurrent(c.clone())));
-                    }
-                }
-                "go_left" => {
-                    return Task::done(Message::Media(MediaMessage::GoLeft));
-                }
-                "go_right" => {
-                    return Task::done(Message::Media(MediaMessage::GoRight));
-                }
-                "move_to_folder" => {
-                    if let Some(index) = state.media_grid.selected_index {
-                        let filtered = state.media_grid.filtered_entries();
-                        if let Some(_entry) = filtered.get(index)
-                            && let Some(ref dest) = state.folder.selected_folder
-                        {
-                            return Task::done(Message::Media(MediaMessage::MoveToFolder(
-                                dest.clone(),
-                            )));
-                        }
-                    }
-                }
-                "copy_to_folder" => {
-                    if let Some(index) = state.media_grid.selected_index {
-                        let filtered = state.media_grid.filtered_entries();
-                        if let Some(_entry) = filtered.get(index)
-                            && let Some(ref dest) = state.folder.selected_folder
-                        {
-                            return Task::done(Message::Media(MediaMessage::CopyToFolder(
-                                dest.clone(),
-                            )));
-                        }
-                    }
-                }
-                "delete" => {
-                    if let Some(index) = state.media_grid.selected_index {
-                        let filtered = state.media_grid.filtered_entries();
-                        if let Some(entry) = filtered.get(index) {
-                            return Task::done(Message::Media(MediaMessage::DeleteEntry(
-                                entry.path.clone(),
-                            )));
-                        }
-                    }
-                }
-                "rename" => {
-                    if let Some(index) = state.media_grid.selected_index {
-                        let filtered = state.media_grid.filtered_entries();
-                        if let Some(entry) = filtered.get(index) {
-                            let stem = entry
-                                .path
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            state.rename.path = Some(entry.path.clone());
-                            state.rename.input_value = stem;
-                        }
-                    }
-                }
-                "create_folder" => {
-                    if let Some(p) = state
-                        .folder
-                        .selected_folder
-                        .as_ref()
-                        .or(state.folder.current_folder.as_ref())
-                    {
-                        state.create_folder.creating_folder_parent = Some(p.clone());
-                        state.create_folder.create_folder_input = String::new();
-                    }
-                }
-                "open_selected_folder" => {
-                    if let Some(ref selected_path) = state.folder.selected_folder {
-                        return Task::done(Message::Folder(FolderMessage::Open(
-                            selected_path.clone(),
-                        )));
-                    }
-                }
-                "pin_selected" => {
-                    return Task::done(Message::Folder(FolderMessage::PinSelected));
-                }
-                "move_pinned_up" => {
-                    if let Some(selected_path) = state.folder.selected_folder.clone() {
-                        return Task::done(Message::Folder(FolderMessage::MovePinnedUp(
-                            selected_path,
-                        )));
-                    }
-                }
-                "move_pinned_down" => {
-                    if let Some(selected_path) = state.folder.selected_folder.clone() {
-                        return Task::done(Message::Folder(FolderMessage::MovePinnedDown(
-                            selected_path,
-                        )));
-                    }
-                }
-                "folder_up" => {
-                    state.folder.select_above();
-                    return super::tasks::scroll_to_selected_folder(state);
-                }
-                "folder_down" => {
-                    state.folder.select_below();
-                    return super::tasks::scroll_to_selected_folder(state);
-                }
-                "folder_left" => {
-                    state.folder.collapse_selected();
-                    return super::tasks::scroll_to_selected_folder(state);
-                }
-                "folder_right" => {
-                    state.folder.expand_selected();
-                    return super::tasks::scroll_to_selected_folder(state);
-                }
-                "search_images" => {
-                    return Task::done(Message::Media(MediaMessage::SearchFocused));
-                }
-                _ => {}
+    if let Some(action) =
+        keyboard::find_matching_action(&state.settings.keybindings, key, ctrl, shift, alt)
+    {
+        match action {
+            KeyAction::Undo if state.history.can_undo() => {
+                return Task::done(Message::Media(MediaMessage::Undo));
             }
+            KeyAction::Redo if state.history.can_redo() => {
+                return Task::done(Message::Media(MediaMessage::Redo));
+            }
+            KeyAction::OpenFolder => {
+                return Task::done(Message::Folder(FolderMessage::Pick));
+            }
+            KeyAction::ToggleMetadataPanel => {
+                return Task::done(Message::Settings(SettingsMessage::ToggleMetadataPanel));
+            }
+            KeyAction::RevealInFileManager => {
+                if let Some(entry) = active_entry(state) {
+                    return Task::done(Message::Media(MediaMessage::RevealInExplorer(entry.path)));
+                }
+            }
+            KeyAction::Pin => {
+                return Task::done(Message::Folder(FolderMessage::PickPin));
+            }
+            KeyAction::Unpin => {
+                if let Some(ref c) = state.folder.current_folder {
+                    return Task::done(Message::Folder(FolderMessage::UnpinCurrent(c.clone())));
+                }
+            }
+            KeyAction::GoLeft => {
+                return Task::done(Message::Media(MediaMessage::GoLeft));
+            }
+            KeyAction::GoRight => {
+                return Task::done(Message::Media(MediaMessage::GoRight));
+            }
+            KeyAction::MoveToFolder => {
+                if active_entry(state).is_some()
+                    && let Some(ref dest) = state.folder.selected_folder
+                {
+                    return Task::done(Message::Media(MediaMessage::MoveToFolder(dest.clone())));
+                }
+            }
+            KeyAction::CopyToFolder => {
+                if active_entry(state).is_some()
+                    && let Some(ref dest) = state.folder.selected_folder
+                {
+                    return Task::done(Message::Media(MediaMessage::CopyToFolder(dest.clone())));
+                }
+            }
+            KeyAction::Delete => {
+                if let Some(entry) = active_entry(state) {
+                    return Task::done(Message::Media(MediaMessage::DeleteEntry(entry.path)));
+                }
+            }
+            KeyAction::Rename => {
+                return Task::done(Message::Media(MediaMessage::TriggerRename));
+            }
+            KeyAction::CreateFolder => {
+                return Task::done(Message::Folder(FolderMessage::TriggerCreate));
+            }
+            KeyAction::OpenSelectedFolder => {
+                if let Some(ref selected_path) = state.folder.selected_folder {
+                    return Task::done(Message::Folder(FolderMessage::Open(selected_path.clone())));
+                }
+            }
+            KeyAction::PinSelected => {
+                return Task::done(Message::Folder(FolderMessage::PinSelected));
+            }
+            KeyAction::MovePinnedUp => {
+                if let Some(selected_path) = state.folder.selected_folder.clone() {
+                    return Task::done(Message::Folder(FolderMessage::MovePinnedUp(selected_path)));
+                }
+            }
+            KeyAction::MovePinnedDown => {
+                if let Some(selected_path) = state.folder.selected_folder.clone() {
+                    return Task::done(Message::Folder(FolderMessage::MovePinnedDown(
+                        selected_path,
+                    )));
+                }
+            }
+            KeyAction::FolderUp => {
+                state.folder.select_above();
+                return super::scroll::scroll_to_selected_folder(state);
+            }
+            KeyAction::FolderDown => {
+                state.folder.select_below();
+                return super::scroll::scroll_to_selected_folder(state);
+            }
+            KeyAction::FolderLeft => {
+                state.folder.collapse_selected();
+                return super::scroll::scroll_to_selected_folder(state);
+            }
+            KeyAction::FolderRight => {
+                state.folder.expand_selected();
+                return super::scroll::scroll_to_selected_folder(state);
+            }
+            KeyAction::SearchImages => {
+                return Task::done(Message::Media(MediaMessage::SearchFocused));
+            }
+            KeyAction::Undo | KeyAction::Redo => {}
         }
     }
 
-    match key {
-        Key::Character(c) if c.is_ascii_digit() && c != '0' && alt && !ctrl && !shift => {
-            let digit = c.to_digit(10).expect("c is checked to be an ascii digit") as u8;
-            return Task::done(Message::Folder(FolderMessage::PinShortcut(digit)));
-        }
-        _ => {}
+    if let Key::Character(c) = key
+        && c.is_ascii_digit()
+        && c != '0'
+        && alt
+        && !ctrl
+        && !shift
+    {
+        let digit = c.to_digit(10).expect("c is checked to be an ascii digit") as u8;
+        return Task::done(Message::Folder(FolderMessage::PinShortcut(digit)));
     }
 
     Task::none()

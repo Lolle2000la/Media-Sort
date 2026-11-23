@@ -12,6 +12,9 @@
 //! - avif: native dav1d decode (`avif-native` feature) with an ffmpeg pipe
 //!   fallback for builds without a native AVIF decoder.
 //! - svg/svgz: pure-Rust `resvg` rasterization directly at the target box.
+//! - ico: `ico` crate multi-entry selection (largest entry fitting the target
+//!   box for thumbnails, or largest overall scaled down; largest entry for
+//!   full decode / preview / dimensions).
 //! - audio extensions: embedded cover art, resized with fast_image_resize
 //!   (`thumbnail_image` returns `None` when there is no cover art — that is a
 //!   normal, playable file, not a decode failure).
@@ -26,6 +29,26 @@ use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer
 
 use super::DecodedImage;
 use super::thumbnail::calculate_thumbnail_dimensions;
+
+/// Formats handled by a dedicated decoder/renderer rather than the generic
+/// `image` crate pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpecialImageFormat {
+    Svg,
+    Ico,
+}
+
+/// Detect whether `path` uses a special-format pipeline (case-insensitive).
+pub(crate) fn detect_special_format(path: &Path) -> Option<SpecialImageFormat> {
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    if super::svg::is_svg_extension(ext) {
+        Some(SpecialImageFormat::Svg)
+    } else if ext.eq_ignore_ascii_case("ico") {
+        Some(SpecialImageFormat::Ico)
+    } else {
+        None
+    }
+}
 
 fn extension_lower(path: &Path) -> String {
     path.extension()
@@ -47,8 +70,70 @@ fn to_image_error(err: String) -> image::ImageError {
     ))
 }
 
+fn ico_decoding_error(
+    msg: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> image::ImageError {
+    image::ImageError::Decoding(image::error::DecodingError::new(
+        image::error::ImageFormatHint::Name("ico".to_string()),
+        msg,
+    ))
+}
+
 fn io_image_error(err: std::io::Error) -> image::ImageError {
     image::ImageError::IoError(std::io::Error::new(err.kind(), err.to_string()))
+}
+
+/// Decode a special-format image at full/native resolution as a [`image::DynamicImage`].
+pub(crate) fn load_special_image(
+    path: &Path,
+    fmt: SpecialImageFormat,
+) -> Result<image::DynamicImage, image::ImageError> {
+    match fmt {
+        SpecialImageFormat::Svg => super::svg::load_svg_dynamic(path),
+        SpecialImageFormat::Ico => {
+            let icon_dir = read_ico_dir(path)?;
+            let entry = largest_ico_entry(&icon_dir)?;
+            let decoded = decode_ico_entry(entry)?;
+            super::image_decoder::rgba_to_dynamic(decoded.width, decoded.height, decoded.rgba)
+        }
+    }
+}
+
+/// Read dimensions of a special-format image without full pixel work when possible.
+pub(crate) fn special_image_dimensions(
+    path: &Path,
+    fmt: SpecialImageFormat,
+) -> Result<(u32, u32), image::ImageError> {
+    match fmt {
+        SpecialImageFormat::Svg => super::svg::svg_dimensions(path),
+        SpecialImageFormat::Ico => {
+            let icon_dir = read_ico_dir(path)?;
+            let entry = largest_ico_entry(&icon_dir)?;
+            let (w, h) = (entry.width(), entry.height());
+            let max_dim = super::image_decoder::MAX_DECODE_DIMENSION;
+            if w == 0 || h == 0 || w > max_dim || h > max_dim {
+                return Err(image::ImageError::Limits(
+                    image::error::LimitError::from_kind(
+                        image::error::LimitErrorKind::DimensionError,
+                    ),
+                ));
+            }
+            Ok((w, h))
+        }
+    }
+}
+
+pub(crate) fn render_special_image(
+    path: &Path,
+    fmt: SpecialImageFormat,
+    max_width: u32,
+    max_height: u32,
+    ico_prefer_fit: bool,
+) -> Result<DecodedImage, image::ImageError> {
+    match fmt {
+        SpecialImageFormat::Svg => super::svg::render_svg(path, max_width, max_height),
+        SpecialImageFormat::Ico => decode_ico_box(path, max_width, max_height, ico_prefer_fit),
+    }
 }
 
 /// Decode `path` to fit inside the `max_width` x `max_height` box, preserving
@@ -60,13 +145,24 @@ pub(crate) fn process_image(
     max_width: u32,
     max_height: u32,
 ) -> Result<DecodedImage, image::ImageError> {
-    let ext = extension_lower(path);
+    process_image_with_mode(path, max_width, max_height, false)
+}
 
+fn process_image_with_mode(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+    ico_prefer_fit: bool,
+) -> Result<DecodedImage, image::ImageError> {
+    if let Some(special) = detect_special_format(path) {
+        return render_special_image(path, special, max_width, max_height, ico_prefer_fit);
+    }
+
+    let ext = extension_lower(path);
     match ext.as_str() {
         "jpg" | "jpeg" => jpeg_image(path, max_width, max_height),
         "bmp" | "tga" | "qoi" | "ff" | "farbfeld" => decode_fir_image(path, max_width, max_height),
         "avif" => avif_image(path, max_width, max_height),
-        "svg" | "svgz" => super::svg::render_svg(path, max_width, max_height),
         _ => fallback_image(path, max_width, max_height),
     }
 }
@@ -86,7 +182,7 @@ pub(crate) fn thumbnail_image(
     if is_audio_extension(&extension_lower(path)) {
         return audio_cover_image(path, max_width, max_height);
     }
-    process_image(path, max_width, max_height).map(Some)
+    process_image_with_mode(path, max_width, max_height, true).map(Some)
 }
 
 /// Decode an audio file's embedded cover art into the thumbnail box.
@@ -107,6 +203,76 @@ fn audio_cover_image(
     resize_with_fir(&img.to_rgba8(), max_width, max_height).map(Some)
 }
 
+fn read_ico_dir(path: &Path) -> Result<ico::IconDir, image::ImageError> {
+    let file = std::fs::File::open(path)?;
+    ico::IconDir::read(std::io::BufReader::new(file)).map_err(ico_decoding_error)
+}
+
+fn ico_entry_key(entry: &ico::IconDirEntry) -> (u64, u16) {
+    (
+        u64::from(entry.width()) * u64::from(entry.height()),
+        entry.bits_per_pixel(),
+    )
+}
+
+fn largest_ico_entry(icon_dir: &ico::IconDir) -> Result<&ico::IconDirEntry, image::ImageError> {
+    icon_dir
+        .entries()
+        .iter()
+        .max_by_key(|e| ico_entry_key(e))
+        .ok_or_else(|| ico_decoding_error("ICO file contains no icon entries"))
+}
+
+fn decode_ico_entry(entry: &ico::IconDirEntry) -> Result<DecodedImage, image::ImageError> {
+    let max_dim = super::image_decoder::MAX_DECODE_DIMENSION;
+    if entry.width() > max_dim || entry.height() > max_dim {
+        return Err(image::ImageError::Limits(
+            image::error::LimitError::from_kind(image::error::LimitErrorKind::DimensionError),
+        ));
+    }
+    let icon = entry.decode().map_err(ico_decoding_error)?;
+    let (w, h) = (icon.width(), icon.height());
+    if w == 0 || h == 0 || w > max_dim || h > max_dim {
+        return Err(image::ImageError::Limits(
+            image::error::LimitError::from_kind(image::error::LimitErrorKind::DimensionError),
+        ));
+    }
+    Ok(DecodedImage::new(w, h, icon.rgba_data().to_vec()))
+}
+
+fn decode_ico_box(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+    prefer_fitting_entry: bool,
+) -> Result<DecodedImage, image::ImageError> {
+    let icon_dir = read_ico_dir(path)?;
+    let entry = if prefer_fitting_entry {
+        icon_dir
+            .entries()
+            .iter()
+            .filter(|e| e.width() <= max_width && e.height() <= max_height)
+            .max_by_key(|e| ico_entry_key(e))
+            .map(Ok)
+            .unwrap_or_else(|| largest_ico_entry(&icon_dir))?
+    } else {
+        largest_ico_entry(&icon_dir)?
+    };
+
+    let decoded = decode_ico_entry(entry)?;
+    if max_width > 0 && max_height > 0 && (decoded.width > max_width || decoded.height > max_height)
+    {
+        return resize_rgba_to_box(
+            &decoded.rgba,
+            decoded.width,
+            decoded.height,
+            max_width,
+            max_height,
+        );
+    }
+    Ok(decoded)
+}
+
 fn decode_fir_image(
     path: &Path,
     max_width: u32,
@@ -122,14 +288,23 @@ fn resize_with_fir(
     max_height: u32,
 ) -> Result<DecodedImage, image::ImageError> {
     let (src_w, src_h) = img_rgba.dimensions();
+    resize_rgba_to_box(img_rgba.as_raw(), src_w, src_h, max_width, max_height)
+}
+
+fn resize_rgba_to_box(
+    rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Result<DecodedImage, image::ImageError> {
     let (dst_w, dst_h) = calculate_thumbnail_dimensions(src_w, src_h, max_width, max_height);
 
     if dst_w == 0 || dst_h == 0 {
-        return Ok(DecodedImage::new(src_w, src_h, img_rgba.as_raw().clone()));
+        return Ok(DecodedImage::new(src_w, src_h, rgba.to_vec()));
     }
 
-    let resized =
-        resize_rgba(img_rgba.as_raw(), src_w, src_h, dst_w, dst_h).map_err(to_image_error)?;
+    let resized = resize_rgba(rgba, src_w, src_h, dst_w, dst_h).map_err(to_image_error)?;
     Ok(DecodedImage::new(dst_w, dst_h, resized))
 }
 
@@ -557,5 +732,79 @@ mod tests {
         let (need_w, need_h) = (final_h, final_w); // swapped back
         let f = choose_turbojpeg_scaling_factor(3000, 4000, need_w as usize, need_h as usize);
         assert_eq!(f, turbojpeg::ScalingFactor::ONE_HALF);
+    }
+
+    fn write_test_ico(path: &Path, sizes: &[u32]) {
+        let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
+        for &size in sizes {
+            let rgba = vec![200u8; (size * size * 4) as usize];
+            let image = ico::IconImage::from_rgba_data(size, size, rgba);
+            let entry = ico::IconDirEntry::encode(&image).unwrap();
+            icon_dir.add_entry(entry);
+        }
+        let file = std::fs::File::create(path).unwrap();
+        icon_dir.write(file).unwrap();
+    }
+
+    #[test]
+    fn ico_and_uppercase_ico_thumbnail_preview_and_dimensions() {
+        use image::GenericImageView as _;
+
+        let dir = std::env::temp_dir().join(format!("mediasort_ico_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let lower_ico = dir.join("multi.ico");
+        write_test_ico(&lower_ico, &[16, 48, 256]);
+
+        // Thumbnail picks largest entry <= box (48x48 for 128x128, 16x16 for 32x32).
+        let thumb_128 = super::super::thumbnail::generate_thumbnail(&lower_ico, 128, 128)
+            .unwrap()
+            .expect("ico thumbnail expected");
+        assert_eq!((thumb_128.width, thumb_128.height), (48, 48));
+
+        let thumb_32 = super::super::thumbnail::generate_thumbnail(&lower_ico, 32, 32)
+            .unwrap()
+            .expect("ico thumbnail expected");
+        assert_eq!((thumb_32.width, thumb_32.height), (16, 16));
+
+        let dec_thumb = super::super::image_decoder::generate_thumbnail(&lower_ico, 128, 128)
+            .expect("image_decoder::generate_thumbnail should handle .ico");
+        assert_eq!(dec_thumb.dimensions(), (48, 48));
+
+        // Preview, load_image, and dimension queries pick the largest entry (256x256).
+        let preview = super::super::image_decoder::load_preview(&lower_ico, 1920, 1440).unwrap();
+        assert_eq!((preview.width, preview.height), (256, 256));
+
+        let loaded = super::super::image_decoder::load_image(&lower_ico).unwrap();
+        assert_eq!(loaded.dimensions(), (256, 256));
+
+        assert_eq!(
+            super::super::image_decoder::decode_image_dimensions(&lower_ico).unwrap(),
+            (256, 256)
+        );
+        assert_eq!(
+            super::super::thumbnail::thumbnail_dimensions(&lower_ico).unwrap(),
+            Some((256, 256))
+        );
+
+        // Uppercase .ICO where no entry fits 32x32: picks largest overall (256x256)
+        // and resizes down to 32x32 for thumbnail, while preview decodes 256x256.
+        let upper_ico = dir.join("LARGE.ICO");
+        write_test_ico(&upper_ico, &[64, 256]);
+
+        let upper_thumb = super::super::thumbnail::generate_thumbnail(&upper_ico, 32, 32)
+            .unwrap()
+            .expect("uppercase .ICO thumbnail expected");
+        assert_eq!((upper_thumb.width, upper_thumb.height), (32, 32));
+
+        let upper_preview =
+            super::super::image_decoder::load_preview(&upper_ico, 1920, 1440).unwrap();
+        assert_eq!((upper_preview.width, upper_preview.height), (256, 256));
+        assert_eq!(
+            super::super::image_decoder::decode_image_dimensions(&upper_ico).unwrap(),
+            (256, 256)
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

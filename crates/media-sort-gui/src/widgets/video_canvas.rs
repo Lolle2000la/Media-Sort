@@ -4,7 +4,7 @@ use iced::widget::{column, container, text};
 use iced::{Color, Element, Font, Length};
 use iced_mpv::{MediaControl, media_controls_view};
 
-use crate::message::{MediaMessage, Message};
+use crate::message::{AudioMessage, Message};
 use crate::state::AppState;
 
 pub fn audio_controls_view(
@@ -43,11 +43,11 @@ pub fn audio_controls_view(
         playing,
     })
     .map(|msg| match msg {
-        MediaControl::PlayPause => Message::Media(MediaMessage::AudioPlayPause),
-        MediaControl::Stop => Message::Media(MediaMessage::StopAudio),
-        MediaControl::Seek(v) => Message::Media(MediaMessage::AudioSeek(v)),
-        MediaControl::SetVolume(v) => Message::Media(MediaMessage::AudioSetVolume(v)),
-        MediaControl::ToggleMute => Message::Media(MediaMessage::AudioToggleMute),
+        MediaControl::PlayPause => Message::Audio(AudioMessage::PlayPause),
+        MediaControl::Stop => Message::Audio(AudioMessage::Stop),
+        MediaControl::Seek(v) => Message::Audio(AudioMessage::Seek(v)),
+        MediaControl::SetVolume(v) => Message::Audio(AudioMessage::SetVolume(v)),
+        MediaControl::ToggleMute => Message::Audio(AudioMessage::ToggleMute),
     });
 
     let content = column![

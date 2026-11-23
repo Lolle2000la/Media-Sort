@@ -1,6 +1,8 @@
 use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, text};
 use iced::{Alignment, Color, Element, Length};
+use media_sort_core::settings::keybindings::{KeyAction, KeyActionSection, KeyActionSubsection};
 
+use crate::app::{THEME_OPTIONS, ThemeOption};
 use crate::message::{Message, SettingsMessage};
 use crate::state::{AppState, SettingsUiState};
 use crate::subscriptions::keyboard::format_keybinding;
@@ -9,113 +11,6 @@ const BOLD_FONT: iced::Font = iced::Font {
     weight: iced::font::Weight::Bold,
     ..iced::Font::DEFAULT
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ThemeOption {
-    key: &'static str,
-    name: &'static str,
-}
-
-impl std::fmt::Display for ThemeOption {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name)
-    }
-}
-
-static THEME_OPTIONS: &[ThemeOption] = &[
-    ThemeOption {
-        key: "Auto",
-        name: "Auto",
-    },
-    ThemeOption {
-        key: "Light",
-        name: "Light",
-    },
-    ThemeOption {
-        key: "Dark",
-        name: "Dark",
-    },
-    ThemeOption {
-        key: "Dracula",
-        name: "Dracula",
-    },
-    ThemeOption {
-        key: "Nord",
-        name: "Nord",
-    },
-    ThemeOption {
-        key: "SolarizedLight",
-        name: "Solarized Light",
-    },
-    ThemeOption {
-        key: "SolarizedDark",
-        name: "Solarized Dark",
-    },
-    ThemeOption {
-        key: "GruvboxLight",
-        name: "Gruvbox Light",
-    },
-    ThemeOption {
-        key: "GruvboxDark",
-        name: "Gruvbox Dark",
-    },
-    ThemeOption {
-        key: "CatppuccinLatte",
-        name: "Catppuccin Latte",
-    },
-    ThemeOption {
-        key: "CatppuccinFrappe",
-        name: "Catppuccin Frappe",
-    },
-    ThemeOption {
-        key: "CatppuccinMacchiato",
-        name: "Catppuccin Macchiato",
-    },
-    ThemeOption {
-        key: "CatppuccinMocha",
-        name: "Catppuccin Mocha",
-    },
-    ThemeOption {
-        key: "TokyoNight",
-        name: "Tokyo Night",
-    },
-    ThemeOption {
-        key: "TokyoNightStorm",
-        name: "Tokyo Night Storm",
-    },
-    ThemeOption {
-        key: "TokyoNightLight",
-        name: "Tokyo Night Light",
-    },
-    ThemeOption {
-        key: "KanagawaWave",
-        name: "Kanagawa Wave",
-    },
-    ThemeOption {
-        key: "KanagawaDragon",
-        name: "Kanagawa Dragon",
-    },
-    ThemeOption {
-        key: "KanagawaLotus",
-        name: "Kanagawa Lotus",
-    },
-    ThemeOption {
-        key: "Moonfly",
-        name: "Moonfly",
-    },
-    ThemeOption {
-        key: "Nightfly",
-        name: "Nightfly",
-    },
-    ThemeOption {
-        key: "Oxocarbon",
-        name: "Oxocarbon",
-    },
-    ThemeOption {
-        key: "Ferra",
-        name: "Ferra",
-    },
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocaleOption {
@@ -139,47 +34,15 @@ fn locale_options() -> Vec<LocaleOption> {
         .collect()
 }
 
-fn get_keybinding(
-    state: &AppState,
-    idx: usize,
-) -> &media_sort_core::settings::keybindings::KeyBinding {
-    let kb = &state.settings.keybindings;
-    match idx {
-        0 => &kb.move_to_folder,
-        1 => &kb.copy_to_folder,
-        2 => &kb.delete,
-        3 => &kb.rename,
-        4 => &kb.go_left,
-        5 => &kb.go_right,
-        6 => &kb.create_folder,
-        7 => &kb.folder_up,
-        8 => &kb.folder_left,
-        9 => &kb.folder_down,
-        10 => &kb.folder_right,
-        11 => &kb.undo,
-        12 => &kb.redo,
-        13 => &kb.open_folder,
-        14 => &kb.open_selected_folder,
-        15 => &kb.pin,
-        16 => &kb.pin_selected,
-        17 => &kb.unpin,
-        18 => &kb.move_pinned_up,
-        19 => &kb.move_pinned_down,
-        20 => &kb.search_images,
-        21 => &kb.toggle_metadata_panel,
-        22 => &kb.reveal_in_file_manager,
-        _ => panic!("Invalid keybinding index: {}", idx),
-    }
-}
-
-fn keybinding_row<'a>(state: &'a AppState, idx: usize, label: String) -> Element<'a, Message> {
-    let binding = get_keybinding(state, idx);
+fn keybinding_row<'a>(state: &'a AppState, action: KeyAction) -> Element<'a, Message> {
+    let binding = action.binding(&state.settings.keybindings);
+    let label = state.l10n.tr(action.l10n_key());
     let is_editing = matches!(
         &state.settings_ui,
         SettingsUiState::Keybindings {
-            editing_keybinding: Some(i),
+            editing_keybinding: Some(active),
             ..
-        } if *i == idx
+        } if *active == action
     );
     let shortcut_text = if is_editing {
         state.l10n.tr("keybindings-press-key")
@@ -197,14 +60,14 @@ fn keybinding_row<'a>(state: &'a AppState, idx: usize, label: String) -> Element
 
     let kb_container = container(
         button(btn_label)
-            .on_press(Message::Settings(SettingsMessage::EditKeyBinding(idx)))
+            .on_press(Message::Settings(SettingsMessage::EditKeyBinding(action)))
             .style(iced::widget::button::secondary)
             .width(Length::Fixed(120.0)),
     );
     #[cfg(feature = "demo")]
     let kb_container = kb_container.id(iced_automation::static_widget_id(format!(
         "keybinding_edit_{}",
-        idx
+        action.id()
     )));
 
     row![
@@ -423,112 +286,30 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                 ))
                 .style(iced::widget::button::secondary);
 
-            // Images Section
-            let images_management = keybinding_subsection(
-                state.l10n.tr("keybindings-management"),
-                vec![
-                    keybinding_row(state, 0, state.l10n.tr("keybindings-move")),
-                    keybinding_row(state, 1, state.l10n.tr("keybindings-copy")),
-                    keybinding_row(state, 2, state.l10n.tr("keybindings-delete")),
-                    keybinding_row(state, 3, state.l10n.tr("keybindings-rename")),
-                    keybinding_row(
-                        state,
-                        22,
-                        state.l10n.tr("keybindings-reveal-in-file-manager"),
-                    ),
-                ],
-            );
-            let images_selection = keybinding_subsection(
-                state.l10n.tr("keybindings-selection"),
-                vec![
-                    keybinding_row(state, 4, state.l10n.tr("keybindings-select-left")),
-                    keybinding_row(state, 5, state.l10n.tr("keybindings-select-right")),
-                ],
-            );
-            let images_search = keybinding_subsection(
-                state.l10n.tr("keybindings-search"),
-                vec![keybinding_row(
-                    state,
-                    20,
-                    state.l10n.tr("keybindings-search-images"),
-                )],
-            );
-            let images_metadata = keybinding_subsection(
-                state.l10n.tr("keybindings-metadata"),
-                vec![keybinding_row(
-                    state,
-                    21,
-                    state.l10n.tr("keybindings-toggle-metadata"),
-                )],
-            );
-            let images_section = keybinding_section(
-                state.l10n.tr("keybindings-images"),
-                vec![
-                    images_management,
-                    images_selection,
-                    images_search,
-                    images_metadata,
-                ],
-            );
-
-            // Folders Section
-            let folders_management = keybinding_subsection(
-                state.l10n.tr("keybindings-management"),
-                vec![keybinding_row(
-                    state,
-                    6,
-                    state.l10n.tr("keybindings-create-folder"),
-                )],
-            );
-            let folders_selection = keybinding_subsection(
-                state.l10n.tr("keybindings-selection"),
-                vec![
-                    keybinding_row(state, 7, state.l10n.tr("keybindings-select-above")),
-                    keybinding_row(state, 8, state.l10n.tr("keybindings-collapse")),
-                    keybinding_row(state, 9, state.l10n.tr("keybindings-select-below")),
-                    keybinding_row(state, 10, state.l10n.tr("keybindings-expand")),
-                ],
-            );
-            let folders_open = keybinding_subsection(
-                state.l10n.tr("keybindings-open"),
-                vec![
-                    keybinding_row(state, 13, state.l10n.tr("keybindings-open-folder")),
-                    keybinding_row(state, 14, state.l10n.tr("keybindings-open-selected")),
-                ],
-            );
-            let folders_pinned = keybinding_subsection(
-                state.l10n.tr("keybindings-pinned"),
-                vec![
-                    keybinding_row(state, 15, state.l10n.tr("keybindings-pin")),
-                    keybinding_row(state, 16, state.l10n.tr("keybindings-pin-selected")),
-                    keybinding_row(state, 17, state.l10n.tr("keybindings-unpin")),
-                    keybinding_row(state, 18, state.l10n.tr("keybindings-move-pinned-up")),
-                    keybinding_row(state, 19, state.l10n.tr("keybindings-move-pinned-down")),
-                ],
-            );
-            let folders_section = keybinding_section(
-                state.l10n.tr("keybindings-folders"),
-                vec![
-                    folders_management,
-                    folders_selection,
-                    folders_open,
-                    folders_pinned,
-                ],
-            );
-
-            // Other Section
-            let other_history = keybinding_subsection(
-                state.l10n.tr("keybindings-history"),
-                vec![
-                    keybinding_row(state, 11, state.l10n.tr("keybindings-undo")),
-                    keybinding_row(state, 12, state.l10n.tr("keybindings-redo")),
-                ],
-            );
-            let other_section =
-                keybinding_section(state.l10n.tr("keybindings-other"), vec![other_history]);
+            let sections = KeyActionSection::iter().map(|section| {
+                let subsections: Vec<Element<'_, Message>> = KeyActionSubsection::iter()
+                    .filter_map(|subsection| {
+                        let rows: Vec<Element<'_, Message>> = KeyAction::iter()
+                            .filter(|action| {
+                                action.section() == section && action.subsection() == subsection
+                            })
+                            .map(|action| keybinding_row(state, action))
+                            .collect();
+                        if rows.is_empty() {
+                            None
+                        } else {
+                            Some(keybinding_subsection(
+                                state.l10n.tr(subsection.l10n_key()),
+                                rows,
+                            ))
+                        }
+                    })
+                    .collect();
+                keybinding_section(state.l10n.tr(section.l10n_key()), subsections)
+            });
 
             let bindings_column =
-                column![restore_btn, images_section, folders_section, other_section,].spacing(16);
+                column(std::iter::once(restore_btn.into()).chain(sections)).spacing(16);
 
             scrollable(bindings_column).height(Length::Fill).into()
         }

@@ -35,7 +35,6 @@ bytemuck = "1"
 dirs = { workspace = true }
 serde = { workspace = true }
 rayon.workspace = true
-ico.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 
 velopack = { version = "1.2", optional = true }
@@ -45,7 +44,6 @@ memmap2 = { version = "0.9", optional = true }
 serde_json = { workspace = true, optional = true }
 iced_runtime = { version = "0.14", optional = true }
 iced_test = { version = "0.14", optional = true }
-open = { version = "5.4.0", features = ["shellexecute-on-windows"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 embed-resource = "3.0.11"
@@ -55,4 +53,5 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+iced-mpv = { path = "../iced-mpv", features = ["test-utils"] }
 toml.workspace = true

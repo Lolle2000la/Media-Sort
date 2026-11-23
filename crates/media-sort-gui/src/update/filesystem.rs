@@ -120,9 +120,7 @@ pub fn handle_filesystem_events(
                     if let Some(name) = to.file_name() {
                         state.folder.pinned_folders[pos].name = name.to_string_lossy().to_string();
                     }
-                    if let Some(stored) = state.settings.pinned_folders.paths.get_mut(pos) {
-                        *stored = to.to_string_lossy().to_string();
-                    }
+                    state.sync_pinned_folders_to_settings();
                     state.settings.mark_dirty();
                 }
                 // A folder rename changes the displayed children of the
@@ -203,7 +201,7 @@ pub fn handle_filesystem_events(
         state.media_grid.selected_index = None;
         state.folder.folder_tree.clear();
         state.folder.invalidate_visible_folders_cache();
-        state.video.select(None);
+        state.clear_active_preview();
         return Task::none();
     }
 

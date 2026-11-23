@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use media_sort_backend::filesystem::watcher::FileSystemEvent;
-use media_sort_core::settings::keybindings::Key;
+use media_sort_core::settings::keybindings::{Key, KeyAction};
 use media_sort_core::settings::store::SettingsStore;
 
 #[cfg_attr(feature = "demo", iced_automation::message)]
@@ -31,6 +31,8 @@ pub enum Message {
     Folder(FolderMessage),
     #[automation(dispatch)]
     Media(MediaMessage),
+    #[serde(skip_deserializing)]
+    Audio(AudioMessage),
     #[serde(skip_deserializing)]
     Video(iced_mpv::PlayerMessage),
     #[serde(skip_deserializing)]
@@ -86,7 +88,7 @@ pub enum SettingsMessage {
     Save,
     RestoreDefaultKeyBindings,
     OpenKeybindings,
-    EditKeyBinding(usize),
+    EditKeyBinding(#[serde(deserialize_with = "deserialize_key_action")] KeyAction),
     ToggleMetadataPanel,
     StartDragFolderDivider,
     StartDragMetadataDivider,
@@ -158,7 +160,7 @@ pub enum MediaMessage {
     #[serde(skip_deserializing)]
     ThumbnailReady(PathBuf, u32, u32, Vec<u8>),
     #[serde(skip_deserializing)]
-    ThumbnailFailed(PathBuf, crate::subscriptions::prefetch::ThumbnailError),
+    ThumbnailFailed(PathBuf, crate::thumbnails::ThumbnailError),
     #[serde(skip_deserializing)]
     ThumbnailCancelled(PathBuf),
     #[serde(skip_deserializing)]
@@ -167,11 +169,51 @@ pub enum MediaMessage {
     MetadataLoaded(Result<BTreeMap<String, BTreeMap<String, String>>, String>),
     OpenExternal(PathBuf),
     RevealInExplorer(PathBuf),
-    StopAudio,
-    AudioSeek(f64),
-    AudioSetVolume(f64),
-    AudioToggleMute,
-    AudioPlayPause,
+}
+
+#[derive(Debug, Clone)]
+pub enum AudioMessage {
+    PlayPause,
+    Stop,
+    Seek(f64),
+    SetVolume(f64),
+    ToggleMute,
+    CoverLoaded(PathBuf, Option<(u32, u32, Vec<u8>)>),
+}
+
+fn deserialize_key_action<'de, D>(deserializer: D) -> Result<KeyAction, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct KeyActionVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for KeyActionVisitor {
+        type Value = KeyAction;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a KeyAction id/name or index")
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            KeyAction::iter()
+                .nth(v as usize)
+                .ok_or_else(|| E::custom(format!("KeyAction index out of range: {v}")))
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            KeyAction::iter()
+                .find(|a| a.id() == v || format!("{a:?}").eq_ignore_ascii_case(v))
+                .ok_or_else(|| E::custom(format!("unknown KeyAction: {v}")))
+        }
+    }
+
+    deserializer.deserialize_any(KeyActionVisitor)
 }
 
 #[cfg(feature = "velopack")]
