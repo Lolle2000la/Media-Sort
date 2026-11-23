@@ -13,12 +13,14 @@
 #
 # Examples:
 #   scripts/release.sh 3.0.0-alpha.18 -F /tmp/notes.md
+#   scripts/release.sh 3.0.2 -F notes.md -t "Image-Sort is now Media-Sort!"
 #   scripts/release.sh 3.0.0 -m "First stable release of the Rust rewrite."
 #   scripts/release.sh 3.0.0-alpha.19 --dry-run
 #
 # Options:
 #   -m, --message <text>    Signed tag message (the release summary).
 #   -F, --notes-file <file> Read the tag message from a file.
+#   -t, --title <text>      Release title (default: the tag name).
 #       --require-ci        Fail unless every Actions run for HEAD succeeded.
 #       --no-push           Stop after creating the tag; push it yourself.
 #       --dry-run           Validate and print the plan; change nothing.
@@ -44,6 +46,9 @@ set -euo pipefail
 VERSION=""
 TAG_MESSAGE=""
 NOTES_FILE=""
+RELEASE_TITLE=""
+TITLE_SET=0
+TAG_MSG_FILE=""
 REQUIRE_CI=0
 NO_PUSH=0
 DRY_RUN=0
@@ -63,12 +68,14 @@ Usage:
 
 Examples:
   scripts/release.sh 3.0.0-alpha.18 -F /tmp/notes.md
+  scripts/release.sh 3.0.2 -F notes.md -t "Image-Sort is now Media-Sort!"
   scripts/release.sh 3.0.0 -m "First stable release of the Rust rewrite."
   scripts/release.sh 3.0.0-alpha.19 --dry-run
 
 Options:
   -m, --message <text>    Signed tag message (the release summary).
   -F, --notes-file <file> Read the tag message from a file.
+  -t, --title <text>      Release title (default: the tag name).
       --require-ci        Fail unless every Actions run for HEAD succeeded.
       --no-push           Stop after creating the tag; push it yourself.
       --dry-run           Validate and print the plan; change nothing.
@@ -86,6 +93,9 @@ while [ $# -gt 0 ]; do
     -F|--notes-file)
       [ $# -ge 2 ] || die "$1 requires an argument"
       NOTES_FILE="$2"; shift 2 ;;
+    -t|--title)
+      [ $# -ge 2 ] || die "$1 requires an argument"
+      RELEASE_TITLE="$2"; TITLE_SET=1; shift 2 ;;
     --require-ci) REQUIRE_CI=1; shift ;;
     --no-push) NO_PUSH=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -106,6 +116,20 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+
   die "invalid version '$VERSION' (expected e.g. 3.0.0 or 3.0.0-alpha.18)"
 fi
 TAG="v$VERSION"
+
+# The title travels to CI inside the signed tag message, because the tag is the
+# only artifact that goes from this machine to the release workflow: it is
+# appended there as a `Release-Title:` trailer that release.yml strips back out
+# of the notes body and applies with `gh release edit --title`.
+if [ "$TITLE_SET" -eq 1 ]; then
+  case "$RELEASE_TITLE" in
+    *$'\n'*|*$'\r'*) die "release title must be a single line" ;;
+  esac
+  # Trim leading and trailing whitespace.
+  RELEASE_TITLE="${RELEASE_TITLE#"${RELEASE_TITLE%%[![:space:]]*}"}"
+  RELEASE_TITLE="${RELEASE_TITLE%"${RELEASE_TITLE##*[![:space:]]}"}"
+  [ -n "$RELEASE_TITLE" ] || die "release title is empty after trimming whitespace"
+fi
 
 command -v cargo >/dev/null || die "cargo not found on PATH"
 
@@ -228,6 +252,11 @@ info "build:     $BUILD_NUMBER (CFBundleVersion / FILEVERSION)"
 info "appstream: <release version=\"$VERSION\" date=\"$RELEASE_DATE\"/>"
 info "branch:    $BRANCH"
 info "tag:       $TAG (signed)"
+if [ -n "$RELEASE_TITLE" ]; then
+  info "title:     $RELEASE_TITLE"
+else
+  info "title:     (tag name — pass -t to set one)"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   info "dry run: no changes made"
@@ -241,6 +270,9 @@ COMMITTED=0
 
 restore() {
   local code=$?
+  if [ -n "$TAG_MSG_FILE" ]; then
+    rm -f "$TAG_MSG_FILE"
+  fi
   if [ "$code" -ne 0 ] && [ "$COMMITTED" -eq 0 ] && [ "$BUMPED" -eq 1 ]; then
     warn "rolling back the version files"
     git checkout -- Cargo.toml Cargo.lock "$INFO_PLIST" "$RC_FILE" "$METAINFO_XML" 2>/dev/null || true
@@ -452,6 +484,21 @@ git commit -m "chore: bump version to $VERSION"
 COMMITTED=1
 
 info "creating signed tag $TAG"
+# git tag refuses -m together with -F, so a title is carried by assembling the
+# complete message (body, blank line, trailer) into a temp file instead. The
+# body is rebuilt from the already-chosen TAG_ARGS, so a titled tag and an
+# untitled one always carry the same message. It is created here, after the
+# --dry-run exit and the restore trap, so a dry run leaks nothing and a failed
+# run cleans it up.
+if [ -n "$RELEASE_TITLE" ]; then
+  TAG_MSG_FILE="$(mktemp)"
+  case "${TAG_ARGS[0]}" in
+    -F) cat -- "${TAG_ARGS[1]}" > "$TAG_MSG_FILE" ;;
+    *)  printf '%s\n' "${TAG_ARGS[1]}" > "$TAG_MSG_FILE" ;;
+  esac
+  printf '\nRelease-Title: %s\n' "$RELEASE_TITLE" >> "$TAG_MSG_FILE"
+  TAG_ARGS=(-F "$TAG_MSG_FILE")
+fi
 git tag -s "$TAG" "${TAG_ARGS[@]}" || {
   die "failed to create the signed tag; is tag signing configured (tag.gpgsign / user.signingkey)?"
 }

@@ -525,8 +525,27 @@ jobs:
       - name: Extract Tag Message
         run: |
           TAG_TEXT=$(git tag -l --format='%(contents)' ${{ github.ref_name }} | sed '/-----BEGIN/,/-----END/d')
-          if [ ! -z "$TAG_TEXT" ]; then
-            echo "$TAG_TEXT" > CHANGES.md
+          # A release title rides in the tag message as a `Release-Title:`
+          # trailer written by scripts/release.sh, always as the FINAL line. Only
+          # that last line is treated as a trailer (and only it is dropped), so
+          # release notes that merely quote the syntax keep every line and set
+          # no title; without a trailer the notes stay byte-identical to a
+          # release cut before titles existed.
+          LAST_LINE="$(printf '%s\n' "$TAG_TEXT" | tail -n 1)"
+          if [[ "$LAST_LINE" == Release-Title:* ]]; then
+            RELEASE_TITLE="${LAST_LINE#Release-Title:}"
+            RELEASE_TITLE="${RELEASE_TITLE#"${RELEASE_TITLE%%[![:space:]]*}"}"
+            RELEASE_TITLE="${RELEASE_TITLE%"${RELEASE_TITLE##*[![:space:]]}"}"
+            TAG_BODY="$(printf '%s\n' "$TAG_TEXT" | sed '$d')"
+          else
+            RELEASE_TITLE=""
+            TAG_BODY="$TAG_TEXT"
+          fi
+          if [ -n "$RELEASE_TITLE" ]; then
+            echo "RELEASE_TITLE=$RELEASE_TITLE" >> "$GITHUB_ENV"
+          fi
+          if [ ! -z "$TAG_BODY" ]; then
+            echo "$TAG_BODY" > CHANGES.md
             echo -e "\n\n## Changelog" >> CHANGES.md
           else
             touch CHANGES.md
@@ -672,10 +691,20 @@ jobs:
         run: |
           echo "All platforms compiled, signed, and merged. Publishing release..."
           RAW_VERSION="${{ github.ref_name }}"
+          # The title comes from the `Release-Title:` trailer that
+          # scripts/release.sh writes into the signed tag message ("Extract Tag
+          # Message" exports it as RELEASE_TITLE). It must be applied here,
+          # after "Merge Duplicate Releases for Tag": that step deletes every
+          # non-oldest release for the tag and copies no name, so a title set at
+          # creation (vpk upload github) would not survive.
+          TITLE_ARGS=()
+          if [ -n "${RELEASE_TITLE:-}" ]; then
+            TITLE_ARGS=(--title "$RELEASE_TITLE")
+          fi
           if [[ "$RAW_VERSION" == *"-"* ]]; then
             echo "Pre-release version detected. Publishing as pre-release..."
-            gh release edit "$RAW_VERSION" --draft=false --prerelease --notes-file CHANGES.md
+            gh release edit "$RAW_VERSION" --draft=false --prerelease --notes-file CHANGES.md "${TITLE_ARGS[@]}"
           else
             echo "Stable version detected. Publishing as stable release..."
-            gh release edit "$RAW_VERSION" --draft=false --prerelease=false --latest --notes-file CHANGES.md
+            gh release edit "$RAW_VERSION" --draft=false --prerelease=false --latest --notes-file CHANGES.md "${TITLE_ARGS[@]}"
           fi
