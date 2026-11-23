@@ -144,6 +144,10 @@ mod tests {
         for p in [
             "sample.pdf",
             "SAMPLE.PDF",
+            "comic.cbz",
+            "COMIC.CB7",
+            "comic.cbt",
+            "comic.cbr",
             "readme.md",
             "guide.MARKDOWN",
             "notes.txt",

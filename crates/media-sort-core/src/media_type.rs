@@ -29,7 +29,15 @@ pub static NATIVE_AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "ogg", "wav", "aac", "m4a", "wma", "opus", "aiff",
 ];
 
-pub static NATIVE_DOCUMENT_EXTS: &[&str] = &["pdf", "md", "markdown", "txt", "csv", "tsv"];
+#[rustfmt::skip]
+pub static NATIVE_DOCUMENT_EXTS: &[&str] = &[
+    // PDF
+    "pdf",
+    // Comic book archives
+    "cbz", "cb7", "cbt", "cbr",
+    // Plain text / Markdown / delimited tables
+    "txt", "md", "markdown", "csv", "tsv",
+];
 
 pub static SYSTEM_REGISTRY: OnceLock<MediaRegistry> = OnceLock::new();
 
@@ -45,6 +53,7 @@ pub enum MediaType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DocumentKind {
     Pdf,
+    Comic,
     Markdown,
     PlainText,
 }
@@ -54,6 +63,7 @@ impl DocumentKind {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_lowercase().as_str() {
             "pdf" => Some(Self::Pdf),
+            "cbz" | "cb7" | "cbt" | "cbr" => Some(Self::Comic),
             "md" | "markdown" => Some(Self::Markdown),
             "txt" | "csv" | "tsv" => Some(Self::PlainText),
             _ => None,
@@ -321,6 +331,10 @@ mod tests {
     fn test_document_extensions_and_kind() {
         let exts = MediaType::Document.extensions();
         assert!(exts.contains(&"pdf"));
+        assert!(exts.contains(&"cbz"));
+        assert!(exts.contains(&"cb7"));
+        assert!(exts.contains(&"cbt"));
+        assert!(exts.contains(&"cbr"));
         assert!(exts.contains(&"md"));
         assert!(exts.contains(&"markdown"));
         assert!(exts.contains(&"txt"));
@@ -332,6 +346,10 @@ mod tests {
             Some(MediaType::Document)
         );
         assert_eq!(
+            MediaRegistry::determine_type("CBZ"),
+            Some(MediaType::Document)
+        );
+        assert_eq!(
             MediaRegistry::determine_type("MD"),
             Some(MediaType::Document)
         );
@@ -340,6 +358,22 @@ mod tests {
             Some(MediaType::Document)
         );
         assert_eq!(DocumentKind::from_extension("pdf"), Some(DocumentKind::Pdf));
+        assert_eq!(
+            DocumentKind::from_extension("CBZ"),
+            Some(DocumentKind::Comic)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("cb7"),
+            Some(DocumentKind::Comic)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("cbt"),
+            Some(DocumentKind::Comic)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("cbr"),
+            Some(DocumentKind::Comic)
+        );
         assert_eq!(
             DocumentKind::from_extension("md"),
             Some(DocumentKind::Markdown)

@@ -35,6 +35,7 @@ Supported native audio formats (decoded via Symphonia / Rodio):
 Supported document formats (rendered and parsed in pure Rust):
 
 - **PDF:** PDF.
+- **Comic Archives:** CBZ, CB7, CBT, CBR.
 - **Text & Data:** Markdown (MD, MARKDOWN), CSV, TSV, and plain text (TXT).
 
 ---
@@ -43,12 +44,12 @@ Supported document formats (rendered and parsed in pure Rust):
 
 When you select a media file, the metadata panel displays details read directly from the file structure:
 
-| Media Type    | Extracted Metadata Attributes                                                                                                                      | Key Library                                   |
-| :------------ | :------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------- |
-| **Images**    | EXIF fields (Camera model, Exposure time, ISO, F-number, Date taken, GPS coordinates) and image dimensions (width/height, including SVG/SVGZ)      | `kamadak-exif`, `image` crate, `resvg`        |
-| **Audio**     | Audio tags (Title, Artist, Album, Year, Genre, Track number for MP3/AIFF/WAV; all Vorbis comments for FLAC; all container tags for OGG/OPUS/WMA)   | `id3` / `metaflac` / `mp4ameta` / `symphonia` |
-| **Video**     | Container tag metadata (Title, Artist, Album, Year, Genre, Track, Total Tracks for MP4/M4V/MOV; all container tags for MKV/WebM and other formats) | `mp4ameta` / `symphonia`                      |
-| **Documents** | Document kind, page count, title/author/creation metadata, and line/word/encoding details                                                          | `hayro`, `csv`                                |
+| Media Type    | Extracted Metadata Attributes                                                                                                                      | Key Library                                                        |
+| :------------ | :------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------- |
+| **Images**    | EXIF fields (Camera model, Exposure time, ISO, F-number, Date taken, GPS coordinates) and image dimensions (width/height, including SVG/SVGZ)      | `kamadak-exif`, `image` crate, `resvg`                             |
+| **Audio**     | Audio tags (Title, Artist, Album, Year, Genre, Track number for MP3/AIFF/WAV; all Vorbis comments for FLAC; all container tags for OGG/OPUS/WMA)   | `id3` / `metaflac` / `mp4ameta` / `symphonia`                      |
+| **Video**     | Container tag metadata (Title, Artist, Album, Year, Genre, Track, Total Tracks for MP4/M4V/MOV; all container tags for MKV/WebM and other formats) | `mp4ameta` / `symphonia`                                           |
+| **Documents** | Document kind, page count, title/author/creation metadata, comic info, and line/word/encoding details                                              | `hayro`, `csv`, `zip`/`sevenz-rust2`/`tar`/`rarchive`, `quick-xml` |
 
 ---
 

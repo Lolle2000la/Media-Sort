@@ -7,7 +7,6 @@ edition.workspace = true
 media-sort-core = { path = "../media-sort-core" }
 image = { workspace = true, features = ["avif-native"] }
 notify.workspace = true
-trash.workspace = true
 walkdir.workspace = true
 kamadak-exif.workspace = true
 symphonia.workspace = true
@@ -23,12 +22,20 @@ fast_image_resize.workspace = true
 rayon.workspace = true
 turbojpeg = "1.5"
 hayro.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
+sevenz-rust2.workspace = true
+tar.workspace = true
 csv.workspace = true
+rarchive.workspace = true
 resvg.workspace = true
 flate2.workspace = true
 open.workspace = true
 ico.workspace = true
 lru.workspace = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+trash.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg.workspace = true

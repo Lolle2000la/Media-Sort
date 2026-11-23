@@ -35,6 +35,7 @@ Unterstützte native Audioformate (dekodiert über Symphonia / Rodio):
 Unterstützte Dokumentformate (in reinem Rust gerendert und geparst):
 
 - **PDF:** PDF.
+- **Comic-Archive:** CBZ, CB7, CBT, CBR.
 - **Text & Daten:** Markdown (MD, MARKDOWN), CSV, TSV und Klartext (TXT).
 
 ---
@@ -43,12 +44,12 @@ Unterstützte Dokumentformate (in reinem Rust gerendert und geparst):
 
 Wenn Sie eine Mediendatei auswählen, zeigt das Metadaten-Panel Details an, die direkt aus der Dateistruktur gelesen werden:
 
-| Medientyp     | Extrahierte Metadaten-Attribute                                                                                                                              | Wichtigste Library                            |
-| :------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------- |
-| **Bilder**    | EXIF-Felder (Kameramodell, Belichtungszeit, ISO, Blendenzahl, Aufnahmedatum, GPS-Koordinaten) und Bildabmessungen (Breite/Höhe, einschließlich SVG/SVGZ)     | `kamadak-exif`, `image`-Crate, `resvg`        |
-| **Audio**     | Audio-Tags (Titel, Künstler, Album, Jahr, Genre, Tracknummer für MP3/AIFF/WAV; alle Vorbis-Kommentare für FLAC; alle Container-Tags für OGG/OPUS/WMA)        | `id3` / `metaflac` / `mp4ameta` / `symphonia` |
-| **Video**     | Container-Tag-Metadaten (Titel, Künstler, Album, Jahr, Genre, Track, Gesamttitelanzahl für MP4/M4V/MOV; alle Container-Tags für MKV/WebM und andere Formate) | `mp4ameta` / `symphonia`                      |
-| **Dokumente** | Dokumentart, Seitenanzahl, Titel-/Autor-/Erstellungsdaten sowie Zeilen-/Wort-/Kodierungsdetails                                                              | `hayro`, `csv`                                |
+| Medientyp     | Extrahierte Metadaten-Attribute                                                                                                                              | Wichtigste Library                                                 |
+| :------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------- |
+| **Bilder**    | EXIF-Felder (Kameramodell, Belichtungszeit, ISO, Blendenzahl, Aufnahmedatum, GPS-Koordinaten) und Bildabmessungen (Breite/Höhe, einschließlich SVG/SVGZ)     | `kamadak-exif`, `image`-Crate, `resvg`                             |
+| **Audio**     | Audio-Tags (Titel, Künstler, Album, Jahr, Genre, Tracknummer für MP3/AIFF/WAV; alle Vorbis-Kommentare für FLAC; alle Container-Tags für OGG/OPUS/WMA)        | `id3` / `metaflac` / `mp4ameta` / `symphonia`                      |
+| **Video**     | Container-Tag-Metadaten (Titel, Künstler, Album, Jahr, Genre, Track, Gesamttitelanzahl für MP4/M4V/MOV; alle Container-Tags für MKV/WebM und andere Formate) | `mp4ameta` / `symphonia`                                           |
+| **Dokumente** | Dokumentart, Seitenanzahl, Titel-/Autor-/Erstellungsdaten, ComicInfo sowie Zeilen-/Wort-/Kodierungsdetails                                                   | `hayro`, `csv`, `zip`/`sevenz-rust2`/`tar`/`rarchive`, `quick-xml` |
 
 ---
 
