@@ -525,8 +525,18 @@ jobs:
       - name: Extract Tag Message
         run: |
           TAG_TEXT=$(git tag -l --format='%(contents)' ${{ github.ref_name }} | sed '/-----BEGIN/,/-----END/d')
-          if [ ! -z "$TAG_TEXT" ]; then
-            echo "$TAG_TEXT" > CHANGES.md
+          # A release title rides in the tag message as a `Release-Title:`
+          # trailer written by scripts/release.sh. Pull it out of the typed
+          # message (unset when no trailer was written, so the release keeps the
+          # tag as its name) and hand it to the publish step through the
+          # environment; the remaining body becomes the published notes.
+          RELEASE_TITLE="$(printf '%s\n' "$TAG_TEXT" | sed -n 's/^Release-Title:[[:space:]]*//p' | tail -n 1)"
+          if [ -n "$RELEASE_TITLE" ]; then
+            echo "RELEASE_TITLE=$RELEASE_TITLE" >> "$GITHUB_ENV"
+          fi
+          TAG_BODY="$(printf '%s\n' "$TAG_TEXT" | sed '/^Release-Title:/d')"
+          if [ ! -z "$TAG_BODY" ]; then
+            echo "$TAG_BODY" > CHANGES.md
             echo -e "\n\n## Changelog" >> CHANGES.md
           else
             touch CHANGES.md
@@ -672,10 +682,20 @@ jobs:
         run: |
           echo "All platforms compiled, signed, and merged. Publishing release..."
           RAW_VERSION="${{ github.ref_name }}"
+          # The title comes from the `Release-Title:` trailer that
+          # scripts/release.sh writes into the signed tag message ("Extract Tag
+          # Message" exports it as RELEASE_TITLE). It must be applied here,
+          # after "Merge Duplicate Releases for Tag": that step deletes every
+          # non-oldest release for the tag and copies no name, so a title set at
+          # creation (vpk upload github) would not survive.
+          TITLE_ARGS=()
+          if [ -n "${RELEASE_TITLE:-}" ]; then
+            TITLE_ARGS=(--title "$RELEASE_TITLE")
+          fi
           if [[ "$RAW_VERSION" == *"-"* ]]; then
             echo "Pre-release version detected. Publishing as pre-release..."
-            gh release edit "$RAW_VERSION" --draft=false --prerelease --notes-file CHANGES.md
+            gh release edit "$RAW_VERSION" --draft=false --prerelease --notes-file CHANGES.md "${TITLE_ARGS[@]}"
           else
             echo "Stable version detected. Publishing as stable release..."
-            gh release edit "$RAW_VERSION" --draft=false --prerelease=false --latest --notes-file CHANGES.md
+            gh release edit "$RAW_VERSION" --draft=false --prerelease=false --latest --notes-file CHANGES.md "${TITLE_ARGS[@]}"
           fi
