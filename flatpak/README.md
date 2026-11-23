@@ -199,10 +199,19 @@ sha256 only when built from the same tag.
 
 ## Version maintenance
 
-- bump the `media-sort` source's `tag` and `commit`, and the vendor source's
-  `url`/`sha256`, together — by hand, or let Flathub's external data checker do
-  it: `x-checker-data` is on both sources and keeps them in sync (the other
-  sources, mpv/libass/libplacebo, are checked the same way);
+- the **dependency modules** — `mpv`, `libass`, `libplacebo`, `zimg`,
+  `wayland-protocols`, `libXpresent` — are bumped automatically:
+  `scripts/bump-flatpak.py` re-checks each upstream with the repository's
+  14-day soak and rewrites the module's tag *and* the commit that tag resolves
+  to (Flathub rejects a tag-only source), and
+  `.github/workflows/flatpak-bump.yml` runs it weekly, builds the result with
+  the same gate as `flatpak-build.yml`, and opens a draft PR on
+  `chore/flatpak-bump`. Run it by hand with `scripts/bump-flatpak.py` (report),
+  `--check` (exit 2 when behind), or `--apply`;
+- the **`media-sort` source** (`tag` and `commit`) and the **vendor source**
+  (`url`/`sha256`) are release-owned: bump them together when a release is cut
+  — by hand, or let Flathub's external data checker do it (`x-checker-data` is
+  on both sources);
 - `release.yml` attaches `cargo-vendor.tar.gz` to every tag;
 - the metainfo `<release>` entry is written by `scripts/release.sh` when the tag
   is cut, so only a hand-made tag needs it added manually;

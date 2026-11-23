@@ -61,7 +61,7 @@ cleanup:
   - '*.la'
 
 modules:
-  # libass and libplacebo are unconditional build dependencies of mpv 0.41 and
+  # libass and libplacebo are unconditional build dependencies of mpv and
   # are not part of the freedesktop runtime/SDK. Their own dependencies do come
   # from the SDK (freetype, fontconfig, harfbuzz, fribidi, vulkan, shaderc,
   # lcms2), so only these two need building.
@@ -96,8 +96,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/haasn/libplacebo.git
-        tag: v7.360.1
-        commit: cee9b076f2c63104ccfd497fa79c39a867293ec4
+        tag: v7.387.0
+        commit: 275f7dea27924cdd34ab2e6c20e448b6bc4fab65
         x-checker-data:
           type: git
           tag-pattern: ^v([\d.]+)$
@@ -117,8 +117,8 @@ modules:
     sources:
       - type: git
         url: https://gitlab.freedesktop.org/wayland/wayland-protocols.git
-        tag: '1.49'
-        commit: ee78491a237eaff9389a0ccf8680521d074407d3
+        tag: '1.50'
+        commit: 3eab2dccf4bfdd85c16d312a6c8c8fbc2a6e73a8
         x-checker-data:
           type: git
           tag-pattern: ^([\d.]+)$
@@ -205,8 +205,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/mpv-player/mpv.git
-        tag: v0.41.0
-        commit: 41f6a645068483470267271e1d09966ca3b9f413
+        tag: v0.42.0
+        commit: b0841e8c4d156b8403dc1876c4cbd9011eb583f3
         x-checker-data:
           type: git
           tag-pattern: ^v([\d.]+)$

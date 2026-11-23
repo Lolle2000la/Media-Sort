@@ -11,9 +11,11 @@ name: Flatpak Build
 # mpv and the whole Rust workspace), so it runs only for changes that can affect
 # it, and it is deliberately not a required check.
 #
-# The real manifest's app source points at the released tag, so the manifest is
-# rewritten here to build the checked-out tree instead (`type: dir`), which is
-# the approach flatpak-github-actions documents for pull requests.
+# The real manifest's app source points at the released tag, so the shared
+# composite action rewrites the manifest to build the checked-out tree instead
+# (`type: dir`), which is the approach flatpak-github-actions documents for pull
+# requests. The action lives in .github/actions/flatpak-gate so the weekly bump
+# workflow runs the exact same build.
 
 on:
   workflow_dispatch:
@@ -28,12 +30,10 @@ on:
       - packaging/linux/**
       # The vendor tarball builder the build below runs.
       - scripts/build-cargo-vendor.sh
+      - .github/actions/flatpak-gate/**
       - .github/workflows/flatpak-build.yml
   pull_request:
     paths: *paths
-
-env:
-  RUNTIME_VERSION: '26.08'
 
 jobs:
   build:
@@ -42,74 +42,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+      - uses: ./.github/actions/flatpak-gate
         with:
-          toolchain: stable
-
-      - name: Build the Flatpak cargo vendor tarball
-        # The manifest points at a released cargo-vendor.tar.gz; this build uses
-        # the checkout's own lock, so build the tarball here and (below) rewrite
-        # the manifest to consume it from a local path.
-        run: bash scripts/build-cargo-vendor.sh "$GITHUB_WORKSPACE/cargo-vendor.tar.gz"
-
-      - name: Install flatpak-builder and the runtime
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
-          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y --noninteractive flathub \
-            org.freedesktop.Platform//"$RUNTIME_VERSION" \
-            org.freedesktop.Sdk//"$RUNTIME_VERSION" \
-            org.freedesktop.Sdk.Extension.rust-stable//"$RUNTIME_VERSION"
-
-      - name: Restore the flatpak-builder state
-        id: state
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ github.workspace }}/.flatpak-builder-state
-          key: flatpak-builder-state-${{ hashFiles('flatpak/app.mediasort.MediaSort.yml') }}
-          restore-keys: |
-            flatpak-builder-state-
-
-      - name: Build this checkout with the manifest
-        run: |
-          python3 - <<'PY'
-          import os
-          import pathlib
-
-          manifest = pathlib.Path('flatpak/app.mediasort.MediaSort.yml')
-          source = manifest.read_text()
-
-          # The app source points at the released tag; build the checkout instead
-          # (`path` is relative to the manifest, so `..` is the checkout root).
-          app_start = source.index('      - type: git\n        url: https://github.com/Lolle2000la/Media-Sort.git')
-          begin = '      # BEGIN CARGO VENDOR SOURCE\n'
-          end = '      # END CARGO VENDOR SOURCE\n'
-          vendor_start = source.index(begin)
-          vendor_end = source.index(end) + len(end)
-          if not app_start < vendor_start < vendor_end:
-              raise SystemExit('unexpected manifest source layout')
-
-          # Swap the released vendor asset for the tarball built above.
-          app_source = '      - type: dir\n        path: ..\n'
-          tarball = os.path.join(os.environ['GITHUB_WORKSPACE'], 'cargo-vendor.tar.gz')
-          vendor_source = (
-              '      - type: archive\n'
-              f'        path: {tarball}\n'
-              '        strip-components: 0\n'
-          )
-          ci = source[:app_start] + app_source + vendor_source + source[vendor_end:]
-          pathlib.Path('flatpak/app.mediasort.MediaSort.ci.yml').write_text(ci)
-          PY
-          flatpak-builder --force-clean --disable-rofiles-fuse \
-            --state-dir "$GITHUB_WORKSPACE/.flatpak-builder-state" \
-            --repo flatpak-repo build-dir flatpak/app.mediasort.MediaSort.ci.yml
-
-      - name: Save the flatpak-builder state
-        # Trusted writers only, as in ci.yml: pull-request runs never write a
-        # cache entry.
-        if: ${{ github.event_name == 'push' && steps.state.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ github.workspace }}/.flatpak-builder-state
-          key: ${{ steps.state.outputs.cache-primary-key }}
+          runtime-version: '26.08'
+          # Caches are written by pushes to master only (see ci.yml's rule).
+          save-cache: ${{ github.event_name == 'push' && 'true' || 'false' }}

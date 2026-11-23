@@ -319,7 +319,7 @@ jobs:
             echo
             echo '### Flatpak'
             echo
-            echo 'The Flatpak manifest (`flatpak/app.mediasort.MediaSort.yml`) pins **the same projects separately** and is deliberately not touched here: it is a different runtime and a different tag/commit pair per module, and bumping both from one query would ship a combination neither was tested with. Bump it by hand; `.github/workflows/flatpak-build.yml` gates that PR.'
+            echo 'The Flatpak manifest (`flatpak/app.mediasort.MediaSort.yml`) pins **the same projects separately** and is deliberately not touched here: it is a different runtime and a different tag/commit pair per module. It has its own weekly bumper — `scripts/bump-flatpak.py` via `.github/workflows/flatpak-bump.yml` — so each payload is gated by its own build.'
             echo
             echo '> Automated by `.github/workflows/appimage-bump.yml`. Without an `APPIMAGE_BUMP_TOKEN` secret this branch was pushed with the workflow token, so no other workflow ran on it: the gate above is then the only verification (and for a CI-pin-only bump there is none until it is merged).'
           } >pr-body.md
