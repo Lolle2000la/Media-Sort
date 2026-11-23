@@ -485,18 +485,17 @@ COMMITTED=1
 
 info "creating signed tag $TAG"
 # git tag refuses -m together with -F, so a title is carried by assembling the
-# complete message (body, blank line, trailer) into a temp file instead. It is
-# created here, after the --dry-run exit and the restore trap, so a dry run
-# leaks nothing and a failed run cleans it up.
+# complete message (body, blank line, trailer) into a temp file instead. The
+# body is rebuilt from the already-chosen TAG_ARGS, so a titled tag and an
+# untitled one always carry the same message. It is created here, after the
+# --dry-run exit and the restore trap, so a dry run leaks nothing and a failed
+# run cleans it up.
 if [ -n "$RELEASE_TITLE" ]; then
   TAG_MSG_FILE="$(mktemp)"
-  if [ -n "$NOTES_FILE" ]; then
-    cat -- "$NOTES_FILE" > "$TAG_MSG_FILE"
-  elif [ -n "$TAG_MESSAGE" ]; then
-    printf '%s\n' "$TAG_MESSAGE" > "$TAG_MSG_FILE"
-  else
-    printf 'Release %s\n' "$TAG" > "$TAG_MSG_FILE"
-  fi
+  case "${TAG_ARGS[0]}" in
+    -F) cat -- "${TAG_ARGS[1]}" > "$TAG_MSG_FILE" ;;
+    *)  printf '%s\n' "${TAG_ARGS[1]}" > "$TAG_MSG_FILE" ;;
+  esac
   printf '\nRelease-Title: %s\n' "$RELEASE_TITLE" >> "$TAG_MSG_FILE"
   TAG_ARGS=(-F "$TAG_MSG_FILE")
 fi
