@@ -35,6 +35,10 @@ settings-language = 言語
 # Advanced settings
 settings-video = 動画
 settings-disable-hw-decoding = ハードウェア動画デコードを無効化
+settings-enable-libreoffice-preview = OfficeドキュメントのプレビューにLibreOfficeを使用
+settings-enable-libreoffice-preview-desc = サンドボックス外にLibreOfficeがインストールされている場合、Word・PowerPoint・OpenDocumentファイルをヘッドレス変換で描画します。
+settings-libreoffice-detected = LibreOffice を検出しました
+settings-libreoffice-not-found = LibreOffice が見つかりません（またはサンドボックス内では利用できません）
 
 # Key bindings
 keybindings-restore-defaults = デフォルトのキーバインドを復元

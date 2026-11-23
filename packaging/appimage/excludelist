@@ -126,3 +126,9 @@ libwayland-emgd.so.1: NVIDIA EGLStream Wayland userspace probed by libva-wayland
 libasound.so.2: ALSA plugin host: host plugins (module_pcm_pulse) bind ALSA_* from the host copy
 libstdc++.so.6: C++ plugin host: stacked plugins (libSPIRV-Tools) need the host's GLIBCXX_*
 libdrm.so.2: system interface: host Mesa/VA-API drivers link it and may need newer drm* symbols
+
+# Optional host LibreOfficeKit libraries probed at runtime via dlopen in
+# `lok_worker::dynlib` (absent when LibreOffice is not installed on the host,
+# and the document pipeline falls back cleanly to pure-Rust extractors).
+libmergedlo.so: LibreOfficeKit merged core library probed via dlopen: optional host LibreOffice
+libsofficeapp.so: LibreOfficeKit application library probed via dlopen: optional host LibreOffice

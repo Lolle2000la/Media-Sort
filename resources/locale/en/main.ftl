@@ -35,6 +35,10 @@ settings-language = Language
 # Advanced settings
 settings-video = Video
 settings-disable-hw-decoding = Disable hardware video decoding
+settings-enable-libreoffice-preview = Use LibreOffice for Office document previews
+settings-enable-libreoffice-preview-desc = Render Word, PowerPoint, and OpenDocument files via headless LibreOffice when installed outside a sandbox.
+settings-libreoffice-detected = LibreOffice detected
+settings-libreoffice-not-found = LibreOffice not found (or unavailable inside sandbox)
 
 # Key bindings
 keybindings-restore-defaults = Restore default key bindings

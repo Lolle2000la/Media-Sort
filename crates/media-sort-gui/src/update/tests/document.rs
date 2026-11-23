@@ -471,6 +471,39 @@ fn test_settings_toggle_show_documents_by_default() {
 }
 
 #[test]
+fn test_settings_toggle_libreoffice_preview_clears_cache_and_reloads() {
+    use crate::state::document::DocumentPreviewData;
+    use media_sort_backend::media::document::DocumentPreview;
+
+    let mut state = AppState::new(SettingsStore::default());
+    let doc = PathBuf::from("/test/report.docx");
+    let preview = DocumentPreviewData::from_backend(&DocumentPreview::PlainText {
+        text: "cached".into(),
+        truncated: false,
+    });
+    state
+        .cache
+        .document_cache
+        .push((doc.clone(), 1), preview.clone());
+    state.document.current_path = Some(doc.clone());
+    state.document.page_index = 1;
+    state.document.data = Some(preview);
+    state.document.in_flight_pages.insert((doc.clone(), 2));
+
+    let _ = update(
+        &mut state,
+        Message::Settings(SettingsMessage::ToggleLibreOfficePreview(false)),
+    );
+    assert!(!state.settings.advanced.enable_libreoffice_preview);
+    assert!(state.settings.dirty);
+    assert!(state.cache.document_cache.is_empty());
+    assert!(state.document.loading);
+    assert!(state.document.data.is_none());
+    assert!(!state.document.in_flight_pages.contains(&(doc.clone(), 2)));
+    assert!(state.document.in_flight_pages.contains(&(doc, 1)));
+}
+
+#[test]
 fn test_document_prefetch_loaded_caches_without_clobbering_and_next_page_is_instant() {
     use crate::state::document::DocumentPreviewData;
     use media_sort_backend::media::DecodedImage;

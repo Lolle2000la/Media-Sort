@@ -120,11 +120,37 @@ pub fn select(state: &mut AppState, path: &Path) -> Task<Message> {
             .in_flight_pages
             .insert((path_buf.clone(), page_index))
         {
-            load_document_preview_task(path_buf, page_index)
+            load_document_preview_task(
+                path_buf,
+                page_index,
+                state.settings.advanced.enable_libreoffice_preview,
+            )
         } else {
             Task::none()
         }
     }
+}
+
+/// Clears cached document previews and reloads the currently open page after
+/// toggling the LibreOffice preview backend.
+pub fn invalidate_for_libreoffice_toggle(state: &mut AppState) -> Task<Message> {
+    state.cache.document_cache.clear();
+    state.document.in_flight_pages.clear();
+    let Some(path) = state.document.current_path.clone() else {
+        return Task::none();
+    };
+    let page_index = state.document.page_index;
+    state.document.loading = true;
+    state.document.data = None;
+    state
+        .document
+        .in_flight_pages
+        .insert((path.clone(), page_index));
+    load_document_preview_task(
+        path,
+        page_index,
+        state.settings.advanced.enable_libreoffice_preview,
+    )
 }
 
 /// Reset the active document preview state.
@@ -206,7 +232,11 @@ pub fn navigate_document_page(state: &mut AppState, forward: bool) -> Task<Messa
             .in_flight_pages
             .insert((path.clone(), new_page))
         {
-            load_document_preview_task(path, new_page)
+            load_document_preview_task(
+                path,
+                new_page,
+                state.settings.advanced.enable_libreoffice_preview,
+            )
         } else {
             Task::none()
         }
@@ -249,19 +279,24 @@ pub fn prefetch_adjacent_document_pages(
         candidates.push(prev);
     }
 
+    let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
     let mut tasks = Vec::with_capacity(candidates.len());
     for page in candidates {
         let key = (path.to_path_buf(), page);
         if !state.cache.document_cache.contains(&key)
             && state.document.in_flight_pages.insert(key.clone())
         {
-            tasks.push(load_document_preview_task(key.0, page));
+            tasks.push(load_document_preview_task(key.0, page, enable_libreoffice));
         }
     }
     Task::batch(tasks)
 }
 
-pub fn load_document_preview_task(path: PathBuf, page_index: usize) -> Task<Message> {
+pub fn load_document_preview_task(
+    path: PathBuf,
+    page_index: usize,
+    enable_libreoffice: bool,
+) -> Task<Message> {
     Task::perform(
         async move {
             let path_clone = path.clone();
@@ -269,7 +304,7 @@ pub fn load_document_preview_task(path: PathBuf, page_index: usize) -> Task<Mess
                 media_sort_backend::media::document::load_document_preview(
                     &path_clone,
                     page_index,
-                    false,
+                    enable_libreoffice,
                 )
                 .map_err(|e| e.to_string())
             })

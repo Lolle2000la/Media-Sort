@@ -113,6 +113,16 @@ fn log_filter() -> tracing_subscriber::EnvFilter {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--lok-worker")
+    {
+        std::process::exit(media_sort_backend::media::document::lok_worker::run_worker_main());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        media_sort_backend::media::document::lok_worker::register_worker_exe(exe);
+    }
+
     initialize_panic_hook();
 
     tracing_subscriber::fmt()
@@ -139,6 +149,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let _ = &cli;
     }
+
+    let _soffice_session = media_sort_backend::media::document::soffice_pipe::session_guard();
 
     let discovered = iced_mpv::MpvContext::query_supported_extensions();
     media_sort_core::media_type::MediaRegistry::init(discovered);

@@ -98,6 +98,19 @@ pub fn handle_settings_message(state: &mut AppState, msg: SettingsMessage) -> Ta
             state.settings.mark_dirty();
             Task::none()
         }
+        SettingsMessage::ToggleLibreOfficePreview(val) => {
+            state.settings.advanced.enable_libreoffice_preview = val;
+            state.settings.mark_dirty();
+            let reload_doc = super::document::invalidate_for_libreoffice_toggle(state);
+            if val {
+                Task::batch([
+                    reload_doc,
+                    super::thumbnails::load_visible_thumbnails(state),
+                ])
+            } else {
+                reload_doc
+            }
+        }
         SettingsMessage::RestoreDefaultKeyBindings => {
             state.settings.keybindings =
                 media_sort_core::settings::keybindings::KeyBindings::default();

@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Read as _;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
@@ -14,7 +12,7 @@ use hayro::{PixmapSettings, RenderCache, RenderSettings};
 
 use super::{
     DecodedImage, DocumentError, DocumentPreview, DocumentUnavailableReason, MAX_PDF_FILE_BYTES,
-    PREVIEW_TARGET_HEIGHT, PREVIEW_TARGET_WIDTH,
+    PREVIEW_TARGET_HEIGHT, PREVIEW_TARGET_WIDTH, read_file_capped,
 };
 use crate::cache::{BoundedLru, CanonicalFileKey};
 
@@ -72,26 +70,6 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(bytes);
     hasher.finish()
-}
-
-fn read_file_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, DocumentError> {
-    let file = File::open(path)?;
-    let meta_len = file.metadata()?.len();
-    if meta_len > max_bytes {
-        return Err(DocumentError::Message(format!(
-            "File exceeds size limit ({meta_len} > {max_bytes} bytes)"
-        )));
-    }
-    let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-    let mut buf = Vec::with_capacity(usize::try_from(meta_len).unwrap_or(0).min(cap));
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut buf)?;
-    if buf.len() as u64 > max_bytes {
-        return Err(DocumentError::Message(format!(
-            "File exceeded size limit ({max_bytes} bytes) while reading"
-        )));
-    }
-    Ok(buf)
 }
 
 fn load_pdf_file_cached(path: &Path) -> Result<(PdfDocKey, PdfLoadOutcome), DocumentError> {
