@@ -140,6 +140,7 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
         ("objc2-foundation", "https://github.com/madsmtm/objc2"),
         ("proc-macro2", "https://github.com/dtolnay/proc-macro2"),
         ("quote", "https://github.com/dtolnay/quote"),
+        ("resvg", "https://github.com/linebender/resvg"),
         (
             "RFD (Rust File Dialogs)",
             "https://github.com/PolyMeilex/rfd",

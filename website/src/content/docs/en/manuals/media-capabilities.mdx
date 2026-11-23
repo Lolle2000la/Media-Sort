@@ -11,9 +11,9 @@ Media Sort categorizes files into three distinct media types:
 
 ### 1. Images
 
-Supported native image formats (decoded via the pure Rust `image` crate):
+Supported native image formats (decoded via the pure-Rust `image` crate, with `SVG`/`SVGZ` rendered via pure-Rust `resvg`):
 
-- **Formats:** JPEG/JPG, PNG, WebP, BMP, TIFF, TGA, Farbfeld (FF), AVIF, DDS, OpenEXR (EXR), HDR, ICO, QOI, and PNM (PBM, PGM, PPM, PAM).
+- **Formats:** JPEG/JPG, PNG, WebP, BMP, TIFF, TGA, Farbfeld (FF), AVIF, DDS, OpenEXR (EXR), HDR, ICO, QOI, PNM (PBM, PGM, PPM, PAM), and SVG/SVGZ.
 - **GIF Handling:** All GIF files (animated and static) are classified as video and routed to the video rendering stack. This supports autoplay, loop, and pause controls in the grid and preview panel.
 
 ### 2. Video & Containers
@@ -38,7 +38,7 @@ When you select a media file, the metadata panel displays details read directly 
 
 | Media Type | Extracted Metadata Attributes                                                                                                                      | Key Library                                   |
 | :--------- | :------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------- |
-| **Images** | EXIF fields (Camera model, Exposure time, ISO, F-number, Date taken, GPS coordinates) and image dimensions (width/height)                          | `kamadak-exif`, `image` crate                 |
+| **Images** | EXIF fields (Camera model, Exposure time, ISO, F-number, Date taken, GPS coordinates) and image dimensions (width/height, including SVG/SVGZ)      | `kamadak-exif`, `image` crate, `resvg`        |
 | **Audio**  | Audio tags (Title, Artist, Album, Year, Genre, Track number for MP3/AIFF/WAV; all Vorbis comments for FLAC; all container tags for OGG/OPUS/WMA)   | `id3` / `metaflac` / `mp4ameta` / `symphonia` |
 | **Video**  | Container tag metadata (Title, Artist, Album, Year, Genre, Track, Total Tracks for MP4/M4V/MOV; all container tags for MKV/WebM and other formats) | `mp4ameta` / `symphonia`                      |
 

@@ -177,11 +177,17 @@ fn skip_sub_blocks<R: std::io::Read + std::io::Seek>(reader: &mut R) -> bool {
 }
 
 pub fn load_image(path: &Path) -> Result<image::DynamicImage, image::ImageError> {
+    if super::svg::is_svg_path(path) {
+        return super::svg::load_svg_dynamic(path);
+    }
     let img = decode_path_with_limits(path)?;
     Ok(apply_orientation(img, path))
 }
 
 pub fn decode_image_dimensions(path: &Path) -> Result<(u32, u32), image::ImageError> {
+    if super::svg::is_svg_path(path) {
+        return super::svg::svg_dimensions(path);
+    }
     let (w, h) = image::ImageReader::open(path)?
         .with_guessed_format()?
         .into_dimensions()?;
@@ -217,11 +223,30 @@ pub fn load_preview(
     super::format_pipeline::process_image(path, max_width, max_height)
 }
 
+pub(crate) fn rgba_to_dynamic(
+    width: u32,
+    height: u32,
+    buffer: Vec<u8>,
+) -> Result<image::DynamicImage, image::ImageError> {
+    Ok(image::DynamicImage::ImageRgba8(
+        image::RgbaImage::from_raw(width, height, buffer).ok_or_else(|| {
+            image::ImageError::Limits(image::error::LimitError::from_kind(
+                image::error::LimitErrorKind::DimensionError,
+            ))
+        })?,
+    ))
+}
+
 pub fn generate_thumbnail(
     path: &Path,
     max_width: u32,
     max_height: u32,
 ) -> Result<image::DynamicImage, image::ImageError> {
+    if super::svg::is_svg_path(path) {
+        let decoded = super::svg::render_svg(path, max_width, max_height)?;
+        return rgba_to_dynamic(decoded.width, decoded.height, decoded.rgba);
+    }
+
     let img = decode_path_with_limits(path)?;
     let img = apply_orientation(img, path);
 
@@ -255,13 +280,7 @@ pub fn generate_thumbnail(
         })?;
 
     let buffer = dst_image.into_vec();
-    Ok(image::DynamicImage::ImageRgba8(
-        image::RgbaImage::from_raw(dst_w, dst_h, buffer).ok_or_else(|| {
-            image::ImageError::Limits(image::error::LimitError::from_kind(
-                image::error::LimitErrorKind::DimensionError,
-            ))
-        })?,
-    ))
+    rgba_to_dynamic(dst_w, dst_h, buffer)
 }
 
 pub fn apply_orientation(mut img: image::DynamicImage, path: &Path) -> image::DynamicImage {

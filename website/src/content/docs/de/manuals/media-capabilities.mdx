@@ -11,9 +11,9 @@ Media Sort teilt Dateien in drei verschiedene Medientypen ein:
 
 ### 1. Bilder
 
-Unterstützte native Bildformate (dekodiert über das reine Rust-Crate `image`):
+Unterstützte native Bildformate (dekodiert über das reine Rust-Crate `image`, mit `SVG`/`SVGZ`-Rendering über das reine Rust-Crate `resvg`):
 
-- **Formate:** JPEG/JPG, PNG, WebP, BMP, TIFF, TGA, Farbfeld (FF), AVIF, DDS, OpenEXR (EXR), HDR, ICO, QOI und PNM (PBM, PGM, PPM, PAM).
+- **Formate:** JPEG/JPG, PNG, WebP, BMP, TIFF, TGA, Farbfeld (FF), AVIF, DDS, OpenEXR (EXR), HDR, ICO, QOI, PNM (PBM, PGM, PPM, PAM) und SVG/SVGZ.
 - **GIF-Handhabung:** Alle GIF-Dateien (animiert und statisch) werden als Video klassifiziert und an die Video-Render-Pipeline weitergeleitet. Dies ermöglicht Autoplay-, Loop- und Pause-Steuerung im Raster und im Vorschau-Panel.
 
 ### 2. Video & Container
@@ -38,7 +38,7 @@ Wenn Sie eine Mediendatei auswählen, zeigt das Metadaten-Panel Details an, die 
 
 | Medientyp  | Extrahierte Metadaten-Attribute                                                                                                                              | Wichtigste Library                            |
 | :--------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------- |
-| **Bilder** | EXIF-Felder (Kameramodell, Belichtungszeit, ISO, Blendenzahl, Aufnahmedatum, GPS-Koordinaten) und Bildabmessungen (Breite/Höhe)                              | `kamadak-exif`, `image`-Crate                 |
+| **Bilder** | EXIF-Felder (Kameramodell, Belichtungszeit, ISO, Blendenzahl, Aufnahmedatum, GPS-Koordinaten) und Bildabmessungen (Breite/Höhe, einschließlich SVG/SVGZ)     | `kamadak-exif`, `image`-Crate, `resvg`        |
 | **Audio**  | Audio-Tags (Titel, Künstler, Album, Jahr, Genre, Tracknummer für MP3/AIFF/WAV; alle Vorbis-Kommentare für FLAC; alle Container-Tags für OGG/OPUS/WMA)        | `id3` / `metaflac` / `mp4ameta` / `symphonia` |
 | **Video**  | Container-Tag-Metadaten (Titel, Künstler, Album, Jahr, Genre, Track, Gesamttitelanzahl für MP4/M4V/MOV; alle Container-Tags für MKV/WebM und andere Formate) | `mp4ameta` / `symphonia`                      |
 

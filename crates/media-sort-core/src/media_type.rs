@@ -15,8 +15,11 @@ fn native_image_extensions() -> &'static [&'static str] {
         // this is normally a no-op; keep the explicit entry so AVIF stays
         // visible to the scanner/classifier even in a build without a native
         // decoder (the backend can still decode it via the ffmpeg pipe fallback).
-        if !exts.contains(&"avif") {
-            exts.push("avif");
+        // SVG and SVGZ are rendered via pure-Rust `resvg` in the backend.
+        for extra in ["avif", "svg", "svgz"] {
+            if !exts.contains(&extra) {
+                exts.push(extra);
+            }
         }
         exts
     })
@@ -198,6 +201,13 @@ mod tests {
         assert!(exts.contains(&"jpeg"));
         assert!(exts.contains(&"bmp"));
         assert!(exts.contains(&"webp"));
+        assert!(exts.contains(&"svg"));
+        assert!(exts.contains(&"svgz"));
+        assert_eq!(MediaRegistry::determine_type("SVG"), Some(MediaType::Image));
+        assert_eq!(
+            MediaRegistry::determine_type("svgz"),
+            Some(MediaType::Image)
+        );
     }
 
     #[test]

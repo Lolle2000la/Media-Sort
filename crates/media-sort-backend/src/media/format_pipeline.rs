@@ -11,6 +11,7 @@
 //!   re-opening of the file.
 //! - avif: native dav1d decode (`avif-native` feature) with an ffmpeg pipe
 //!   fallback for builds without a native AVIF decoder.
+//! - svg/svgz: pure-Rust `resvg` rasterization directly at the target box.
 //! - audio extensions: embedded cover art, resized with fast_image_resize
 //!   (`thumbnail_image` returns `None` when there is no cover art — that is a
 //!   normal, playable file, not a decode failure).
@@ -65,6 +66,7 @@ pub(crate) fn process_image(
         "jpg" | "jpeg" => jpeg_image(path, max_width, max_height),
         "bmp" | "tga" | "qoi" | "ff" | "farbfeld" => decode_fir_image(path, max_width, max_height),
         "avif" => avif_image(path, max_width, max_height),
+        "svg" | "svgz" => super::svg::render_svg(path, max_width, max_height),
         _ => fallback_image(path, max_width, max_height),
     }
 }

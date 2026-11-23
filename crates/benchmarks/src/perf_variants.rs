@@ -551,6 +551,10 @@ mod tests {
             "webp",
             "tiff",
             "bmp",
+            "svg",
+            "SVG",
+            "svgz",
+            "SVGZ",
             "unknown_ext",
             "this_is_not_a_real_extension",
         ] {
@@ -559,6 +563,14 @@ mod tests {
             let b = detect_media_type_hashset(&p, true);
             assert_eq!(a, b, "ext={}", ext);
         }
+        assert_eq!(
+            detect_media_type_hashset(Path::new("icon.svg"), true),
+            MediaType::Image
+        );
+        assert_eq!(
+            detect_media_type_hashset(Path::new("icon.svgz"), true),
+            MediaType::Image
+        );
     }
 
     #[test]
