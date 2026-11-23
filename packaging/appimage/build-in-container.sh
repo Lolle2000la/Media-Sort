@@ -74,6 +74,13 @@ export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib/$ARCH-linux-gnu/pkgcon
 export LIBRARY_PATH="$PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+# The prefix's tools have to be reachable by name, too: mpv 0.42 asks meson for
+# `wayland-scanner` >= 1.23 as a *program* (0.41 took any version), and jammy
+# ships 1.20. build_wayland installs a matching scanner into $PREFIX/bin, so
+# without this meson finds the system one and fails the version check even
+# though the library next to it is the pinned 1.26.
+export PATH="$PREFIX/bin:$PATH"
+
 # ---------------------------------------------------------------------------
 # logging / helpers
 # ---------------------------------------------------------------------------
@@ -322,10 +329,13 @@ build_zimg() {
 }
 
 # ---------------------------------------------------------------------------
-# wayland: mpv 0.41 requires wayland-client >= 1.21 and jammy ships 1.20.0.
-# Without it mpv drops its Wayland backend entirely, and with it VA-API
-# hardware decoding on native Wayland sessions (its X11 backend would only
-# cover XWayland), so the library is built here.
+# wayland: mpv 0.42 requires wayland-client/wayland-cursor >= 1.23 and a
+# `wayland-scanner` *program* >= 1.23; jammy ships 1.20 for all of them. Without
+# it mpv drops its Wayland backend entirely, and with it VA-API hardware
+# decoding on native Wayland sessions (its X11 backend would only cover
+# XWayland), so the library (and its scanner) is built here. The scanner lands
+# in $PREFIX/bin, which is why PATH includes the prefix -- meson looks tools up
+# by name, not by the prefix they were installed into.
 # ---------------------------------------------------------------------------
 build_wayland() {
   local opts=(--buildtype=release --default-library=shared --prefix="$PREFIX" --libdir=lib
@@ -342,7 +352,7 @@ build_wayland() {
 }
 
 # ---------------------------------------------------------------------------
-# wayland-protocols: mpv's Wayland backend requires >= 1.31 (jammy ships 1.25)
+# wayland-protocols: mpv's Wayland backend requires >= 1.38 (jammy ships 1.25)
 # and it is what unlocks VA-API hardware decoding on Wayland sessions.
 # ---------------------------------------------------------------------------
 build_wayland_protocols() {
@@ -354,19 +364,18 @@ build_wayland_protocols() {
   tarball=$(fetch wayland-protocols "$WAYLAND_PROTOCOLS_URL" "$WAYLAND_PROTOCOLS_SHA256")
   src=$(unpack "$tarball" wayland-protocols)
   rm -rf "$build"
-  # `-Dtests=false` is what lets this build with jammy's wayland-scanner 1.20:
-  # from 1.40 on the scanner is only needed for the installed *tests*, which
-  # want >= 1.25, and mpv only needs the protocol XML/pc files. Building the
-  # protocols (instead of using jammy's 1.25) is required because mpv asks for
-  # >= 1.31.
+  # `-Dtests=false` skips the installed tests, which are the only part that
+  # needs a scanner at all in 1.40+; mpv only needs the protocol XML/pc files.
+  # Building the protocols (instead of using jammy's 1.25) is required because
+  # mpv asks for >= 1.38.
   run_logged wayland-protocols meson setup "$build" "$src" "${opts[@]}"
   run_logged wayland-protocols meson install -C "$build"
   mark_stamped wayland-protocols "$WAYLAND_PROTOCOLS_VERSION" "$WAYLAND_PROTOCOLS_URL" "$WAYLAND_PROTOCOLS_SHA256" "${opts[@]}"
 }
 
 # ---------------------------------------------------------------------------
-# libplacebo: mpv 0.41.0's meson.build asks for it unconditionally
-# (`dependency('libplacebo', version: '>=6.338.2')`, no `required:` and no
+# libplacebo: mpv 0.42.0's meson.build asks for it unconditionally
+# (`dependency('libplacebo', version: '>= 7.387.0')`, no `required:` and no
 # -Dlibplacebo switch), so "skip libplacebo" is not possible with this mpv.
 # It is only needed to link, though: the app drives libmpv's *software* render
 # API, so Vulkan/OpenGL/D3D11 support is switched off (which also removes the
