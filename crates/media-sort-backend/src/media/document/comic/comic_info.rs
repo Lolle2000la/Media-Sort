@@ -3,32 +3,7 @@ use std::collections::BTreeMap;
 use quick_xml::Reader;
 use quick_xml::events::{BytesRef, Event};
 
-pub(super) fn decode_xml_bytes(bytes: &[u8]) -> String {
-    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(rest).into_owned();
-    }
-    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        let units = rest
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| u16::from_be_bytes(*c));
-        return char::decode_utf16(units)
-            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
-            .collect();
-    }
-    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        let units = rest
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| u16::from_le_bytes(*c));
-        return char::decode_utf16(units)
-            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
-            .collect();
-    }
-    String::from_utf8_lossy(bytes).into_owned()
-}
+use crate::media::document::decode_xml_bytes;
 
 fn push_xml_ref(out: &mut String, r: &BytesRef<'_>) {
     if let Ok(Some(ch)) = r.resolve_char_ref() {

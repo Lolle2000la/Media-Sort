@@ -351,6 +351,7 @@ fn document_icon(path: &std::path::Path) -> lucide_icons::Icon {
     match DocumentKind::from_path(path) {
         Some(DocumentKind::Pdf) => lucide_icons::Icon::FileText,
         Some(DocumentKind::Comic) => lucide_icons::Icon::FileArchive,
+        Some(DocumentKind::Epub) => lucide_icons::Icon::BookOpen,
         Some(DocumentKind::Markdown) => lucide_icons::Icon::FileCode,
         Some(DocumentKind::PlainText) => {
             if matches!(ext.as_str(), "csv" | "tsv") {

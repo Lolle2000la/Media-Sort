@@ -35,6 +35,8 @@ pub static NATIVE_DOCUMENT_EXTS: &[&str] = &[
     "pdf",
     // Comic book archives
     "cbz", "cb7", "cbt", "cbr",
+    // Ebooks
+    "epub",
     // Plain text / Markdown / delimited tables
     "txt", "md", "markdown", "csv", "tsv",
 ];
@@ -54,6 +56,7 @@ pub enum MediaType {
 pub enum DocumentKind {
     Pdf,
     Comic,
+    Epub,
     Markdown,
     PlainText,
 }
@@ -64,6 +67,7 @@ impl DocumentKind {
         match ext.to_lowercase().as_str() {
             "pdf" => Some(Self::Pdf),
             "cbz" | "cb7" | "cbt" | "cbr" => Some(Self::Comic),
+            "epub" => Some(Self::Epub),
             "md" | "markdown" => Some(Self::Markdown),
             "txt" | "csv" | "tsv" => Some(Self::PlainText),
             _ => None,
@@ -335,6 +339,7 @@ mod tests {
         assert!(exts.contains(&"cb7"));
         assert!(exts.contains(&"cbt"));
         assert!(exts.contains(&"cbr"));
+        assert!(exts.contains(&"epub"));
         assert!(exts.contains(&"md"));
         assert!(exts.contains(&"markdown"));
         assert!(exts.contains(&"txt"));
@@ -373,6 +378,10 @@ mod tests {
         assert_eq!(
             DocumentKind::from_extension("cbr"),
             Some(DocumentKind::Comic)
+        );
+        assert_eq!(
+            DocumentKind::from_extension("epub"),
+            Some(DocumentKind::Epub)
         );
         assert_eq!(
             DocumentKind::from_extension("md"),

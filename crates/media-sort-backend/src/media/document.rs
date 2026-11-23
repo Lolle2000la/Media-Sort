@@ -5,6 +5,7 @@ use media_sort_core::media_type::DocumentKind;
 use super::DecodedImage;
 
 pub mod comic;
+pub mod epub;
 pub mod pdf;
 pub mod text;
 
@@ -103,6 +104,7 @@ pub fn generate_document_thumbnail_with_options(
     match DocumentKind::from_path(path) {
         Some(DocumentKind::Pdf) => pdf::render_pdf_thumbnail(path, max_width, max_height),
         Some(DocumentKind::Comic) => comic::extract_comic_thumbnail(path, max_width, max_height),
+        Some(DocumentKind::Epub) => epub::extract_epub_thumbnail(path, max_width, max_height),
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) | None => Ok(None),
     }
 }
@@ -119,7 +121,8 @@ pub fn generate_document_thumbnail(
     generate_document_thumbnail_with_options(path, max_width, max_height, true)
 }
 
-/// Loads the interactive preview payload for a document at `page_index`.
+/// Loads the interactive preview payload for a document at `page_index` (used for PDF pages,
+/// comic archive pages, or EPUB spine chapters).
 pub fn load_document_preview(
     path: &Path,
     page_index: usize,
@@ -128,6 +131,7 @@ pub fn load_document_preview(
     match DocumentKind::from_path(path) {
         Some(DocumentKind::Pdf) => pdf::load_pdf_preview(path, page_index),
         Some(DocumentKind::Comic) => comic::load_comic_preview(path, page_index),
+        Some(DocumentKind::Epub) => epub::load_epub_preview(path, page_index),
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) => {
             text::load_text_preview(path)
         }
@@ -161,4 +165,60 @@ pub(crate) fn is_image_entry(name: &str) -> bool {
         ext.to_ascii_lowercase().as_str(),
         "jpg" | "jpeg" | "png" | "webp" | "avif" | "bmp" | "gif" | "tif" | "tiff"
     )
+}
+
+/// Resolves a relative archive path (`rel`) against `base_dir` (normalized with `/`) while
+/// rejecting path traversal outside the archive root.
+pub(crate) fn sanitize_archive_rel_path(base_dir: &str, rel: &str) -> Option<String> {
+    let clean_rel = rel.split(['#', '?']).next().unwrap_or("").trim();
+    if clean_rel.is_empty() || clean_rel.starts_with('/') || clean_rel.contains('\\') {
+        return None;
+    }
+    let mut parts: Vec<&str> = if base_dir.is_empty() {
+        Vec::new()
+    } else {
+        base_dir.split('/').filter(|s| !s.is_empty()).collect()
+    };
+    for seg in clean_rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// Decodes XML/XHTML bytes handling UTF-8, UTF-16 BE, and UTF-16 LE BOMs.
+pub(crate) fn decode_xml_bytes(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units = rest
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c));
+        return char::decode_utf16(units)
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let units = rest
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c));
+        return char::decode_utf16(units)
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+    }
+    String::from_utf8_lossy(bytes).into_owned()
 }
