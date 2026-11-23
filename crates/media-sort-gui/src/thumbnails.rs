@@ -38,30 +38,32 @@ pub fn generate_thumbnail(
     media_type: MediaType,
     animated: Option<bool>,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
-    generate_thumbnail_with_options(path, media_type, animated, None)
+    generate_thumbnail_with_options(path, media_type, animated, true, None)
 }
 
 /// Generate a thumbnail for `path`.
 ///
 /// Takes the entry's cached `media_type` and `animated` (populated at scan
-/// time) plus an optional `should_keep` predicate checked before dispatching
-/// and inside worker queues so scrolled-away items cancel without spawning
-/// external decoders.
+/// time), whether headless LibreOffice fallback is enabled for Office/spreadsheet
+/// documents, plus an optional `should_keep` predicate checked before
+/// dispatching and inside worker queues so scrolled-away items cancel without
+/// spawning external decoders.
 ///
-/// Returns `Ok(None)` when the request was cancelled or when an audio file has
-/// no embedded cover art.
+/// Returns `Ok(None)` when the request was cancelled or when an audio/document
+/// file has no thumbnail to display.
 pub fn generate_thumbnail_with_options(
     path: &Path,
     media_type: MediaType,
     _animated: Option<bool>,
+    enable_libreoffice: bool,
     should_keep: Option<KeepPredicate>,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, ThumbnailError> {
-    if should_keep.as_ref().is_some_and(|keep| !keep(path)) {
-        return Ok(None);
+    if media_type == MediaType::Document {
+        return document::generate_document_thumbnail(path, enable_libreoffice, should_keep);
     }
 
-    if media_type == MediaType::Document {
-        return document::generate_document_thumbnail(path, should_keep);
+    if should_keep.as_ref().is_some_and(|keep| !keep(path)) {
+        return Ok(None);
     }
 
     if media_type == MediaType::Video && !video::is_gif_path(path) {
@@ -293,6 +295,7 @@ mod tests {
             Path::new("/nonexistent/should_not_decode.jpg"),
             MediaType::Image,
             None,
+            false,
             Some(keep),
         );
         assert!(matches!(result, Ok(None)));
@@ -316,9 +319,10 @@ mod tests {
 
     #[test]
     fn test_generate_thumbnail_with_options_document_cancelled_returns_ok_none() {
-        let path = std::path::PathBuf::from("/nonexistent/notes.txt");
+        let path = std::path::PathBuf::from("/nonexistent/report.docx");
         let keep: KeepPredicate = Arc::new(|_| false);
-        let result = generate_thumbnail_with_options(&path, MediaType::Document, None, Some(keep));
+        let result =
+            generate_thumbnail_with_options(&path, MediaType::Document, None, true, Some(keep));
         assert!(matches!(result, Ok(None)));
     }
 }

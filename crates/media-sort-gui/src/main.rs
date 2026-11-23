@@ -140,6 +140,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = &cli;
     }
 
+    let _soffice_session = media_sort_backend::media::document::soffice_pipe::session_guard();
+
     let discovered = iced_mpv::MpvContext::query_supported_extensions();
     media_sort_core::media_type::MediaRegistry::init(discovered);
 

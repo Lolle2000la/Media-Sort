@@ -352,6 +352,14 @@ fn document_icon(path: &std::path::Path) -> lucide_icons::Icon {
         Some(DocumentKind::Pdf) => lucide_icons::Icon::FileText,
         Some(DocumentKind::Comic) => lucide_icons::Icon::FileArchive,
         Some(DocumentKind::Epub) => lucide_icons::Icon::BookOpen,
+        Some(DocumentKind::Spreadsheet) => lucide_icons::Icon::FileSpreadsheet,
+        Some(DocumentKind::Office) => {
+            if matches!(ext.as_str(), "pptx" | "odp" | "ppt") {
+                lucide_icons::Icon::Presentation
+            } else {
+                lucide_icons::Icon::FileText
+            }
+        }
         Some(DocumentKind::Markdown) => lucide_icons::Icon::FileCode,
         Some(DocumentKind::PlainText) => {
             if matches!(ext.as_str(), "csv" | "tsv") {

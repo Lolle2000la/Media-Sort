@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{BufWriter, Cursor, Write};
 use std::ops::Deref;
@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use media_sort_backend::media::DecodedImage;
 use media_sort_backend::media::document::{
-    DocumentPreview, DocumentUnavailableReason, generate_document_thumbnail, load_document_preview,
+    DocumentPreview, DocumentUnavailableReason, generate_document_thumbnail,
+    generate_document_thumbnail_with_options, load_document_preview, soffice_pipe,
 };
 use media_sort_backend::metadata::document_meta::extract_document_metadata;
 use media_sort_backend::process::{
@@ -201,6 +202,88 @@ fn run_external_tool(bin: &Path, args: &[&OsStr], work_dir: &Path, timeout: Dura
         String::from_utf8_lossy(&out.stdout).trim(),
         String::from_utf8_lossy(&out.stderr).trim()
     );
+}
+
+fn find_soffice_bin() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let names: &[&str] = &["soffice.exe"];
+    #[cfg(not(target_os = "windows"))]
+    let names: &[&str] = &["soffice", "libreoffice"];
+
+    if let Some(found) = find_executable_on_path(names, false) {
+        return Some(found);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mac_path = PathBuf::from("/Applications/LibreOffice.app/Contents/MacOS/soffice");
+        if mac_path.is_file() {
+            return Some(mac_path);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for env_var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(base) = std::env::var_os(env_var) {
+                let candidate = PathBuf::from(base)
+                    .join("LibreOffice")
+                    .join("program")
+                    .join("soffice.exe");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn percent_encode_bytes(bytes: &[u8], allow_colon: bool, out: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &b in bytes {
+        let keep = b.is_ascii_alphanumeric()
+            || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~')
+            || (allow_colon && b == b':');
+        if keep {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[(b >> 4) as usize]));
+            out.push(char::from(HEX[(b & 0x0F) as usize]));
+        }
+    }
+}
+
+fn path_to_file_url(path: &Path) -> String {
+    let canon = fs::canonicalize(path).expect("canonicalize path for file URL");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let mut out = String::from("file://");
+        percent_encode_bytes(canon.as_os_str().as_bytes(), false, &mut out);
+        out
+    }
+    #[cfg(not(unix))]
+    {
+        let raw = canon.to_string_lossy();
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            let mut out = String::from("file://");
+            let normalized = unc.replace('\\', "/");
+            percent_encode_bytes(normalized.as_bytes(), false, &mut out);
+            return out;
+        }
+        let stripped = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+        let normalized = stripped.replace('\\', "/");
+        let mut out = if normalized.starts_with('/') {
+            String::from("file://")
+        } else {
+            String::from("file:///")
+        };
+        percent_encode_bytes(normalized.as_bytes(), true, &mut out);
+        out
+    }
 }
 
 #[test]
@@ -1031,4 +1114,461 @@ fn test_epub_cover_chapters_metadata_and_path_traversal() {
         ),
         "expected UnsupportedOrCorrupt for container traversal, got {container_preview:?}"
     );
+}
+
+#[test]
+fn test_docx_thumbnail_markdown_libreoffice_and_metadata() {
+    let dir = TempDir::new("docx");
+    let docx_path = dir.path().join("report.docx");
+    let thumb_png = solid_png_bytes(40, 140, 210);
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>"#;
+
+    let rels = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/metadata/thumbnail" Target="docProps/thumbnail.png"/>
+</Relationships>"#;
+
+    let core_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+                   xmlns:dc="http://purl.org/dc/elements/1.1/"
+                   xmlns:dcterms="http://purl.org/dc/terms/">
+  <dc:title>Quarterly Report</dc:title>
+  <dc:creator>Grace Hopper</dc:creator>
+  <dc:subject>Engineering</dc:subject>
+  <dcterms:created>2026-01-15T10:00:00Z</dcterms:created>
+</cp:coreProperties>"#;
+
+    let app_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
+  <Pages>1</Pages>
+</Properties>"#;
+
+    let document_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>DOCX Heading</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Pure-Rust DOCX paragraph.</w:t></w:r></w:p>
+    <w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>Bullet item</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    write_zip_entries(
+        &docx_path,
+        &[
+            (
+                "[Content_Types].xml",
+                content_types,
+                CompressionMethod::Deflated,
+            ),
+            ("_rels/.rels", rels, CompressionMethod::Deflated),
+            (
+                "docProps/thumbnail.png",
+                &thumb_png,
+                CompressionMethod::Deflated,
+            ),
+            ("docProps/core.xml", core_xml, CompressionMethod::Deflated),
+            ("docProps/app.xml", app_xml, CompressionMethod::Deflated),
+            (
+                "word/document.xml",
+                document_xml,
+                CompressionMethod::Deflated,
+            ),
+        ],
+    );
+
+    let thumb = generate_document_thumbnail(&docx_path, 128, 128)
+        .expect("docx thumbnail result")
+        .expect("docx embedded thumbnail");
+    assert_solid_color_close(&thumb, [40, 140, 210]);
+
+    let pure_preview = load_document_preview(&docx_path, 0, false).expect("docx markdown preview");
+    match pure_preview {
+        DocumentPreview::Markdown {
+            markdown,
+            chapter_index,
+            total_chapters,
+            cover,
+        } => {
+            assert!(chapter_index.is_none());
+            assert!(total_chapters.is_none());
+            assert!(cover.is_none());
+            assert!(markdown.contains("# DOCX Heading"));
+            assert!(markdown.contains("Pure-Rust DOCX paragraph."));
+            assert!(markdown.contains("- Bullet item"));
+        }
+        other => panic!("expected Markdown for DOCX with libreoffice=false, got {other:?}"),
+    }
+
+    if soffice_pipe::is_libreoffice_available() {
+        let lo_preview =
+            load_document_preview(&docx_path, 0, true).expect("docx libreoffice preview");
+        match lo_preview {
+            DocumentPreview::PagedImage {
+                image,
+                page_index,
+                total_pages,
+            } => {
+                assert_eq!(page_index, 0);
+                assert!(total_pages >= 1);
+                assert!(image.width > 0 && image.height > 0);
+                assert_eq!(
+                    image.rgba.len(),
+                    (image.width as usize) * (image.height as usize) * 4
+                );
+            }
+            other => panic!("expected PagedImage for DOCX with libreoffice=true, got {other:?}"),
+        }
+    }
+
+    let meta = extract_document_metadata(&docx_path).expect("docx metadata");
+    let doc = &meta["Document"];
+    assert_eq!(doc.get("Kind").map(String::as_str), Some("Office Document"));
+    assert_eq!(
+        doc.get("Title").map(String::as_str),
+        Some("Quarterly Report")
+    );
+    assert_eq!(doc.get("Author").map(String::as_str), Some("Grace Hopper"));
+    assert_eq!(doc.get("Subject").map(String::as_str), Some("Engineering"));
+    assert_eq!(doc.get("Pages").map(String::as_str), Some("1"));
+}
+
+#[test]
+fn test_odt_thumbnail_markdown_and_metadata() {
+    let dir = TempDir::new("odt");
+    let odt_path = dir.path().join("spec.odt");
+    let thumb_png = solid_png_bytes(60, 180, 90);
+
+    let manifest_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
+  <manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/>
+  <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>"#;
+
+    let content_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                         xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:text>
+    <text:h text:outline-level="1">ODT Heading</text:h>
+    <text:p>Body text in ODT.</text:p>
+  </office:text></office:body>
+</office:document-content>"#;
+
+    let meta_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                      xmlns:dc="http://purl.org/dc/elements/1.1/"
+                      xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0">
+  <office:meta>
+    <dc:title>ODT Spec</dc:title>
+    <dc:creator>Alan Turing</dc:creator>
+    <dc:subject>Computing</dc:subject>
+    <meta:creation-date>2026-02-01T12:00:00</meta:creation-date>
+    <meta:document-statistic meta:page-count="4"/>
+  </office:meta>
+</office:document-meta>"#;
+
+    write_zip_entries(
+        &odt_path,
+        &[
+            (
+                "mimetype",
+                b"application/vnd.oasis.opendocument.text",
+                CompressionMethod::Stored,
+            ),
+            (
+                "META-INF/manifest.xml",
+                manifest_xml,
+                CompressionMethod::Deflated,
+            ),
+            (
+                "Thumbnails/thumbnail.png",
+                &thumb_png,
+                CompressionMethod::Deflated,
+            ),
+            ("content.xml", content_xml, CompressionMethod::Deflated),
+            ("meta.xml", meta_xml, CompressionMethod::Deflated),
+        ],
+    );
+
+    let thumb = generate_document_thumbnail(&odt_path, 128, 128)
+        .expect("odt thumbnail result")
+        .expect("odt embedded thumbnail");
+    assert_solid_color_close(&thumb, [60, 180, 90]);
+
+    let preview = load_document_preview(&odt_path, 0, false).expect("odt preview");
+    match preview {
+        DocumentPreview::Markdown { markdown, .. } => {
+            assert!(markdown.contains("# ODT Heading"));
+            assert!(markdown.contains("Body text in ODT."));
+        }
+        other => panic!("expected Markdown for ODT, got {other:?}"),
+    }
+
+    let meta = extract_document_metadata(&odt_path).expect("odt metadata");
+    let doc = &meta["Document"];
+    assert_eq!(doc.get("Kind").map(String::as_str), Some("Office Document"));
+    assert_eq!(doc.get("Title").map(String::as_str), Some("ODT Spec"));
+    assert_eq!(doc.get("Author").map(String::as_str), Some("Alan Turing"));
+    assert_eq!(doc.get("Subject").map(String::as_str), Some("Computing"));
+    assert_eq!(doc.get("Pages").map(String::as_str), Some("4"));
+}
+
+#[test]
+fn test_pptx_slides_natural_order() {
+    let dir = TempDir::new("pptx");
+    let pptx_path = dir.path().join("deck.pptx");
+
+    let slide_xml = |title: &str, body: &str| -> Vec<u8> {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp>
+      <p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+      <p:txBody><a:p><a:r><a:t>{title}</a:t></a:r></a:p></p:txBody>
+    </p:sp>
+    <p:sp>
+      <p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+      <p:txBody><a:p><a:r><a:t>{body}</a:t></a:r></a:p></p:txBody>
+    </p:sp>
+  </p:spTree></p:cSld>
+</p:sld>"#
+        )
+        .into_bytes()
+    };
+
+    let s1 = slide_xml("Slide One", "First point");
+    let s2 = slide_xml("Slide Two", "Second point");
+    let s10 = slide_xml("Slide Ten", "Tenth point");
+    let app_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
+  <Slides>3</Slides>
+</Properties>"#;
+
+    // Deliberately write slide10 before slide2 and slide1.
+    write_zip_entries(
+        &pptx_path,
+        &[
+            ("ppt/slides/slide10.xml", &s10, CompressionMethod::Deflated),
+            ("ppt/slides/slide2.xml", &s2, CompressionMethod::Deflated),
+            ("ppt/slides/slide1.xml", &s1, CompressionMethod::Deflated),
+            ("docProps/app.xml", app_xml, CompressionMethod::Deflated),
+        ],
+    );
+
+    let preview = load_document_preview(&pptx_path, 0, false).expect("pptx slides preview");
+    match preview {
+        DocumentPreview::Slides { slides } => {
+            assert_eq!(slides.len(), 3);
+            assert_eq!(slides[0].number, 1);
+            assert_eq!(slides[0].title.as_deref(), Some("Slide One"));
+            assert_eq!(slides[0].body_paragraphs, vec!["First point"]);
+            assert_eq!(slides[1].number, 2);
+            assert_eq!(slides[1].title.as_deref(), Some("Slide Two"));
+            assert_eq!(slides[1].body_paragraphs, vec!["Second point"]);
+            assert_eq!(slides[2].number, 3);
+            assert_eq!(slides[2].title.as_deref(), Some("Slide Ten"));
+            assert_eq!(slides[2].body_paragraphs, vec!["Tenth point"]);
+        }
+        other => panic!("expected Slides for PPTX, got {other:?}"),
+    }
+
+    let meta = extract_document_metadata(&pptx_path).expect("pptx metadata");
+    assert_eq!(
+        meta["Document"].get("Slides").map(String::as_str),
+        Some("3")
+    );
+}
+
+#[test]
+fn test_rtf_preview_metadata_and_doc_no_backend_on_linux() {
+    let dir = TempDir::new("rtf_doc");
+    let rtf_path = dir.path().join("note.rtf");
+    let rtf_bytes = br#"{\rtf1\ansi{\fonttbl{\f0 Arial;}}{\info{\title RTF Note}{\author Bob}}{\*\generator TestGen}Hello RTF\par Second line}"#;
+    fs::write(&rtf_path, rtf_bytes).expect("write rtf");
+
+    let preview = load_document_preview(&rtf_path, 0, false).expect("rtf preview");
+    match preview {
+        DocumentPreview::PlainText { text, truncated } => {
+            assert!(!truncated);
+            assert_eq!(text, "Hello RTF\nSecond line");
+        }
+        other => panic!("expected PlainText for RTF, got {other:?}"),
+    }
+
+    let meta = extract_document_metadata(&rtf_path).expect("rtf metadata");
+    let doc = &meta["Document"];
+    assert_eq!(doc.get("Kind").map(String::as_str), Some("Office Document"));
+    assert_eq!(doc.get("Title").map(String::as_str), Some("RTF Note"));
+    assert_eq!(doc.get("Author").map(String::as_str), Some("Bob"));
+
+    #[cfg(target_os = "linux")]
+    {
+        let doc_path = dir.path().join("legacy.doc");
+        fs::write(&doc_path, b"legacy binary doc placeholder").expect("write dummy doc");
+        let doc_preview = load_document_preview(&doc_path, 0, false).expect("doc preview");
+        assert!(
+            matches!(
+                doc_preview,
+                DocumentPreview::Unavailable {
+                    reason: DocumentUnavailableReason::NoPreviewBackend
+                }
+            ),
+            "expected NoPreviewBackend for .doc on Linux, got {doc_preview:?}"
+        );
+    }
+}
+
+#[test]
+fn test_xlsx_and_ods_via_libreoffice_and_calamine() {
+    if !soffice_pipe::is_libreoffice_available() {
+        return;
+    }
+    let Some(soffice) = find_soffice_bin() else {
+        return;
+    };
+
+    let dir = TempDir::new("xlsx_ods");
+    let profile_dir = dir.path().join("lo_profile");
+    fs::create_dir(&profile_dir).expect("create libreoffice profile dir");
+    let profile_arg = OsString::from(format!(
+        "-env:UserInstallation={}",
+        path_to_file_url(&profile_dir)
+    ));
+
+    let csv_path = dir.path().join("inventory.csv");
+    fs::write(&csv_path, "Item,Qty,Unit\nWidget,95,pcs\nGadget,88,box\n").expect("write csv");
+    assert!(!path_starts_with_dash(&csv_path));
+
+    for fmt in ["xlsx", "ods"] {
+        let args: [&OsStr; 11] = [
+            OsStr::new("--headless"),
+            OsStr::new("--nologo"),
+            OsStr::new("--nodefault"),
+            OsStr::new("--nofirststartwizard"),
+            OsStr::new("--norestore"),
+            profile_arg.as_os_str(),
+            OsStr::new("--convert-to"),
+            OsStr::new(fmt),
+            OsStr::new("--outdir"),
+            dir.path().as_os_str(),
+            csv_path.as_os_str(),
+        ];
+        run_external_tool(&soffice, &args, dir.path(), EXTERNAL_TOOL_TIMEOUT);
+
+        let converted = dir.path().join(format!("inventory.{fmt}"));
+        assert!(converted.is_file(), "expected converted {fmt} file");
+
+        let preview = load_document_preview(&converted, 0, false).expect("spreadsheet preview");
+        match preview {
+            DocumentPreview::Spreadsheet { sheets } => {
+                assert_eq!(sheets.len(), 1);
+                let s = &sheets[0];
+                assert_eq!(s.headers, vec!["Item", "Qty", "Unit"]);
+                assert_eq!(
+                    s.rows,
+                    vec![vec!["Widget", "95", "pcs"], vec!["Gadget", "88", "box"]]
+                );
+                assert_eq!(s.total_rows, 2);
+                assert_eq!(s.total_cols, 3);
+                assert!(!s.truncated);
+            }
+            other => panic!("expected Spreadsheet for {fmt}, got {other:?}"),
+        }
+
+        let meta = extract_document_metadata(&converted).expect("spreadsheet metadata");
+        let doc = &meta["Document"];
+        assert_eq!(doc.get("Kind").map(String::as_str), Some("Spreadsheet"));
+        assert_eq!(doc.get("Sheets").map(String::as_str), Some("1"));
+        assert!(doc.contains_key("Sheet Names"));
+    }
+}
+
+#[test]
+fn test_docx_without_embedded_thumbnail_uses_libreoffice_option() {
+    let dir = TempDir::new("docx_no_thumb");
+    let docx_path = dir.path().join("no_embedded_thumb.docx");
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+</Types>"#;
+
+    let rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+</Relationships>"#;
+
+    let core_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>Thumbnail Fallback Doc</dc:title>
+</cp:coreProperties>"#;
+
+    let document_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Hello LibreOffice Thumbnail</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    write_zip_entries(
+        &docx_path,
+        &[
+            (
+                "[Content_Types].xml",
+                content_types,
+                CompressionMethod::Deflated,
+            ),
+            ("_rels/.rels", rels, CompressionMethod::Deflated),
+            ("docProps/core.xml", core_xml, CompressionMethod::Deflated),
+            (
+                "word/document.xml",
+                document_xml,
+                CompressionMethod::Deflated,
+            ),
+        ],
+    );
+
+    // Without LibreOffice (and with no embedded or XDG/OS thumbnail), returns Ok(None).
+    assert!(
+        generate_document_thumbnail_with_options(&docx_path, 128, 128, false)
+            .expect("disabled libreoffice thumb result")
+            .is_none(),
+        "DOCX without embedded thumbnail should return Ok(None) when libreoffice=false"
+    );
+
+    if soffice_pipe::is_libreoffice_available() {
+        let thumb = generate_document_thumbnail_with_options(&docx_path, 128, 128, true)
+            .expect("enabled libreoffice thumb result")
+            .expect("LibreOffice should render page-0 thumbnail for DOCX without embedded preview");
+        assert!(thumb.width > 0 && thumb.width <= 128);
+        assert!(thumb.height > 0 && thumb.height <= 128);
+        assert_eq!(
+            thumb.rgba.len(),
+            (thumb.width as usize) * (thumb.height as usize) * 4
+        );
+
+        let preview = load_document_preview(&docx_path, 0, true)
+            .expect("docx preview after LibreOffice thumbnail");
+        assert!(
+            matches!(preview, DocumentPreview::PagedImage { page_index: 0, total_pages, .. } if total_pages >= 1),
+            "expected PagedImage from cached LibreOffice PDF, got {preview:?}"
+        );
+    }
 }

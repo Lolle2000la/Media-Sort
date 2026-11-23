@@ -3,7 +3,7 @@ use std::path::Path;
 
 use media_sort_core::media_type::DocumentKind;
 
-use crate::media::document::{comic, epub, pdf, text};
+use crate::media::document::{comic, epub, office, pdf, text};
 use crate::metadata::{MetadataError, build_file_section, merge_sections};
 
 /// Extracts `"File"` and `"Document"` metadata sections for the metadata inspector.
@@ -21,6 +21,8 @@ pub fn extract_document_metadata(
         Some(DocumentKind::Pdf) => "PDF",
         Some(DocumentKind::Comic) => "Comic Archive",
         Some(DocumentKind::Epub) => "EPUB",
+        Some(DocumentKind::Spreadsheet) => "Spreadsheet",
+        Some(DocumentKind::Office) => "Office Document",
         Some(DocumentKind::Markdown) => "Markdown",
         Some(DocumentKind::PlainText) => "Text",
         None => "Document",
@@ -33,6 +35,9 @@ pub fn extract_document_metadata(
         Some(DocumentKind::Pdf) => pdf::extract_pdf_metadata(path),
         Some(DocumentKind::Comic) => comic::extract_comic_metadata(path),
         Some(DocumentKind::Epub) => epub::extract_epub_metadata(path),
+        Some(DocumentKind::Office) | Some(DocumentKind::Spreadsheet) => {
+            office::extract_office_metadata(path)
+        }
         Some(DocumentKind::Markdown) | Some(DocumentKind::PlainText) => {
             text::extract_text_metadata(path)
         }

@@ -99,6 +99,7 @@ pub enum SettingsMessage {
     OpenAdvanced,
     ToggleHardwareDecoding,
     ToggleShowDocumentsByDefault(bool),
+    ToggleLibreOfficePreview(bool),
 }
 
 #[derive(Debug, Clone, serde::Deserialize, iced_automation_macros::AutomationKeycap)]

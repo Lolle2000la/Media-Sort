@@ -109,6 +109,7 @@ pub fn credits_dialog_view(state: &AppState) -> Element<'_, Message> {
 
     let libraries = vec![
         ("bytemuck", "https://github.com/Lokathor/bytemuck"),
+        ("calamine", "https://github.com/tafia/calamine"),
         ("Chrono", "https://github.com/chronotope/chrono"),
         ("Clap", "https://github.com/clap-rs/clap"),
         ("csv", "https://github.com/BurntSushi/rust-csv"),

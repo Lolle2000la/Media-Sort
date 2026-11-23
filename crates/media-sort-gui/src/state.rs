@@ -681,6 +681,22 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_media_document() {
+        for ext in [
+            "pdf", "cbz", "cb7", "cbt", "cbr", "epub", "xlsx", "xlsm", "xlsb", "xls", "ods",
+            "docx", "odt", "pptx", "odp", "doc", "ppt", "rtf", "txt", "md", "markdown", "csv",
+            "tsv", "PDF", "Md",
+        ] {
+            let name = format!("sample.{ext}");
+            assert_eq!(
+                classify_media(Path::new(&name), true).0,
+                MediaType::Document,
+                "ext={ext}"
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_media_unknown_fallback() {
         assert_eq!(
             classify_media(Path::new("test.xyz"), true).0,
@@ -688,7 +704,7 @@ mod tests {
         );
         assert_eq!(classify_media(Path::new("test"), true).0, MediaType::Image);
         assert_eq!(
-            classify_media(Path::new("test.doc"), true).0,
+            classify_media(Path::new("test.bin"), true).0,
             MediaType::Image
         );
     }
