@@ -4264,6 +4264,8 @@ dependencies = [
  "rayon",
  "resvg",
  "rodio",
+ "serde",
+ "serde_json",
  "sevenz-rust2",
  "symphonia 0.6.1",
  "tar",

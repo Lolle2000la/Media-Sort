@@ -8,6 +8,7 @@ use super::DecodedImage;
 
 pub mod comic;
 pub mod epub;
+pub mod lok_worker;
 pub mod office;
 pub mod os_preview;
 pub mod pdf;

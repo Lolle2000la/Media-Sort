@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use media_sort_backend::media::DecodedImage;
 use media_sort_backend::media::document::{
-    DocumentPreview, DocumentUnavailableReason, generate_document_thumbnail,
-    generate_document_thumbnail_with_options, load_document_preview, soffice_pipe,
+    DocumentPreview, DocumentUnavailableReason, extract_fast_document_thumbnail,
+    generate_document_thumbnail, generate_document_thumbnail_with_options, load_document_preview,
+    render_libreoffice_document_thumbnail, soffice_pipe,
 };
 use media_sort_backend::metadata::document_meta::extract_document_metadata;
 use media_sort_backend::process::{
@@ -1569,6 +1570,103 @@ fn test_docx_without_embedded_thumbnail_uses_libreoffice_option() {
         assert!(
             matches!(preview, DocumentPreview::PagedImage { page_index: 0, total_pages, .. } if total_pages >= 1),
             "expected PagedImage from cached LibreOffice PDF, got {preview:?}"
+        );
+    }
+}
+
+#[test]
+fn test_docx_fast_vs_libreoffice_thumbnail_and_first_page_pdf() {
+    let dir = TempDir::new("docx_fast_vs_lo");
+    let docx_path = dir.path().join("multipage_no_thumb.docx");
+
+    let content_types = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+</Types>"#;
+
+    let rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+</Relationships>"#;
+
+    let core_xml = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>Multi-Page LibreOffice Test</dc:title>
+</cp:coreProperties>"#;
+
+    let mut doc_body = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+"#,
+    );
+    for i in 1..=60 {
+        doc_body.push_str(&format!(
+            "    <w:p><w:r><w:t>Paragraph {i}: fast vs LibreOffice thumbnail &amp; first-page PDF test content.</w:t></w:r></w:p>\n"
+        ));
+    }
+    doc_body.push_str(
+        "    <w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>\n    <w:p><w:r><w:t>Second page marker paragraph.</w:t></w:r></w:p>\n",
+    );
+    for i in 61..=100 {
+        doc_body.push_str(&format!(
+            "    <w:p><w:r><w:t>Page two paragraph {i}: additional multi-page content.</w:t></w:r></w:p>\n"
+        ));
+    }
+    doc_body.push_str("  </w:body>\n</w:document>");
+
+    write_zip_entries(
+        &docx_path,
+        &[
+            (
+                "[Content_Types].xml",
+                content_types,
+                CompressionMethod::Deflated,
+            ),
+            ("_rels/.rels", rels, CompressionMethod::Deflated),
+            ("docProps/core.xml", core_xml, CompressionMethod::Deflated),
+            (
+                "word/document.xml",
+                doc_body.as_bytes(),
+                CompressionMethod::Deflated,
+            ),
+        ],
+    );
+
+    assert!(
+        extract_fast_document_thumbnail(&docx_path, 128, 128)
+            .expect("fast thumbnail result")
+            .is_none(),
+        "DOCX without embedded or OS thumbnail should return Ok(None) from extract_fast_document_thumbnail"
+    );
+
+    if soffice_pipe::is_libreoffice_available() {
+        let pdf_path = soffice_pipe::convert_first_page_to_pdf_path(&docx_path)
+            .expect("convert_first_page_to_pdf_path result")
+            .expect("LibreOffice should produce a first-page PDF");
+        assert!(
+            pdf_path.is_file(),
+            "first-page PDF path should exist on disk: {}",
+            pdf_path.display()
+        );
+        assert_eq!(
+            pdf_path.extension().and_then(|e| e.to_str()),
+            Some("pdf"),
+            "converted first-page path should have .pdf extension"
+        );
+
+        let thumb = render_libreoffice_document_thumbnail(&docx_path, 128, 128)
+            .expect("render_libreoffice_document_thumbnail result")
+            .expect("LibreOffice should render a thumbnail for multi-page DOCX");
+        assert!(thumb.width > 0 && thumb.width <= 128);
+        assert!(thumb.height > 0 && thumb.height <= 128);
+        assert_eq!(
+            thumb.rgba.len(),
+            (thumb.width as usize) * (thumb.height as usize) * 4
         );
     }
 }

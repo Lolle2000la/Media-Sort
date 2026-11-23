@@ -48,7 +48,7 @@ pub fn extract_fast_office_thumbnail(
 
 /// Renders a thumbnail for an Office or spreadsheet document via LibreOffice.
 ///
-/// Converts via `soffice_pipe::convert_to_pdf_path` and renders page 0 via
+/// Converts page 1 via `soffice_pipe::convert_first_page_to_pdf_path` and renders page 0 via
 /// `pdf::render_pdf_thumbnail`. Errors are logged at debug level and converted to `Ok(None)` so
 /// missing or unsupported Office thumbnails never pollute `media_errors`.
 pub fn render_libreoffice_thumbnail(
@@ -62,7 +62,7 @@ pub fn render_libreoffice_thumbnail(
         return Ok(None);
     }
 
-    match soffice_pipe::convert_to_pdf_path(path) {
+    match soffice_pipe::convert_first_page_to_pdf_path(path) {
         Ok(Some(pdf_path)) => match pdf::render_pdf_thumbnail(&pdf_path, max_width, max_height) {
             Ok(img) => Ok(img),
             Err(err) => {

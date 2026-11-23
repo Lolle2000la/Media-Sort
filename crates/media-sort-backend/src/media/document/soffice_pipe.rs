@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use super::{DocumentError, MAX_PDF_FILE_BYTES, path_to_file_url, read_file_capped};
+use super::{DocumentError, MAX_PDF_FILE_BYTES, lok_worker, path_to_file_url, read_file_capped};
 use crate::cache::{BoundedLru, CanonicalFileKey};
 use crate::process::{
     find_executable_on_path, is_sandboxed, new_hidden_command, path_starts_with_dash,
@@ -15,6 +15,7 @@ use crate::process::{
 };
 
 const PDF_CACHE_CAPACITY: usize = 32;
+const THUMB_PDF_CACHE_CAPACITY: usize = 64;
 const SOFFICE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDIO_CAPTURE_BYTES: u64 = 64 * 1024;
 
@@ -197,6 +198,7 @@ struct SofficeRuntime {
     profile_dir: OnceLock<ManagedTempDir>,
     cache_dir: OnceLock<ManagedTempDir>,
     pdf_cache: Mutex<DiskPdfCache>,
+    thumb_pdf_cache: Mutex<DiskPdfCache>,
     exec_lock: Mutex<()>,
     temp_counter: AtomicU64,
     cache_file_counter: AtomicU64,
@@ -220,6 +222,10 @@ impl SofficeRuntime {
             cache_dir: OnceLock::new(),
             pdf_cache: Mutex::new(DiskPdfCache::new(
                 NonZeroUsize::new(PDF_CACHE_CAPACITY).expect("PDF_CACHE_CAPACITY is non-zero"),
+            )),
+            thumb_pdf_cache: Mutex::new(DiskPdfCache::new(
+                NonZeroUsize::new(THUMB_PDF_CACHE_CAPACITY)
+                    .expect("THUMB_PDF_CACHE_CAPACITY is non-zero"),
             )),
             exec_lock: Mutex::new(()),
             temp_counter: AtomicU64::new(0),
@@ -275,6 +281,14 @@ impl SofficeRuntime {
         cache.get(key)
     }
 
+    fn thumb_cache_get(&self, key: &CanonicalFileKey) -> Option<PathBuf> {
+        let mut cache = self
+            .thumb_pdf_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.get(key)
+    }
+
     fn cache_insert(&self, key: CanonicalFileKey, pdf_path: PathBuf) {
         let mut cache = self
             .pdf_cache
@@ -283,7 +297,26 @@ impl SofficeRuntime {
         cache.insert(key, pdf_path);
     }
 
-    fn persist_cached_pdf(&self, produced_pdf: &Path) -> Result<PathBuf, DocumentError> {
+    fn thumb_cache_insert(&self, key: CanonicalFileKey, pdf_path: PathBuf) {
+        let mut cache = self
+            .thumb_pdf_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.insert(key, pdf_path);
+    }
+
+    fn stage_conversion(&self, canonical: &Path) -> Result<StagedConversion, DocumentError> {
+        match &self.root_dir {
+            Some(root) => StagedConversion::new_in(root, canonical, &self.temp_counter),
+            None => StagedConversion::new(canonical, &self.temp_counter),
+        }
+    }
+
+    fn persist_cached_pdf(
+        &self,
+        produced_pdf: &Path,
+        prefix: &str,
+    ) -> Result<PathBuf, DocumentError> {
         let pdf_len = std::fs::metadata(produced_pdf)?.len();
         if pdf_len == 0 {
             return Err(DocumentError::Message(
@@ -298,7 +331,7 @@ impl SofficeRuntime {
 
         let cache_dir = self.persistent_cache_dir()?;
         let seq = self.cache_file_counter.fetch_add(1, Ordering::Relaxed);
-        let cached_pdf = cache_dir.join(format!("doc-{seq}.pdf"));
+        let cached_pdf = cache_dir.join(format!("{prefix}-{seq}.pdf"));
         if std::fs::rename(produced_pdf, &cached_pdf).is_err() {
             std::fs::copy(produced_pdf, &cached_pdf)?;
         }
@@ -369,7 +402,7 @@ impl SofficeRuntime {
             })?
         };
 
-        self.persist_cached_pdf(&produced_pdf)
+        self.persist_cached_pdf(&produced_pdf, "doc")
     }
 
     fn convert_to_pdf_path_with_staged(
@@ -387,6 +420,41 @@ impl SofficeRuntime {
             return Ok(Some(cached));
         }
 
+        // Defer copying the source file until after the fast cache check misses.
+        let staged = match pre_staged {
+            Some(s) => s,
+            None => self.stage_conversion(&canonical)?,
+        };
+        let lok_out = staged.output_path("lok-out.pdf");
+
+        match lok_worker::convert_to_pdf(
+            staged.staged_input(),
+            &lok_out,
+            None,
+            lok_worker::Priority::High,
+        ) {
+            lok_worker::LokOutcome::Ok => match self.persist_cached_pdf(&lok_out, "doc") {
+                Ok(cached_pdf) => {
+                    self.cache_insert(key, cached_pdf.clone());
+                    return Ok(Some(cached_pdf));
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %err,
+                        "LOK produced invalid PDF output; falling back to soffice CLI"
+                    );
+                }
+            },
+            lok_worker::LokOutcome::Fallback(reason) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    reason = %reason,
+                    "LOK conversion fell back to soffice CLI"
+                );
+            }
+        }
+
         // Serialize headless LibreOffice invocations because concurrent runs sharing the
         // persistent profile/UNO locks would fail or deadlock.
         let _exec_guard = self
@@ -398,18 +466,60 @@ impl SofficeRuntime {
             return Ok(Some(cached));
         }
 
-        // Defer copying the source file until after both cache checks miss.
-        let staged = match pre_staged {
-            Some(s) => s,
-            None => match &self.root_dir {
-                Some(root) => StagedConversion::new_in(root, &canonical, &self.temp_counter)?,
-                None => StagedConversion::new(&canonical, &self.temp_counter)?,
-            },
-        };
-
         let pdf_path = self.run_soffice_conversion_on_staged(&soffice, &staged)?;
         self.cache_insert(key, pdf_path.clone());
         Ok(Some(pdf_path))
+    }
+
+    fn convert_first_page_to_pdf_path(
+        &self,
+        path: &Path,
+    ) -> Result<Option<PathBuf>, DocumentError> {
+        if self.find_soffice().is_none() {
+            return Ok(None);
+        }
+
+        let (canonical, key) = canonical_key_with_limit(path)?;
+
+        if let Some(cached_full) = self.cache_get(&key) {
+            return Ok(Some(cached_full));
+        }
+        if let Some(cached_thumb) = self.thumb_cache_get(&key) {
+            return Ok(Some(cached_thumb));
+        }
+
+        let staged = self.stage_conversion(&canonical)?;
+        let lok_out = staged.output_path("lok-thumb.pdf");
+
+        match lok_worker::convert_to_pdf(
+            staged.staged_input(),
+            &lok_out,
+            Some("1"),
+            lok_worker::Priority::Low,
+        ) {
+            lok_worker::LokOutcome::Ok => match self.persist_cached_pdf(&lok_out, "thumb") {
+                Ok(cached_pdf) => {
+                    self.thumb_cache_insert(key, cached_pdf.clone());
+                    return Ok(Some(cached_pdf));
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %err,
+                        "LOK produced invalid first-page PDF; falling back to full conversion"
+                    );
+                }
+            },
+            lok_worker::LokOutcome::Fallback(reason) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    reason = %reason,
+                    "LOK first-page conversion fell back to full soffice conversion"
+                );
+            }
+        }
+
+        self.convert_to_pdf_path_with_staged(path, Some(staged))
     }
 }
 
@@ -420,6 +530,12 @@ impl Drop for SofficeRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.clear();
+
+        let mut thumb_cache = self
+            .thumb_pdf_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        thumb_cache.clear();
     }
 }
 
@@ -441,9 +557,10 @@ pub fn session_guard() -> SofficeSessionGuard {
     SofficeSessionGuard { _private: () }
 }
 
-/// Tears down the global LibreOffice runtime, deleting cached PDFs and temporary profile/cache
-/// directories once any in-flight conversion finishes.
+/// Tears down the global LibreOfficeKit worker and LibreOffice runtime, deleting cached PDFs and
+/// temporary profile/cache directories once any in-flight conversion finishes.
 pub fn shutdown() {
+    lok_worker::shutdown();
     let rt = {
         let mut slot = RUNTIME
             .lock()
@@ -477,14 +594,31 @@ pub fn find_soffice() -> Option<PathBuf> {
 
 /// Converts an Office document at `path` to a cached `.pdf` file on disk via LibreOffice.
 ///
-/// Runs headless `soffice --convert-to pdf` under `exec_lock` with a reusable process-scoped
-/// `UserInstallation` profile. Maintains a 32-entry LRU disk cache keyed by
+/// Prefers the persistent LibreOfficeKit worker subprocess (`Priority::High`) when registered and
+/// falls back to headless `soffice --convert-to pdf` under `exec_lock` with a reusable
+/// process-scoped `UserInstallation` profile. Maintains a 32-entry LRU disk cache keyed by
 /// `(canonical_path, file_len, modified_nanos)` so thumbnail generation and preview page flipping
 /// share the same converted PDF without re-invoking LibreOffice.
 ///
 /// Returns `Ok(None)` when LibreOffice is unavailable or the process is sandboxed.
 pub fn convert_to_pdf_path(path: &Path) -> Result<Option<PathBuf>, DocumentError> {
     convert_to_pdf_path_with_staged(path, None)
+}
+
+/// Converts page 1 of an Office document at `path` to a cached `.pdf` file for thumbnail
+/// rendering.
+///
+/// Reuses an existing full-document entry in `pdf_cache` or a 64-entry `thumb_pdf_cache` hit
+/// before requesting a low-priority `PageRange="1"` conversion from the LibreOfficeKit worker.
+/// Falls back to [`convert_to_pdf_path_with_staged`] reusing the already-staged input file when
+/// LOK is unavailable or fails.
+///
+/// Returns `Ok(None)` when LibreOffice is unavailable or the process is sandboxed.
+pub fn convert_first_page_to_pdf_path(path: &Path) -> Result<Option<PathBuf>, DocumentError> {
+    if is_sandboxed() {
+        return Ok(None);
+    }
+    runtime().convert_first_page_to_pdf_path(path)
 }
 
 /// Internal variant of [`convert_to_pdf_path`] that can reuse an already-staged copy of `path`
@@ -733,6 +867,7 @@ mod tests {
         let profile_dir;
         let cache_dir;
         let cached_pdf;
+        let cached_thumb_pdf;
 
         {
             let rt = SofficeRuntime::new_in(root.path().to_path_buf());
@@ -746,9 +881,19 @@ mod tests {
 
             let produced = root.path().join("produced.pdf");
             std::fs::write(&produced, b"%PDF-1.4\n").unwrap();
-            cached_pdf = rt.persist_cached_pdf(&produced).expect("persist pdf");
+            cached_pdf = rt
+                .persist_cached_pdf(&produced, "doc")
+                .expect("persist pdf");
             assert!(cached_pdf.is_file());
             assert!(cached_pdf.starts_with(&cache_dir));
+
+            let produced_thumb = root.path().join("produced-thumb.pdf");
+            std::fs::write(&produced_thumb, b"%PDF-1.4\n").unwrap();
+            cached_thumb_pdf = rt
+                .persist_cached_pdf(&produced_thumb, "thumb")
+                .expect("persist thumb pdf");
+            assert!(cached_thumb_pdf.is_file());
+            assert!(cached_thumb_pdf.starts_with(&cache_dir));
 
             let key = CanonicalFileKey {
                 path: root.path().join("doc.docx"),
@@ -757,9 +902,21 @@ mod tests {
             };
             rt.cache_insert(key.clone(), cached_pdf.clone());
             assert_eq!(rt.cache_get(&key), Some(cached_pdf.clone()));
+
+            let thumb_key = CanonicalFileKey {
+                path: root.path().join("thumb.docx"),
+                file_len: 56,
+                modified_nanos: 78,
+            };
+            rt.thumb_cache_insert(thumb_key.clone(), cached_thumb_pdf.clone());
+            assert_eq!(
+                rt.thumb_cache_get(&thumb_key),
+                Some(cached_thumb_pdf.clone())
+            );
         }
 
         assert!(!cached_pdf.exists());
+        assert!(!cached_thumb_pdf.exists());
         assert!(!cache_dir.exists());
         assert!(!profile_dir.exists());
     }
