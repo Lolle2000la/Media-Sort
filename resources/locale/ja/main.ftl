@@ -50,6 +50,7 @@ keybindings-documents-section = ドキュメント
 keybindings-management = 管理
 keybindings-selection = 選択
 keybindings-search = 検索
+keybindings-filter = フィルター
 keybindings-metadata = メタデータ
 keybindings-open = 開く
 keybindings-pinned = ピン留め
@@ -79,6 +80,7 @@ keybindings-undo = 元に戻す
 keybindings-redo = やり直し
 keybindings-previous-page = 前のページ / シート
 keybindings-next-page = 次のページ / シート
+keybindings-toggle-filter-mode = メディア種別でフィルター...（「Esc」で終了）
 
 # Other UI
 ui-folder = フォルダ
@@ -209,6 +211,8 @@ filter-images = 画像
 filter-video = 動画
 filter-audio = 音声
 filter-documents = ドキュメント
+filter-mode-tooltip = メディア種別でフィルター
+filter-mode-hint = 1–4 / ←→ Space · 0 すべて · Esc
 
 # ドキュメントプレビュー
 doc-loading = ドキュメントを読み込み中...

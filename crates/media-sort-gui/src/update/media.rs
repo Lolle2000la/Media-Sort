@@ -1,7 +1,7 @@
 use iced::Task;
 
 use crate::message::{MediaMessage, Message};
-use crate::state::AppState;
+use crate::state::{AppState, MediaTypeFilter};
 
 /// Thin grid coordinator delegating file operations, thumbnails, metadata,
 /// image loading, and entry selection to focused submodules.
@@ -35,6 +35,7 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             }
         }
         MediaMessage::SearchFocused => {
+            state.media_grid.filter_mode.exit();
             state.media_grid.search.focused = true;
             iced::widget::operation::focus(crate::view::search_bar::SEARCH_INPUT_ID.clone())
         }
@@ -122,41 +123,46 @@ pub fn handle_media_message(state: &mut AppState, msg: MediaMessage) -> Task<Mes
             }
             Task::none()
         }
-        MediaMessage::ToggleTypeFilter(ty) => {
-            let previously_selected_path = state.media_grid.selected_index.and_then(|idx| {
-                state
-                    .media_grid
-                    .filtered_entries()
-                    .get(idx)
-                    .map(|entry| entry.path.clone())
-            });
+        MediaMessage::ToggleTypeFilter(ty) => apply_type_filter_change(state, |f| f.toggle(ty)),
+        MediaMessage::ResetTypeFilters => apply_type_filter_change(state, |f| f.reset_all()),
+    }
+}
 
-            state.media_grid.type_filter.toggle(ty);
+fn apply_type_filter_change(
+    state: &mut AppState,
+    mutate: impl FnOnce(&mut MediaTypeFilter),
+) -> Task<Message> {
+    let previously_selected_path = state.media_grid.selected_index.and_then(|idx| {
+        state
+            .media_grid
+            .filtered_entries()
+            .get(idx)
+            .map(|entry| entry.path.clone())
+    });
 
-            let filtered = state.media_grid.filtered_entries();
-            if filtered.is_empty() {
-                drop(filtered);
-                state.media_grid.selected_index = None;
-                state.clear_active_preview();
-                Task::none()
-            } else {
-                let preserved_idx = previously_selected_path.and_then(|prev_path| {
-                    filtered.iter().position(|entry| entry.path == prev_path)
-                });
-                drop(filtered);
-                if let Some(idx) = preserved_idx {
-                    state.media_grid.selected_index = Some(idx);
-                    Task::batch(vec![
-                        super::thumbnails::load_visible_thumbnails(state),
-                        super::scroll::scroll_to_selected_entry(state, idx),
-                    ])
-                } else {
-                    Task::batch(vec![
-                        super::thumbnails::load_visible_thumbnails(state),
-                        super::preview::select_and_load_entry(state, 0),
-                    ])
-                }
-            }
+    mutate(&mut state.media_grid.type_filter);
+
+    let filtered = state.media_grid.filtered_entries();
+    if filtered.is_empty() {
+        drop(filtered);
+        state.media_grid.selected_index = None;
+        state.clear_active_preview();
+        Task::none()
+    } else {
+        let preserved_idx = previously_selected_path
+            .and_then(|prev_path| filtered.iter().position(|entry| entry.path == prev_path));
+        drop(filtered);
+        if let Some(idx) = preserved_idx {
+            state.media_grid.selected_index = Some(idx);
+            Task::batch(vec![
+                super::thumbnails::load_visible_thumbnails(state),
+                super::scroll::scroll_to_selected_entry(state, idx),
+            ])
+        } else {
+            Task::batch(vec![
+                super::thumbnails::load_visible_thumbnails(state),
+                super::preview::select_and_load_entry(state, 0),
+            ])
         }
     }
 }
