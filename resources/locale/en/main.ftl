@@ -50,6 +50,7 @@ keybindings-documents-section = Documents
 keybindings-management = Management
 keybindings-selection = Selection
 keybindings-search = Search
+keybindings-filter = Filter
 keybindings-metadata = Metadata
 keybindings-open = Open
 keybindings-pinned = Pinned
@@ -79,6 +80,7 @@ keybindings-undo = Undo
 keybindings-redo = Redo
 keybindings-previous-page = Previous page / sheet
 keybindings-next-page = Next page / sheet
+keybindings-toggle-filter-mode = Filter by media type... (press 'Esc' to leave)
 
 # Other UI
 ui-folder = Folder
@@ -209,6 +211,8 @@ filter-images = Images
 filter-video = Video
 filter-audio = Audio
 filter-documents = Documents
+filter-mode-tooltip = Filter by media type
+filter-mode-hint = 1–4 / ←→ Space · 0 All · Esc
 
 # Document preview
 doc-loading = Loading document...

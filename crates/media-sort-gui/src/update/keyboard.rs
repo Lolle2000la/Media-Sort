@@ -6,7 +6,7 @@ use media_sort_core::settings::keybindings::{Key, KeyAction};
 use crate::message::{
     AudioMessage, DocumentMessage, FolderMessage, MediaMessage, Message, SettingsMessage,
 };
-use crate::state::{AppState, SettingsUiState};
+use crate::state::{AppState, FilterModeState, SettingsUiState};
 use crate::subscriptions::keyboard;
 
 /// Whether a top-level modal dialog (settings, credits, or update prompt) is
@@ -146,6 +146,14 @@ pub fn handle_key_captured(
         };
     }
 
+    if ctrl && key == Key::Character('Q') {
+        return Task::done(Message::Quit);
+    }
+
+    if state.media_grid.filter_mode.active {
+        return handle_filter_mode_key(state, key, ctrl, shift, alt);
+    }
+
     if matches!(
         key,
         Key::Space
@@ -158,10 +166,6 @@ pub fn handle_key_captured(
             | Key::AudioVolumeMute
     ) {
         return handle_playback_key(state, key);
-    }
-
-    if ctrl && key == Key::Character('Q') {
-        return Task::done(Message::Quit);
     }
 
     match key {
@@ -275,6 +279,10 @@ pub fn handle_key_captured(
             KeyAction::NextPage if active_media_type(state) == Some(MediaType::Document) => {
                 return super::document::handle_document_message(state, DocumentMessage::NextPage);
             }
+            KeyAction::ToggleFilterMode => {
+                state.media_grid.filter_mode.enter();
+                return Task::none();
+            }
             KeyAction::Undo | KeyAction::Redo | KeyAction::PreviousPage | KeyAction::NextPage => {}
         }
     }
@@ -288,6 +296,58 @@ pub fn handle_key_captured(
     {
         let digit = c.to_digit(10).expect("c is checked to be an ascii digit") as u8;
         return Task::done(Message::Folder(FolderMessage::PinShortcut(digit)));
+    }
+
+    Task::none()
+}
+
+fn handle_filter_mode_key(
+    state: &mut AppState,
+    key: Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) -> Task<Message> {
+    let binding = &state.settings.keybindings.toggle_filter_mode;
+    let matches_toggle_filter =
+        binding.key == key && binding.ctrl == ctrl && binding.shift == shift && binding.alt == alt;
+
+    if (key == Key::Escape && !ctrl && !shift && !alt) || matches_toggle_filter {
+        state.media_grid.filter_mode.exit();
+        return Task::none();
+    }
+
+    if !ctrl && !shift && !alt {
+        match key {
+            Key::ArrowLeft => {
+                state.media_grid.filter_mode.step(-1);
+                return Task::none();
+            }
+            Key::ArrowRight => {
+                state.media_grid.filter_mode.step(1);
+                return Task::none();
+            }
+            Key::Space | Key::Enter => {
+                let ty = state.media_grid.filter_mode.focused_media_type();
+                return super::media::handle_media_message(
+                    state,
+                    MediaMessage::ToggleTypeFilter(ty),
+                );
+            }
+            Key::Character(c) if ('1'..='4').contains(&c) => {
+                let idx = (c as usize) - ('1' as usize);
+                let ty = FilterModeState::FILTER_ORDER[idx];
+                state.media_grid.filter_mode.focused_chip = idx;
+                return super::media::handle_media_message(
+                    state,
+                    MediaMessage::ToggleTypeFilter(ty),
+                );
+            }
+            Key::Character('0') => {
+                return super::media::handle_media_message(state, MediaMessage::ResetTypeFilters);
+            }
+            _ => {}
+        }
     }
 
     Task::none()

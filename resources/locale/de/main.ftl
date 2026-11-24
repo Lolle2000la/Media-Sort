@@ -50,6 +50,7 @@ keybindings-documents-section = Dokumente
 keybindings-management = Verwaltung
 keybindings-selection = Auswahl
 keybindings-search = Suche
+keybindings-filter = Filter
 keybindings-metadata = Metadaten
 keybindings-open = Öffnen
 keybindings-pinned = Angeheftet
@@ -79,6 +80,7 @@ keybindings-undo = Rückgängig
 keybindings-redo = Wiederherstellen
 keybindings-previous-page = Vorherige Seite / Tabelle
 keybindings-next-page = Nächste Seite / Tabelle
+keybindings-toggle-filter-mode = Nach Medientyp filtern... („Esc“ zum Verlassen drücken)
 
 # Other UI
 ui-folder = Ordner
@@ -209,6 +211,8 @@ filter-images = Bilder
 filter-video = Videos
 filter-audio = Audio
 filter-documents = Dokumente
+filter-mode-tooltip = Nach Medientyp filtern
+filter-mode-hint = 1–4 / ←→ Leertaste · 0 Alle · Esc
 
 # Dokumentvorschau
 doc-loading = Dokument wird geladen...

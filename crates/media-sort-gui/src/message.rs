@@ -177,6 +177,8 @@ pub enum MediaMessage {
     RevealInExplorer(PathBuf),
     #[serde(skip_deserializing)]
     ToggleTypeFilter(MediaType),
+    #[serde(skip_deserializing)]
+    ResetTypeFilters,
 }
 
 #[derive(Debug, Clone)]

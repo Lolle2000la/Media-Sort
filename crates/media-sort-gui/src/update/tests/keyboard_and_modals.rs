@@ -352,3 +352,201 @@ fn test_space_and_media_keys_route_by_active_media_type() {
     assert_eq!(state.audio.volume, audio_vol_before);
     assert!(video_rx.try_recv().is_err());
 }
+
+#[test]
+fn test_filter_mode_leaves_plain_digits_free_when_inactive() {
+    let (root, file, dest) = setup_temp_dir_with_files("filter_mode_digits_free");
+    let mut state = AppState::new(SettingsStore::default());
+    state.open_folder(&root);
+    drain_async_scan(&mut state);
+    state.pin_folder(&dest);
+    state.media_grid.selected_index = Some(0);
+
+    for ch in ['0', '1', '2', '3', '4'] {
+        assert_eq!(
+            crate::subscriptions::keyboard::find_matching_action(
+                &state.settings.keybindings,
+                Key::Character(ch),
+                false,
+                false,
+                false,
+            ),
+            None
+        );
+        let _ = handle_key_captured(&mut state, Key::Character(ch), false, false, false);
+        assert!(!state.media_grid.filter_mode.active);
+        assert!(state.media_grid.type_filter.images);
+        assert!(state.media_grid.type_filter.video);
+        assert!(state.media_grid.type_filter.audio);
+        assert!(state.media_grid.type_filter.documents);
+    }
+
+    let task = handle_key_captured(&mut state, Key::Character('1'), false, false, true);
+    let _ = task;
+    let _ = update(&mut state, Message::Folder(FolderMessage::PinShortcut(1)));
+    assert!(!file.exists());
+    assert!(dest.join("test_image.jpg").exists());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn test_filter_mode_enter_toggle_digits_arrows_reset_and_exit() {
+    let mut state = AppState::new(SettingsStore::default());
+    let p_a = PathBuf::from("/a");
+    let p_b = PathBuf::from("/b");
+    state.folder.folder_tree = vec![
+        FolderNode {
+            path: p_a.clone(),
+            name: "a".into(),
+            ..FolderNode::default()
+        },
+        FolderNode {
+            path: p_b,
+            name: "b".into(),
+            ..FolderNode::default()
+        },
+    ];
+    state.folder.set_selected(p_a.clone(), 0);
+    state.media_grid.entries = vec![
+        make_media_entry("/test/photo.jpg", MediaType::Image),
+        make_media_entry("/test/clip.mp4", MediaType::Video),
+        make_media_entry("/test/song.mp3", MediaType::Audio),
+        make_media_entry("/test/notes.txt", MediaType::Document),
+    ];
+    state.media_grid.rebuild_lower_names();
+    state.media_grid.selected_index = Some(0);
+
+    // 'T' enters Filter Mode with focus on chip 0 (Images).
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(state.media_grid.filter_mode.active);
+    assert_eq!(state.media_grid.filter_mode.focused_chip, 0);
+
+    // '1' and '3' toggle Images and Audio while staying in Filter Mode.
+    let _ = handle_key_captured(&mut state, Key::Character('1'), false, false, false);
+    assert!(state.media_grid.filter_mode.active);
+    assert_eq!(state.media_grid.filter_mode.focused_chip, 0);
+    assert!(!state.media_grid.type_filter.images);
+
+    let _ = handle_key_captured(&mut state, Key::Character('3'), false, false, false);
+    assert!(state.media_grid.filter_mode.active);
+    assert_eq!(state.media_grid.filter_mode.focused_chip, 2);
+    assert!(!state.media_grid.type_filter.audio);
+    assert_eq!(state.media_grid.filtered_entries().len(), 2);
+
+    // ArrowRight / ArrowLeft wrap focused_chip (0..=3); Space / Enter toggle focused chip.
+    let _ = handle_key_captured(&mut state, Key::ArrowRight, false, false, false);
+    assert_eq!(state.media_grid.filter_mode.focused_chip, 3);
+    let _ = handle_key_captured(&mut state, Key::ArrowRight, false, false, false);
+    assert_eq!(state.media_grid.filter_mode.focused_chip, 0);
+    let _ = handle_key_captured(&mut state, Key::ArrowLeft, false, false, false);
+    assert_eq!(state.media_grid.filter_mode.focused_chip, 3);
+
+    // Toggle Documents (chip 3) off with Space, then Video (chip 1) off with Enter.
+    let _ = handle_key_captured(&mut state, Key::Space, false, false, false);
+    assert!(!state.media_grid.type_filter.documents);
+    let _ = handle_key_captured(&mut state, Key::ArrowRight, false, false, false);
+    let _ = handle_key_captured(&mut state, Key::ArrowRight, false, false, false);
+    assert_eq!(state.media_grid.filter_mode.focused_chip, 1);
+    let _ = handle_key_captured(&mut state, Key::Enter, false, false, false);
+    assert!(!state.media_grid.type_filter.video);
+    assert!(state.media_grid.filtered_entries().is_empty());
+    assert_eq!(state.media_grid.selected_index, None);
+
+    // '0' resets all 4 filters to enabled.
+    let _ = handle_key_captured(&mut state, Key::Character('0'), false, false, false);
+    assert!(state.media_grid.type_filter.is_all_enabled());
+    assert_eq!(state.media_grid.filtered_entries().len(), 4);
+    assert_eq!(state.media_grid.selected_index, Some(0));
+
+    // Unrelated keys do not mutate folder/media while Filter Mode is active.
+    let _ = handle_key_captured(&mut state, Key::Character('S'), false, false, false);
+    let _ = handle_key_captured(&mut state, Key::Delete, false, false, false);
+    assert_eq!(state.folder.selected_folder, Some(p_a));
+    assert_eq!(state.media_grid.entries.len(), 4);
+
+    // Esc exits Filter Mode, after which '1' is ignored again.
+    let _ = handle_key_captured(&mut state, Key::Escape, false, false, false);
+    assert!(!state.media_grid.filter_mode.active);
+    let _ = handle_key_captured(&mut state, Key::Character('1'), false, false, false);
+    assert!(state.media_grid.type_filter.images);
+
+    // 'T' enters and 'T' again exits Filter Mode.
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(state.media_grid.filter_mode.active);
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(!state.media_grid.filter_mode.active);
+}
+
+#[test]
+fn test_filter_mode_blocked_when_search_focused_or_modal_open_and_search_exits_mode() {
+    let mut state = AppState::new(SettingsStore::default());
+    state.media_grid.entries = vec![
+        make_media_entry("/a.jpg", MediaType::Image),
+        make_media_entry("/b.mp4", MediaType::Video),
+    ];
+    state.media_grid.rebuild_lower_names();
+
+    // Entering Filter Mode, then focusing search exits Filter Mode.
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(state.media_grid.filter_mode.active);
+    let _ = update(&mut state, Message::Media(MediaMessage::SearchFocused));
+    assert!(!state.media_grid.filter_mode.active);
+    assert!(state.media_grid.search.focused);
+
+    // 'T' is blocked while search is focused.
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(!state.media_grid.filter_mode.active);
+
+    // 'T' is blocked while a modal is open.
+    state.media_grid.search.focused = false;
+    state.settings_ui = SettingsUiState::Settings;
+    assert!(is_modal_open(&state));
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(!state.media_grid.filter_mode.active);
+
+    // Closing modal restores 'T' dispatch.
+    state.settings_ui = SettingsUiState::Hidden;
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(state.media_grid.filter_mode.active);
+}
+
+#[test]
+fn test_remapped_filter_mode_key_enters_and_exits() {
+    let mut state = AppState::new(SettingsStore::default());
+    state.media_grid.entries = vec![
+        make_media_entry("/a.jpg", MediaType::Image),
+        make_media_entry("/b.mp4", MediaType::Video),
+    ];
+    state.media_grid.rebuild_lower_names();
+
+    let _ = update(
+        &mut state,
+        Message::Settings(SettingsMessage::OpenKeybindings),
+    );
+    let _ = update(
+        &mut state,
+        Message::Settings(SettingsMessage::EditKeyBinding(KeyAction::ToggleFilterMode)),
+    );
+    let _ = update(
+        &mut state,
+        Message::KeyCaptured(Key::F5, false, false, false),
+    );
+    assert_eq!(state.settings.keybindings.toggle_filter_mode.key, Key::F5);
+    assert!(state.settings.dirty);
+
+    // Close settings modal so global shortcuts are active.
+    state.settings_ui = SettingsUiState::Hidden;
+
+    // Default 'T' is now inactive.
+    let _ = handle_key_captured(&mut state, Key::Character('T'), false, false, false);
+    assert!(!state.media_grid.filter_mode.active);
+
+    // Remapped F5 enters and exits Filter Mode.
+    let _ = handle_key_captured(&mut state, Key::F5, false, false, false);
+    assert!(state.media_grid.filter_mode.active);
+    let _ = handle_key_captured(&mut state, Key::Character('1'), false, false, false);
+    assert!(!state.media_grid.type_filter.images);
+    let _ = handle_key_captured(&mut state, Key::F5, false, false, false);
+    assert!(!state.media_grid.filter_mode.active);
+}

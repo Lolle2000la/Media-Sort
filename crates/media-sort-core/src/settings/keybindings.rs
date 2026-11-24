@@ -211,6 +211,8 @@ pub struct KeyBindings {
     pub previous_page: KeyBinding,
     #[serde(default = "default_next_page_binding")]
     pub next_page: KeyBinding,
+    #[serde(default = "default_toggle_filter_mode_binding")]
+    pub toggle_filter_mode: KeyBinding,
 }
 
 fn default_reveal_in_file_manager_binding() -> KeyBinding {
@@ -223,6 +225,10 @@ fn default_previous_page_binding() -> KeyBinding {
 
 fn default_next_page_binding() -> KeyBinding {
     KeyBinding::new(Key::PageDown)
+}
+
+fn default_toggle_filter_mode_binding() -> KeyBinding {
+    KeyBinding::new(Key::Character('T'))
 }
 
 impl Default for KeyBindings {
@@ -253,6 +259,7 @@ impl Default for KeyBindings {
             reveal_in_file_manager: default_reveal_in_file_manager_binding(),
             previous_page: default_previous_page_binding(),
             next_page: default_next_page_binding(),
+            toggle_filter_mode: default_toggle_filter_mode_binding(),
         }
     }
 }
@@ -289,6 +296,7 @@ pub enum KeyActionSubsection {
     Management,
     Selection,
     Search,
+    Filter,
     Metadata,
     Open,
     Pinned,
@@ -307,6 +315,7 @@ impl KeyActionSubsection {
             Self::Management => "keybindings-management",
             Self::Selection => "keybindings-selection",
             Self::Search => "keybindings-search",
+            Self::Filter => "keybindings-filter",
             Self::Metadata => "keybindings-metadata",
             Self::Open => "keybindings-open",
             Self::Pinned => "keybindings-pinned",
@@ -343,6 +352,7 @@ pub enum KeyAction {
     RevealInFileManager,
     PreviousPage,
     NextPage,
+    ToggleFilterMode,
 }
 
 impl KeyAction {
@@ -379,6 +389,7 @@ impl KeyAction {
             Self::RevealInFileManager => "reveal_in_file_manager",
             Self::PreviousPage => "previous_page",
             Self::NextPage => "next_page",
+            Self::ToggleFilterMode => "toggle_filter_mode",
         }
     }
 
@@ -410,6 +421,7 @@ impl KeyAction {
             Self::RevealInFileManager => "keybindings-reveal-in-file-manager",
             Self::PreviousPage => "keybindings-previous-page",
             Self::NextPage => "keybindings-next-page",
+            Self::ToggleFilterMode => "keybindings-toggle-filter-mode",
         }
     }
 
@@ -424,6 +436,7 @@ impl KeyAction {
             | Self::GoLeft
             | Self::GoRight
             | Self::SearchImages
+            | Self::ToggleFilterMode
             | Self::ToggleMetadataPanel => KeyActionSection::Images,
             Self::CreateFolder
             | Self::FolderUp
@@ -458,6 +471,7 @@ impl KeyAction {
             | Self::FolderDown
             | Self::FolderRight => Some(KeyActionSubsection::Selection),
             Self::SearchImages => Some(KeyActionSubsection::Search),
+            Self::ToggleFilterMode => Some(KeyActionSubsection::Filter),
             Self::ToggleMetadataPanel => Some(KeyActionSubsection::Metadata),
             Self::OpenFolder | Self::OpenSelectedFolder => Some(KeyActionSubsection::Open),
             Self::Pin
@@ -498,6 +512,7 @@ impl KeyAction {
             Self::RevealInFileManager => &kb.reveal_in_file_manager,
             Self::PreviousPage => &kb.previous_page,
             Self::NextPage => &kb.next_page,
+            Self::ToggleFilterMode => &kb.toggle_filter_mode,
         }
     }
 
@@ -529,6 +544,7 @@ impl KeyAction {
             Self::RevealInFileManager => &mut kb.reveal_in_file_manager,
             Self::PreviousPage => &mut kb.previous_page,
             Self::NextPage => &mut kb.next_page,
+            Self::ToggleFilterMode => &mut kb.toggle_filter_mode,
         }
     }
 }
@@ -679,12 +695,13 @@ mod tests {
         use crate::settings::keybindings::KeyAction;
 
         let actions: Vec<KeyAction> = KeyAction::iter().collect();
-        assert_eq!(actions.len(), 25);
+        assert_eq!(actions.len(), 26);
         assert_eq!(actions[0], KeyAction::MoveToFolder);
         assert_eq!(actions[3], KeyAction::Rename);
         assert_eq!(actions[22], KeyAction::RevealInFileManager);
         assert_eq!(actions[23], KeyAction::PreviousPage);
         assert_eq!(actions[24], KeyAction::NextPage);
+        assert_eq!(actions[25], KeyAction::ToggleFilterMode);
     }
 
     #[test]
@@ -789,5 +806,35 @@ mod tests {
         assert!(!deserialized.next_page.shift);
         assert!(!deserialized.next_page.alt);
         assert!(!deserialized.next_page.meta);
+    }
+
+    #[test]
+    fn test_keybindings_toggle_filter_mode_default() {
+        use crate::settings::keybindings::{KeyAction, KeyBindings};
+
+        let kbs = KeyBindings::default();
+        let binding = KeyAction::ToggleFilterMode.binding(&kbs);
+        assert_eq!(binding.key, Key::Character('T'));
+        assert!(!binding.ctrl);
+        assert!(!binding.shift);
+        assert!(!binding.alt);
+        assert!(!binding.meta);
+    }
+
+    #[test]
+    fn test_keybindings_omitted_toggle_filter_mode_uses_default() {
+        use crate::settings::keybindings::{KeyAction, KeyBindings};
+
+        let mut value = serde_json::to_value(KeyBindings::default()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("toggle_filter_mode");
+
+        let deserialized: KeyBindings = serde_json::from_value(value).unwrap();
+        let binding = KeyAction::ToggleFilterMode.binding(&deserialized);
+        assert_eq!(binding.key, Key::Character('T'));
+        assert!(!binding.ctrl);
+        assert!(!binding.shift);
+        assert!(!binding.alt);
+        assert!(!binding.meta);
     }
 }

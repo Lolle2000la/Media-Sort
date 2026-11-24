@@ -50,6 +50,55 @@ impl MediaTypeFilter {
     pub fn is_all_enabled(&self) -> bool {
         self.images && self.video && self.audio && self.documents
     }
+
+    /// Enables all four media type filters.
+    pub fn reset_all(&mut self) {
+        self.images = true;
+        self.video = true;
+        self.audio = true;
+        self.documents = true;
+    }
+}
+
+/// Keyboard-driven Filter Mode state for toggling media type filter chips.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FilterModeState {
+    pub active: bool,
+    pub focused_chip: usize,
+}
+
+impl FilterModeState {
+    pub const CHIP_COUNT: usize = 4;
+    pub const FILTER_ORDER: [MediaType; Self::CHIP_COUNT] = [
+        MediaType::Image,
+        MediaType::Video,
+        MediaType::Audio,
+        MediaType::Document,
+    ];
+
+    /// Enters Filter Mode and focuses the first filter chip.
+    pub fn enter(&mut self) {
+        self.active = true;
+        self.focused_chip = 0;
+    }
+
+    /// Exits Filter Mode and resets chip focus.
+    pub fn exit(&mut self) {
+        self.active = false;
+        self.focused_chip = 0;
+    }
+
+    /// Moves chip focus by `delta`, wrapping around `CHIP_COUNT`.
+    pub fn step(&mut self, delta: isize) {
+        let len = Self::CHIP_COUNT as isize;
+        let current = (self.focused_chip % Self::CHIP_COUNT) as isize;
+        self.focused_chip = (current + delta).rem_euclid(len) as usize;
+    }
+
+    /// Returns the [`MediaType`] corresponding to the currently focused chip.
+    pub fn focused_media_type(self) -> MediaType {
+        Self::FILTER_ORDER[self.focused_chip % Self::CHIP_COUNT]
+    }
 }
 
 /// Snapshot of the media grid's scrollable viewport. Updated whenever the
@@ -87,6 +136,7 @@ pub struct MediaGridState {
     pub selected_index: Option<usize>,
     pub search: SearchState,
     pub type_filter: MediaTypeFilter,
+    pub filter_mode: FilterModeState,
     pub scroll: MediaGridScrollState,
     pub scan_receiver: Option<mpsc::Receiver<MediaEntry>>,
     /// Index to select after the background scan completes.
@@ -112,6 +162,7 @@ impl fmt::Debug for MediaGridState {
             .field("selected_index", &self.selected_index)
             .field("search", &self.search)
             .field("type_filter", &self.type_filter)
+            .field("filter_mode", &self.filter_mode)
             .field("scroll", &self.scroll)
             .field("scan_receiver", &self.scan_receiver.is_some())
             .field("pending_select_index", &self.pending_select_index)

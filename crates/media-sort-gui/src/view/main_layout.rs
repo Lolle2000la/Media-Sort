@@ -1,9 +1,9 @@
-use iced::widget::{column, container, mouse_area, row, text};
+use iced::widget::{column, container, mouse_area, row, text, tooltip};
 use iced::{Color, Element, Length};
-use media_sort_core::media_type::MediaType;
+use media_sort_core::settings::keybindings::KeyAction;
 
 use crate::message::{FolderMessage, MediaMessage, Message, SettingsMessage};
-use crate::state::AppState;
+use crate::state::{AppState, FilterModeState};
 use crate::view::{
     control_panel, folder_panel, media_grid, media_preview, metadata_panel, search_bar,
 };
@@ -253,34 +253,97 @@ fn divider_view<'a>(on_press: Message) -> Element<'a, Message> {
 }
 
 fn filter_chips_view(state: &AppState) -> Element<'_, Message> {
-    let [img_count, vid_count, aud_count, doc_count] = state.media_grid.type_counts();
-    let chips = [
-        (MediaType::Image, state.l10n.tr("filter-images"), img_count),
-        (MediaType::Video, state.l10n.tr("filter-video"), vid_count),
-        (MediaType::Audio, state.l10n.tr("filter-audio"), aud_count),
-        (
-            MediaType::Document,
-            state.l10n.tr("filter-documents"),
-            doc_count,
-        ),
-    ]
-    .into_iter()
-    .map(|(ty, label, count)| {
-        let active = state.media_grid.type_filter.is_enabled(ty);
-        iced::widget::button(text(format!("{label} ({count})")).size(11))
-            .padding([3, 8])
-            .style(if active {
-                iced::widget::button::primary
-            } else {
-                iced::widget::button::secondary
-            })
-            .on_press(Message::Media(MediaMessage::ToggleTypeFilter(ty)))
-            .into()
-    });
+    let filter_mode = state.media_grid.filter_mode;
+    let counts = state.media_grid.type_counts();
+    let labels = [
+        state.l10n.tr("filter-images"),
+        state.l10n.tr("filter-video"),
+        state.l10n.tr("filter-audio"),
+        state.l10n.tr("filter-documents"),
+    ];
+    let shortcut = crate::subscriptions::keyboard::format_keybinding(
+        KeyAction::ToggleFilterMode.binding(&state.settings.keybindings),
+    );
+    let tip_label = format!("{} ({shortcut})", state.l10n.tr("filter-mode-tooltip"));
 
-    row(chips)
+    let mut items: Vec<Element<'_, Message>> = FilterModeState::FILTER_ORDER
+        .into_iter()
+        .zip(labels)
+        .zip(counts)
+        .enumerate()
+        .map(|(idx, ((ty, label), count))| {
+            let active = state.media_grid.type_filter.is_enabled(ty);
+            let is_focused = filter_mode.active && filter_mode.focused_chip == idx;
+            let chip_label = if filter_mode.active {
+                format!("[{}] {label} ({count})", idx + 1)
+            } else {
+                format!("{label} ({count})")
+            };
+            let btn = iced::widget::button(text(chip_label).size(11))
+                .padding([3, 8])
+                .style(move |theme, status| filter_chip_style(theme, status, active, is_focused))
+                .on_press(Message::Media(MediaMessage::ToggleTypeFilter(ty)));
+            let tip_content = container(text(tip_label.clone()).size(11))
+                .padding(6)
+                .style(|theme: &iced::Theme| {
+                    let palette = theme.palette();
+                    let border_color = Color {
+                        a: 0.15,
+                        ..palette.text
+                    };
+                    iced::widget::container::Style {
+                        background: Some(iced::Background::Color(palette.background)),
+                        border: iced::Border {
+                            radius: 4.0.into(),
+                            width: 1.0,
+                            color: border_color,
+                        },
+                        ..iced::widget::container::Style::default()
+                    }
+                });
+            tooltip(btn, tip_content, tooltip::Position::Bottom).into()
+        })
+        .collect();
+
+    if filter_mode.active {
+        items.push(
+            text(state.l10n.tr("filter-mode-hint"))
+                .size(11)
+                .style(|theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(Color {
+                        a: 0.65,
+                        ..theme.palette().text
+                    }),
+                })
+                .into(),
+        );
+    }
+
+    row(items)
         .spacing(6)
         .align_y(iced::Alignment::Center)
         .wrap()
         .into()
+}
+
+fn filter_chip_style(
+    theme: &iced::Theme,
+    status: iced::widget::button::Status,
+    active: bool,
+    is_focused: bool,
+) -> iced::widget::button::Style {
+    let mut style = if active {
+        iced::widget::button::primary(theme, status)
+    } else {
+        iced::widget::button::secondary(theme, status)
+    };
+    if is_focused {
+        style.border.width = 2.0;
+        style.border.color = if active {
+            theme.extended_palette().primary.base.text
+        } else {
+            theme.palette().primary
+        };
+    }
+    style
 }

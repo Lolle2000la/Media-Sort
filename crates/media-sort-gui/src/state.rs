@@ -17,7 +17,9 @@ pub use create_folder_modal::CreateFolderModalState;
 pub use document::DocumentPreviewState;
 pub use drag_drop::DragDropState;
 pub use folder::FolderState;
-pub use media_grid::{MediaGridScrollState, MediaGridState, SearchState};
+pub use media_grid::{
+    FilterModeState, MediaGridScrollState, MediaGridState, MediaTypeFilter, SearchState,
+};
 pub use metadata::MetadataPanelState;
 pub use rename_modal::RenameModalState;
 pub use settings_ui::SettingsUiState;
