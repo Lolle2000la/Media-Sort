@@ -149,6 +149,13 @@ mod tests {
             "comic.cbt",
             "comic.cbr",
             "book.epub",
+            "report.docx",
+            "sheet.xlsx",
+            "deck.pptx",
+            "doc.odt",
+            "calc.ods",
+            "note.rtf",
+            "legacy.doc",
             "readme.md",
             "guide.MARKDOWN",
             "notes.txt",
@@ -164,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_classify_media_unknown_fallback() {
-        for p in ["test.xyz", "test", "test.doc", "test."] {
+        for p in ["test.xyz", "test", "test.bin", "test."] {
             assert_eq!(classify_media(Path::new(p), true), (MediaType::Image, None));
         }
     }

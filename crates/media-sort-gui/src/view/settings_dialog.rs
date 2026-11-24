@@ -353,6 +353,40 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                     .on_toggle(|_| Message::Settings(SettingsMessage::ToggleHardwareDecoding))
                     .size(16);
 
+            let enable_libreoffice_cb =
+                checkbox(state.settings.advanced.enable_libreoffice_preview)
+                    .label(state.l10n.tr("settings-enable-libreoffice-preview"))
+                    .on_toggle(|val| {
+                        Message::Settings(SettingsMessage::ToggleLibreOfficePreview(val))
+                    })
+                    .size(16);
+            let libreoffice_desc = text(state.l10n.tr("settings-enable-libreoffice-preview-desc"))
+                .size(11)
+                .style(|theme: &iced::Theme| text::Style {
+                    color: Some(Color {
+                        a: 0.7,
+                        ..theme.palette().text
+                    }),
+                });
+            let libreoffice_detected =
+                media_sort_backend::media::document::soffice_pipe::is_libreoffice_available();
+            let libreoffice_status = text(if libreoffice_detected {
+                state.l10n.tr("settings-libreoffice-detected")
+            } else {
+                state.l10n.tr("settings-libreoffice-not-found")
+            })
+            .size(11)
+            .style(move |theme: &iced::Theme| text::Style {
+                color: Some(if libreoffice_detected {
+                    theme.palette().success
+                } else {
+                    Color {
+                        a: 0.7,
+                        ..theme.palette().text
+                    }
+                }),
+            });
+
             let advanced_col = column![
                 column![
                     text(state.l10n.tr("settings-video"))
@@ -361,7 +395,17 @@ pub fn settings_dialog_view(state: &AppState) -> Element<'_, Message> {
                     disable_hw_decoding_cb,
                 ]
                 .spacing(8),
-            ];
+                column![
+                    text(state.l10n.tr("filter-documents"))
+                        .font(BOLD_FONT)
+                        .size(14),
+                    enable_libreoffice_cb,
+                    libreoffice_desc,
+                    libreoffice_status,
+                ]
+                .spacing(6),
+            ]
+            .spacing(16);
 
             scrollable(advanced_col).height(Length::Fill).into()
         }

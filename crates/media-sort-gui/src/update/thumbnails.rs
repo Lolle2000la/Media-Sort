@@ -24,6 +24,7 @@ pub fn load_visible_thumbnails(state: &mut AppState) -> Task<Message> {
         .collect();
     drop(filtered);
 
+    let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
     let checker = state.cache.thumbnail_tracker.clone_checker();
     let mut tasks = Vec::new();
     for path in load_queue {
@@ -35,7 +36,13 @@ pub fn load_visible_thumbnails(state: &mut AppState) -> Task<Message> {
                 .get(&path)
                 .copied()
                 .unwrap_or((MediaType::Image, None));
-            tasks.push(load_thumbnail(path, checker.clone(), media_type, animated));
+            tasks.push(load_thumbnail(
+                path,
+                checker.clone(),
+                media_type,
+                animated,
+                enable_libreoffice,
+            ));
         }
     }
     Task::batch(tasks)
@@ -52,6 +59,7 @@ pub fn load_around_selection(
         .thumbnail_tracker
         .retain_paths(paths_meta.iter().map(|(p, _, _)| p.clone()));
 
+    let enable_libreoffice = state.settings.advanced.enable_libreoffice_preview;
     let checker = state.cache.thumbnail_tracker.clone_checker();
     let mut tasks = Vec::new();
     for (p, mt, animated) in paths_meta {
@@ -59,7 +67,13 @@ pub fn load_around_selection(
             && !state.cache.media_errors.has_error(&p)
             && state.cache.thumbnails_in_flight.insert(p.clone())
         {
-            tasks.push(load_thumbnail(p, checker.clone(), mt, animated));
+            tasks.push(load_thumbnail(
+                p,
+                checker.clone(),
+                mt,
+                animated,
+                enable_libreoffice,
+            ));
         }
     }
     Task::batch(tasks)
@@ -70,6 +84,7 @@ pub fn load_thumbnail(
     visible_tracker: Arc<RwLock<HashSet<PathBuf>>>,
     media_type: MediaType,
     animated: Option<bool>,
+    enable_libreoffice: bool,
 ) -> Task<Message> {
     Task::perform(
         async move {
@@ -77,7 +92,13 @@ pub fn load_thumbnail(
             let keep: KeepPredicate =
                 Arc::new(move |p| visible_tracker.read().is_ok_and(|guard| guard.contains(p)));
             let result = tokio::task::spawn_blocking(move || {
-                generate_thumbnail_with_options(&path_clone, media_type, animated, Some(keep))
+                generate_thumbnail_with_options(
+                    &path_clone,
+                    media_type,
+                    animated,
+                    enable_libreoffice,
+                    Some(keep),
+                )
             })
             .await
             .unwrap_or(Ok(None));

@@ -48,6 +48,7 @@ description: config.toml を介した Media Sort の詳細な手動構成手順�
 メディアデコードに影響する上級ユーザー向けのオプションです：
 
 - **`disable_hardware_decoding`** (真偽値): ソフトウェア動画デコード（`hwdec=no`）を強制します。`false`（デフォルト）の場合、ハードウェアデコード（`hwdec=auto-copy`）が使用され、動画フレームはネイティブ解像度で描画されます。`true`の場合、フレームはCPUデコードの負荷を抑えるために960×540に制限されます。(デフォルト: `false`)
+- **`enable_libreoffice_preview`** (真偽値): `true` の場合、Flatpak/Snapサンドボックス外でホスト上の `soffice` / `libreoffice` バイナリが検出されると、純粋なRustのXML/テキスト抽出の代わりにヘッドレスLibreOfficeによるPDF変換でWord、PowerPoint、OpenDocumentのプレビューを描画します。(デフォルト: `true`)
 
 ---
 

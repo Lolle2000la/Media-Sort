@@ -37,6 +37,10 @@ pub static NATIVE_DOCUMENT_EXTS: &[&str] = &[
     "cbz", "cb7", "cbt", "cbr",
     // Ebooks
     "epub",
+    // Spreadsheets
+    "xlsx", "xlsm", "xlsb", "xls", "ods",
+    // Word / presentation / rich documents
+    "docx", "odt", "pptx", "odp", "doc", "ppt", "rtf",
     // Plain text / Markdown / delimited tables
     "txt", "md", "markdown", "csv", "tsv",
 ];
@@ -57,6 +61,8 @@ pub enum DocumentKind {
     Pdf,
     Comic,
     Epub,
+    Spreadsheet,
+    Office,
     Markdown,
     PlainText,
 }
@@ -68,6 +74,8 @@ impl DocumentKind {
             "pdf" => Some(Self::Pdf),
             "cbz" | "cb7" | "cbt" | "cbr" => Some(Self::Comic),
             "epub" => Some(Self::Epub),
+            "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" => Some(Self::Spreadsheet),
+            "docx" | "odt" | "pptx" | "odp" | "doc" | "ppt" | "rtf" => Some(Self::Office),
             "md" | "markdown" => Some(Self::Markdown),
             "txt" | "csv" | "tsv" => Some(Self::PlainText),
             _ => None,
@@ -340,6 +348,18 @@ mod tests {
         assert!(exts.contains(&"cbt"));
         assert!(exts.contains(&"cbr"));
         assert!(exts.contains(&"epub"));
+        assert!(exts.contains(&"xlsx"));
+        assert!(exts.contains(&"xlsm"));
+        assert!(exts.contains(&"xlsb"));
+        assert!(exts.contains(&"xls"));
+        assert!(exts.contains(&"ods"));
+        assert!(exts.contains(&"docx"));
+        assert!(exts.contains(&"odt"));
+        assert!(exts.contains(&"pptx"));
+        assert!(exts.contains(&"odp"));
+        assert!(exts.contains(&"doc"));
+        assert!(exts.contains(&"ppt"));
+        assert!(exts.contains(&"rtf"));
         assert!(exts.contains(&"md"));
         assert!(exts.contains(&"markdown"));
         assert!(exts.contains(&"txt"));
@@ -383,6 +403,18 @@ mod tests {
             DocumentKind::from_extension("epub"),
             Some(DocumentKind::Epub)
         );
+        for ext in ["xlsx", "XLSM", "xlsb", "xls", "ods"] {
+            assert_eq!(
+                DocumentKind::from_extension(ext),
+                Some(DocumentKind::Spreadsheet)
+            );
+        }
+        for ext in ["docx", "ODT", "pptx", "odp", "doc", "ppt", "rtf"] {
+            assert_eq!(
+                DocumentKind::from_extension(ext),
+                Some(DocumentKind::Office)
+            );
+        }
         assert_eq!(
             DocumentKind::from_extension("md"),
             Some(DocumentKind::Markdown)
