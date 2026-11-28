@@ -16,7 +16,7 @@
     "dependencies": {
         "@astrojs/mdx": "^8.0.3",
         "@astrojs/react": "^7.0.1",
-        "@astrojs/starlight": "^0.42.6",
+        "@astrojs/starlight": "^0.43.0",
         "@lucide/astro": "^1.24.0",
         "@types/react": "^19.2.17",
         "@types/react-dom": "^19.2.3",
